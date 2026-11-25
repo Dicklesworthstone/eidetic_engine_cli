@@ -5730,6 +5730,26 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
+    /// Plants `link -> target` the way an attacker would: owned by an unprivileged user.
+    /// `reject_existing_symlink_component` deliberately follows ROOT-owned links (system links
+    /// such as macOS `/tmp`), so under root, as on the RCH workers, a plain `symlink` plants a
+    /// link production rightly trusts and the rejection these tests pin never runs.
+    #[cfg(unix)]
+    fn plant_symlink(target: &Path, link: &Path) -> TestResult {
+        use std::os::unix::fs::MetadataExt as _;
+        const UNPRIVILEGED: u32 = 65_534;
+        std::os::unix::fs::symlink(target, link).map_err(|error| error.to_string())?;
+        let owner = fs::symlink_metadata(link)
+            .map_err(|error| error.to_string())?
+            .uid();
+        if owner == 0 {
+            std::os::unix::fs::lchown(link, Some(UNPRIVILEGED), Some(UNPRIVILEGED)).map_err(
+                |error| format!("give {} an unprivileged owner: {error}", link.display()),
+            )?;
+        }
+        Ok(())
+    }
+
     fn init_test_audit_db(workspace: &Path) -> Result<DbConnection, String> {
         let db_path = workspace.join(".ee").join("ee.db");
         if let Some(parent) = db_path.parent() {
@@ -6266,8 +6286,8 @@ memories_revised = 3
                     timeout_ms,
                 ));
                 if program == "am" {
-                    // A real hanging subprocess tests the watchdog; it is not
-                    // evidence about availability of an Agent Mail service.
+                    // Handoff no longer spawns `am` (see the zero-call assertion below). If a
+                    // change brings the spawn back, this hangs it so the watchdog is exercised.
                     SystemSwarmBriefCommandRunner.run(
                         "/bin/sh",
                         &["-c", "sleep 4"],
@@ -6341,12 +6361,16 @@ memories_revised = 3
                 .any(|value| value == "agent_mail_unavailable")
         );
         let calls_before = observed.calls.borrow().clone();
+        // Since a7a572358 (#80) handoff always passes an Agent Mail snapshot path (default
+        // `.ee/agent-mail-snapshot.json`), so the toolchain row reads that file instead of running
+        // `am`. This fixture writes no snapshot, hence the `agent_mail_unavailable` codes above.
         assert_eq!(
             calls_before
                 .iter()
                 .filter(|(program, _, _)| program == "am")
                 .count(),
-            1
+            0,
+            "handoff reads the Agent Mail snapshot file and must not spawn `am`"
         );
         assert_eq!(
             calls_before
@@ -6931,7 +6955,7 @@ memories_revised = 3
         let workspace = repo_tempdir()?;
         let outside = repo_tempdir()?;
         let link = workspace.path().join("capsule-link");
-        std::os::unix::fs::symlink(outside.path(), &link).map_err(|error| error.to_string())?;
+        plant_symlink(outside.path(), &link)?;
         let output = link.join("handoff.json");
 
         ensure_symlink_error(
@@ -6958,7 +6982,7 @@ memories_revised = 3
         let dir = repo_tempdir()?;
         let output = create_test_capsule(dir.path(), false, None)?;
         let link = dir.path().join("handoff-link.json");
-        std::os::unix::fs::symlink(&output, &link).map_err(|error| error.to_string())?;
+        plant_symlink(&output, &link)?;
 
         ensure_symlink_error(
             inspect_handoff(&InspectOptions {
@@ -7026,7 +7050,7 @@ memories_revised = 3
         let dir = repo_tempdir()?;
         let output = create_test_capsule(dir.path(), false, None)?;
         let link = dir.path().join("handoff-link.json");
-        std::os::unix::fs::symlink(&output, &link).map_err(|error| error.to_string())?;
+        plant_symlink(&output, &link)?;
 
         ensure_symlink_error(
             resume_handoff(&ResumeOptions {
@@ -7060,7 +7084,7 @@ memories_revised = 3
         let dir = repo_tempdir()?;
         let output = create_test_capsule(dir.path(), false, None)?;
         let link = dir.path().join("handoff-link.json");
-        std::os::unix::fs::symlink(&output, &link).map_err(|error| error.to_string())?;
+        plant_symlink(&output, &link)?;
 
         ensure_symlink_error(
             rotate_handoff_key(&RotateKeyOptions {
@@ -7522,7 +7546,7 @@ memories_revised = 3
         let key_path = dir.path().join("handoff_hmac_key");
         let outside_path = dir.path().join("outside_key");
         fs::write(&outside_path, b"outside sentinel").map_err(|error| error.to_string())?;
-        std::os::unix::fs::symlink(&outside_path, &key_path).map_err(|error| error.to_string())?;
+        plant_symlink(&outside_path, &key_path)?;
 
         let error = expect_domain_error(
             write_private_secret(&key_path, &[7_u8; 32]),
@@ -7592,8 +7616,7 @@ memories_revised = 3
         fs::write(&temp_path, "{}").map_err(|error| error.to_string())?;
         let outside_path = dir.path().join("outside-capsule.json");
         fs::write(&outside_path, "outside capsule").map_err(|error| error.to_string())?;
-        std::os::unix::fs::symlink(&outside_path, &capsule_path)
-            .map_err(|error| error.to_string())?;
+        plant_symlink(&outside_path, &capsule_path)?;
 
         let error = expect_domain_error(
             publish_handoff_temp_file(&temp_path, &capsule_path, "handoff capsule"),
@@ -7630,7 +7653,7 @@ memories_revised = 3
         let temp_path = handoff_temp_publish_path(&capsule_path);
         let outside_path = dir.path().join("outside-capsule.json");
         fs::write(&outside_path, "outside capsule").map_err(|error| error.to_string())?;
-        std::os::unix::fs::symlink(&outside_path, &temp_path).map_err(|error| error.to_string())?;
+        plant_symlink(&outside_path, &temp_path)?;
 
         let error = expect_domain_error(
             publish_handoff_temp_file(&temp_path, &capsule_path, "handoff capsule"),
@@ -7702,7 +7725,7 @@ memories_revised = 3
         let outside_path = dir.path().join("outside-capsule.json");
         fs::write(&outside_path, "{}").map_err(|error| error.to_string())?;
         let link_path = handoffs_dir.join("latest.json");
-        std::os::unix::fs::symlink(&outside_path, &link_path).map_err(|error| error.to_string())?;
+        plant_symlink(&outside_path, &link_path)?;
 
         let error = expect_domain_error(
             find_latest_capsule(dir.path()),

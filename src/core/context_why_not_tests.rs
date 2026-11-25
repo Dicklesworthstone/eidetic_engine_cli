@@ -742,13 +742,17 @@ fn why_not_query_exclusions_have_authoritative_filter_reasons_before_candidate_a
                 assert_eq!(report["primaryReason"], "excluded_by_filter");
                 assert_eq!(report["reasonSource"], "authoritative");
                 assert_eq!(report["retrievalStageReached"], "candidate_filter");
-                assert!(
-                    report["reasonCodes"]
-                        .as_array()
-                        .ok_or("missing filter reason codes")?
-                        .iter()
-                        .any(|code| code == "context_filtered_results")
-                );
+                // Only the native v2 report has `reasonCodes`. The v1 memory report
+                // (`pack::WhyNotSelectedReport`) carries the reason in the fields above.
+                if !memory_v1 {
+                    assert!(
+                        report["reasonCodes"]
+                            .as_array()
+                            .ok_or("missing filter reason codes")?
+                            .iter()
+                            .any(|code| code == "context_filtered_results")
+                    );
+                }
                 let hints = report["counterfactualHints"]
                     .as_array()
                     .ok_or("missing filter hints")?;
