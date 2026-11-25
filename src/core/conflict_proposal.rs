@@ -134,7 +134,10 @@ fn source_hash(
     let held =
         crate::core::memory_lifecycle::pending_memory_review_ids(connection, workspace_id, &[id])
             .map_err(storage_error)?;
-    if seals.get(id).is_some_and(|seal| seal.is_sealed()) || !held.is_empty() {
+    // The source's effective seal, shaped as the one-element (or empty) list the
+    // plan hash has always recorded, so plans over unsealed sources keep their hashes.
+    let source_seals: Vec<_> = seals.get(id).into_iter().collect();
+    if source_seals.iter().any(|seal| seal.is_sealed()) || !held.is_empty() {
         return Err(refusal(
             STALE_CODE,
             "A conflict source is sealed or awaiting memory review.",

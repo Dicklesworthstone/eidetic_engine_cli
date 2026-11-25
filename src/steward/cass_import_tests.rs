@@ -26,7 +26,8 @@ fn cass_import_job_has_explicit_name_and_bounded_defaults() -> TestResult {
             && limit.on_exceed == BudgetExceedAction::Cancel
     }));
     assert!(
-        !crate::steward::BACKGROUND_SCHEDULER_JOB_TYPES.contains(&JobType::CassImport),
+        !crate::steward::implementation::BACKGROUND_SCHEDULER_JOB_TYPES
+            .contains(&JobType::CassImport),
         "external session import must remain opt-in",
     );
     Ok(())
