@@ -11829,14 +11829,7 @@ async fn run_search_inner_with_performance(
             // assembly. Search needs the historical candidates before ranking
             // and truncation, beside the results from the live generation.
             let mut added_tombstones = false;
-            if !retrieval_only
-                && options.include_tombstoned
-                && match options.execution_source_mode() {
-                    SearchSourceMode::LexicalOnly => true,
-                    SearchSourceMode::Hybrid => !options.strict_source_mode,
-                    SearchSourceMode::SemanticOnly => false,
-                }
-            {
+            if !retrieval_only && tombstone_lexical_supplement_allowed(options) {
                 let historical_start = Instant::now();
                 let mut historical = tombstone_snapshot_hits(
                     cx,
@@ -15920,7 +15913,7 @@ async fn global_store_snapshot_frankensearch_hits(
     #[cfg(unix)]
     drop(generation_lease);
     let runtime_fallback::Retrieval {
-        hits: raw_hits,
+        hits: mut raw_hits,
         degraded: retrieval_degraded,
         ..
     } = match search_result {
@@ -15933,9 +15926,76 @@ async fn global_store_snapshot_frankensearch_hits(
         }
     };
     degraded.extend(retrieval_degraded);
+    // A healthy live generation deliberately excludes retired memories. The
+    // admitted global source snapshot still owns their bodies, seals, review
+    // holds and revisions, so an explicit historical request can supplement
+    // that generation without resurrecting its stale indexed projections.
+    // Keep this shared by ordinary search and the pack retrieval handoff.
+    let historical_start = Instant::now();
+    supplement_global_tombstone_hits(cx, options, &memories, &mut raw_hits, degraded).await;
+    trace.record_elapsed("search::globalTombstoneSnapshotRetrieve", historical_start);
     drop(source);
 
     admit_global_store_search_hits(options, memories, raw_hits, preloaded_memories)
+}
+
+fn tombstone_lexical_supplement_allowed(options: &SearchOptions) -> bool {
+    options.include_tombstoned
+        && match options.execution_source_mode() {
+            SearchSourceMode::LexicalOnly => true,
+            SearchSourceMode::Hybrid => !options.strict_source_mode,
+            SearchSourceMode::SemanticOnly => false,
+        }
+}
+
+async fn supplement_global_tombstone_hits(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    memories: &[StoredMemory],
+    hits: &mut Vec<SearchHit>,
+    degraded: &mut Vec<SearchDegradation>,
+) {
+    if !tombstone_lexical_supplement_allowed(options) {
+        return;
+    }
+    let indexed_ids = hits
+        .iter()
+        .map(|hit| hit.doc_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut retired = memories
+        .iter()
+        .filter(|memory| {
+            memory.tombstoned_at.is_some() && !indexed_ids.contains(memory.id.as_str())
+        })
+        .peekable();
+    if retired.peek().is_none() {
+        return;
+    }
+    match source_memory_lexical_hits(cx, options, retired).await {
+        Ok(historical) if !historical.is_empty() => {
+            degraded.push(SearchDegradation {
+                code: "search_tombstone_snapshot_lexical".to_owned(),
+                severity: "low".to_owned(),
+                message: format!(
+                    "Scored {} supplemental tombstone candidates with Frankensearch lexical retrieval over the pinned user-global source archive.",
+                    historical.len()
+                ),
+                repair: None,
+            });
+            hits.extend(historical);
+            sort_search_hits_by_score_order(hits);
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(target: "ee::search", error = %error, "global historical lexical execution failed");
+            degraded.push(SearchDegradation {
+                code: "search_tombstone_snapshot_unavailable".to_owned(),
+                severity: "warning".to_owned(),
+                message: "Supplemental historical lexical retrieval was unavailable: the user-global retired source rows exceeded the source retrieval limit or could not be searched; admitted live index matches remain available.".to_owned(),
+                repair: None,
+            });
+        }
+    }
 }
 
 async fn retrieve_global_store_live_snapshot(
@@ -16051,10 +16111,10 @@ async fn tombstone_snapshot_hits(
     }
 }
 
-async fn source_memory_lexical_hits(
+async fn source_memory_lexical_hits<'memory>(
     cx: &asupersync::Cx,
     options: &SearchOptions,
-    memories: &[StoredMemory],
+    memories: impl IntoIterator<Item = &'memory StoredMemory>,
 ) -> Result<Vec<SearchHit>, String> {
     #[cfg(not(feature = "lexical-bm25"))]
     {
@@ -16065,18 +16125,19 @@ async fn source_memory_lexical_hits(
     {
         use crate::search::LexicalWrite;
         search_checkpoint(cx).map_err(|error| error.to_string())?;
-        let body_bytes = memories.iter().fold(0_u64, |total, memory| {
-            total.saturating_add(memory.content.len() as u64)
-        });
-        if memories.len() > SEARCH_LIVE_SNAPSHOT_MAX_DOCUMENTS as usize
-            || body_bytes > SEARCH_LIVE_SNAPSHOT_MAX_BODY_BYTES
-        {
-            return Err("the complete memory corpus exceeds the source retrieval limit".to_owned());
-        }
-        let mut documents = Vec::with_capacity(memories.len());
+        let mut documents = Vec::new();
+        let mut body_bytes = 0_u64;
         let mut projected_bytes = 0_u64;
         for memory in memories {
             search_checkpoint(cx).map_err(|error| error.to_string())?;
+            body_bytes = body_bytes.saturating_add(memory.content.len() as u64);
+            if documents.len() >= SEARCH_LIVE_SNAPSHOT_MAX_DOCUMENTS as usize
+                || body_bytes > SEARCH_LIVE_SNAPSHOT_MAX_BODY_BYTES
+            {
+                return Err(
+                    "the complete memory corpus exceeds the source retrieval limit".to_owned(),
+                );
+            }
             let document = crate::search::memory_to_document(memory).into_indexable();
             projected_bytes = projected_bytes
                 .saturating_add(document.content.len() as u64)
