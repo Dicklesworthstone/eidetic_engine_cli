@@ -15306,6 +15306,58 @@ pub fn unrelated_context() -> u64 {{
     }
 
     #[test]
+    fn orient_fast_recent_honors_review_holds_and_borrows_the_callers_snapshot() -> TestResult {
+        let (_temp, search, writer) = pack_source_authority_fixture()?;
+        let mut options = context_options_with_coordination_snapshot(PathBuf::new());
+        options.workspace_path = search.workspace_path;
+        options.database_path = search.database_path;
+        options.as_of = search.as_of;
+        options.coordination_snapshot_path = None;
+        options.max_tokens = Some(4_000);
+        options.relevance_floor = Some(0.0);
+        let reader = DbConnection::open_file_read_only(
+            options.database_path.as_ref().ok_or("missing fixture path")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let recent = || -> Result<BTreeSet<String>, String> {
+            super::admit_recent_context_memories_with_connection(&options, 10, Some(&reader))
+                .map(|rows| {
+                    rows.into_iter()
+                        .map(|row| row.item.memory_id.to_string())
+                        .collect()
+                })
+                .map_err(|error| error.to_string())
+        };
+        reader
+            .begin_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        let live = BTreeSet::from([pack_source_authority_id(4)]);
+        assert_eq!(recent()?, live);
+        writer
+            .execute_raw(
+                "UPDATE feedback_quarantine SET status = 'rejected', \
+                 reviewed_at = '2026-07-01T00:00:00Z', reviewed_by = 'reviewer'",
+            )
+            .map_err(|error| error.to_string())?;
+        writer
+            .tombstone_memory(&pack_source_authority_id(4))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(recent()?, live, "the caller still owns its source view");
+        reader
+            .rollback_read_snapshot()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(recent()?, BTreeSet::from([pack_source_authority_id(3)]));
+
+        writer
+            .execute_raw("ALTER TABLE feedback_quarantine RENAME TO unavailable_review_state")
+            .map_err(|error| error.to_string())?;
+        let error = recent().expect_err("unreadable authority must withhold recent snippets");
+        assert!(error.contains("visibility could not be verified"));
+        assert!(!error.contains("unavailable_review_state"));
+        Ok(())
+    }
+
+    #[test]
     fn lexical_pack_fallback_admits_before_limit_and_preserves_global_ownership() -> TestResult {
         let (_temp, options, connection) = pack_source_authority_fixture()?;
         let run = |reference: DateTime<Utc>,

@@ -1703,6 +1703,10 @@ pub(crate) fn admit_recent_context_memories_with_connection(
             .map_err(|error| ContextPackError::Storage(error.to_string()))?;
         &owned_connection
     };
+    // Keep recency, body hydration and every authority read on one view, even
+    // when the caller passed an open connection without a transaction.
+    let snapshot = crate::core::search::RevisionReadSnapshot::begin_or_borrow(connection)
+        .map_err(|error| ContextPackError::Storage(error.to_string()))?;
     let mut degraded = Vec::new();
     let reference_time =
         context_validity_reference_time(options, &options.filters).unwrap_or_else(Utc::now);
@@ -1729,6 +1733,27 @@ pub(crate) fn admit_recent_context_memories_with_connection(
         }
     }
 
+    // A recent, unexpired body can still be under a pending review hold or
+    // inherit a closed seal. Apply the same authority as direct pack search
+    // before tags, snippets or provenance can identify the memory.
+    let ids = memories.keys().map(String::as_str).collect();
+    let mut visibility = Vec::new();
+    let admitted = crate::core::search::admit_local_memory_ids(
+        connection,
+        &ids,
+        reference_time,
+        &mut visibility,
+    );
+    if admitted.is_empty()
+        && visibility
+            .iter()
+            .any(|entry| entry.code == "revision_visibility_unavailable")
+    {
+        return Err(ContextPackError::Storage(
+            "Recent memory visibility could not be verified.".to_owned(),
+        ));
+    }
+    memories.retain(|id, _| admitted.contains(id));
     let mut ordered = memories.values().cloned().collect::<Vec<_>>();
     ordered.sort_by(|left, right| {
         parse_stored_memory_timestamp(&right.created_at)
@@ -1750,16 +1775,6 @@ pub(crate) fn admit_recent_context_memories_with_connection(
             break;
         }
         if !matches!(
-            context_memory_seal_admission(
-                connection,
-                &memory,
-                &mut degraded,
-                "context_candidate_memory_batch_unavailable",
-                ContextResponseSeverity::Medium,
-                "Orient-fast candidate admission",
-            ),
-            ContextMemorySealAdmission::Admit
-        ) || !matches!(
             fallback_memory_validity_visibility(&memory, reference_time, false, false, false),
             FallbackMemoryVisibility::Visible
         ) || !crate::policy::redact_secret_like_content(&memory.content)
@@ -1850,7 +1865,10 @@ pub(crate) fn admit_recent_context_memories_with_connection(
             .then_with(|| left.memory_id.cmp(&right.memory_id))
     });
     candidates.truncate(limit);
-    annotate_attempt_family_multiplicity(connection, &mut candidates)?;
+    annotate_attempt_family_multiplicity_in_current_snapshot(connection, &mut candidates)?;
+    snapshot
+        .finish()
+        .map_err(|error| ContextPackError::Storage(error.to_string()))?;
 
     let budget = TokenBudget::new(options.max_tokens.unwrap_or(4_000))
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
@@ -6776,42 +6794,6 @@ fn sort_context_candidates(candidates: &mut [PackCandidate]) {
             .then_with(|| left.section.cmp(&right.section))
             .then_with(|| left.memory_id.cmp(&right.memory_id))
     });
-}
-
-fn annotate_attempt_family_multiplicity(
-    connection: &DbConnection,
-    candidates: &mut [PackCandidate],
-) -> Result<(), ContextPackError> {
-    if candidates.is_empty() {
-        return Ok(());
-    }
-    if let (Ok(families), Ok(members)) = (
-        connection.query("SELECT 1 FROM attempt_families LIMIT 1", &[]),
-        connection.query("SELECT 1 FROM attempt_family_members LIMIT 1", &[]),
-    ) && families.is_empty()
-        && members.is_empty()
-    {
-        return Ok(());
-    }
-    let memory_ids = candidates
-        .iter()
-        .map(|candidate| candidate.memory_id.to_string())
-        .collect::<Vec<_>>();
-    let batch = connection
-        .get_attempt_family_membership_snapshots_for_memory_ids(&memory_ids)
-        .map_err(|error| {
-            ContextPackError::Pack(format!(
-                "failed to batch-resolve authoritative attempt-family membership: {error}"
-            ))
-        })?;
-    for candidate in candidates {
-        let memory_id = candidate.memory_id.to_string();
-        candidate.attempt_family_multiplicity = batch
-            .by_memory_id
-            .get(&memory_id)
-            .and_then(pack_attempt_family_multiplicity_snapshot);
-    }
-    Ok(())
 }
 
 fn annotate_attempt_family_multiplicity_in_current_snapshot(
