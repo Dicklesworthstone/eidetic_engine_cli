@@ -347,8 +347,9 @@ Hard rules for agents working on this Mac:
    **Four things live on that one volume**, so losing it takes out every
    verification rail at once: the toolchain (above), `CARGO_TARGET_DIR`,
    the per-invocation `TMPDIR`, and the APFS sparse image that the pinned RCH
-   lane uses as its committed-tree export base (`/Volumes/EERCHExport`, created
-   on the USB — see CLAUDE.md). A dropped drive therefore also fails every
+   lane uses as its committed-tree export base (mounted at
+   `/Volumes/USBNVME16TB/temp_agent_space/eerchexport`, inside the only root the
+   build-admission preflight accepts — see CLAUDE.md). A dropped drive therefore also fails every
    dispatch, with `bash: script file read error: Input/output error` and exit
    128 from `scripts/rch_verify.sh` re-execing itself.
 

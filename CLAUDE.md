@@ -871,7 +871,7 @@ of that run's proof and pass it:
 ```bash
 RCH_WORKER=<the worker_id from the previous proof> \
 RCH_VERIFY_ATTEMPT_TIMEOUT_MS=18000000 \
-RCH_VERIFY_COMMITTED_TREE_BASE=/Volumes/EERCHExport/rch-committed-tree \
+RCH_VERIFY_COMMITTED_TREE_BASE=/Volumes/USBNVME16TB/temp_agent_space/eerchexport/rch-committed-tree \
 TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp scripts/rch_verify.sh \
     --pinned-franken-stack --treeish <sha> \
     --build-admission-ee-bin /Users/jemanuel/.local/bin/ee -- \
@@ -957,24 +957,40 @@ are stranded inside it. **The file is retained unmodified per RULE 1** and the
 deletion decision belongs to the operator; do not reach for `fsck_apfs -y`,
 which is a destructive-class repair needing explicit authorization.
 
-The replacement is `ee-rch-export-2.sparseimage`, same `EERCHExport` volname so
-every path below is unchanged. **The hazard is that attaching the ORIGINAL
+The replacement is `ee-rch-export-2.sparseimage`, with the same `EERCHExport`
+volname; where to mount it changed on 2026-11-25 (below). **The hazard is that attaching the ORIGINAL
 succeeds** — `hdiutil attach` returns 0 and the container appears — and only the
 VOLUME fails, after which `RCH_VERIFY_COMMITTED_TREE_BASE` falls through to the
 ExFAT default from `~/.zshenv:62` and every pinned dispatch is refused as an
 AppleDouble shim. The refusal names the right fix in its last sentence ("If that
 image is configured already, it is not currently attached"), but it reads as a
-filesystem problem rather than a dead volume. `ls -d /Volumes/EERCHExport` after
-attaching is the one-command check.
+filesystem problem rather than a dead volume. Checking that the mount point
+exists after attaching is the one-command check.
+
+**MOUNT IT INSIDE THE BUILD ROOT, NOT AT `/Volumes/EERCHExport`.** Measured
+2026-11-25: with the image at its default mount point, every pinned dispatch was
+refused at build admission with `artifact_destination_not_external` and
+`cargo_target_not_external`. The installed `ee` (0.17.0) that runs the preflight
+accepts exactly one external root, `/Volumes/USBNVME16TB/temp_agent_space`, by
+path prefix. It ignores `EE_EXTERNAL_BUILD_ROOT` and does not follow symlinks.
+`/Volumes/EERCHExport` is outside that prefix. Pointing the base at an ExFAT
+directory inside the prefix is refused by the xattr guard, and
+`hdiutil attach -mountpoint` onto a directory on the ExFAT volume fails with
+"Permission denied". What works is attaching without mounting, then mounting the
+APFS volume with `diskutil` on a directory inside the root. With that, admission
+reported workspace, cargo target, tmpdir and artifact destination all
+`external: true`, and two dispatches went on to compile remotely.
 
 ```bash
 # Create ONLY if ee-rch-export-2.sparseimage does not already exist. Never
 # overwrite an existing image: it may hold cached bundles.
 hdiutil create -size 240g -type SPARSE -fs APFS -volname EERCHExport \
     /Volumes/USBNVME16TB/temp_agent_space/tmp/ee-rch-export-2
-hdiutil attach /Volumes/USBNVME16TB/temp_agent_space/tmp/ee-rch-export-2.sparseimage
-ls -d /Volumes/EERCHExport   # MUST exist; attach can succeed while the volume does not mount
-RCH_VERIFY_COMMITTED_TREE_BASE=/Volumes/EERCHExport/rch-committed-tree \
+hdiutil attach -nomount /Volumes/USBNVME16TB/temp_agent_space/tmp/ee-rch-export-2.sparseimage
+diskutil list | grep EERCHExport   # the APFS Volume line's IDENTIFIER, e.g. disk16s1
+diskutil mount -mountPoint /Volumes/USBNVME16TB/temp_agent_space/eerchexport <identifier>
+ls -d /Volumes/USBNVME16TB/temp_agent_space/eerchexport/rch-committed-tree   # MUST exist
+RCH_VERIFY_COMMITTED_TREE_BASE=/Volumes/USBNVME16TB/temp_agent_space/eerchexport/rch-committed-tree \
 TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp scripts/rch_verify.sh \
     --pinned-franken-stack --treeish <sha> \
     --build-admission-ee-bin /Users/jemanuel/.local/bin/ee -- \
