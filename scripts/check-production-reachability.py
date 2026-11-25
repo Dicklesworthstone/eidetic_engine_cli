@@ -126,7 +126,9 @@ NON_CODE_BRACE_MASK_RE = re.compile(
     r"//[^\n]*"
     r"|/\*[\s\S]*?\*/"
     r'|b?r(#*)"[\s\S]*?"\1'
-    r'|b?"(?:\\.|[^"\\])*"'
+    # `[\s\S]`, not `.`: a backslash before a newline continues a Rust string, and `.` does not match
+    # the newline, so with it every later quote in the file paired with the wrong partner.
+    r'|b?"(?:\\[\s\S]|[^"\\])*"'
     r"|b?'(?:\\.|[^'\\])'"
 )
 
@@ -764,7 +766,23 @@ def self_test() -> int:
             "        assert!(s.starts_with('{'));\n"
             "    }\n"
             "}\n"
-            "pub fn use_thing() -> u32 { Thing::val() }\n",
+            "pub fn use_thing() -> u32 { Thing::val() }\n"
+            "mod impl_ext;\n",
+            encoding="utf-8",
+        )
+        # 5. An impl-only extension module (inherent methods on a parent type,
+        #    reached through method calls that never name the module) is exempt.
+        #    Its string literal continues across a line with a trailing `\`,
+        #    which the masking must treat as one literal: when it did not, the
+        #    quotes paired up wrongly from there on and blanked the `impl` line,
+        #    so src/db/memory_seal_authority.rs (about 20 production callers)
+        #    was reported as unwired.
+        (root / "src" / "impl_ext.rs").write_text(
+            "const SQL: &str = \"SELECT \\\n"
+            "    a FROM t\";\n"
+            "impl Thing {\n"
+            "    pub fn ext() -> &'static str { \"ok\" }\n"
+            "}\n",
             encoding="utf-8",
         )
         (root / "src" / "unwired_mod.rs").write_text(
@@ -793,6 +811,10 @@ def self_test() -> int:
         arm(
             "a #[cfg(test)]-gated module declaration is NOT flagged",
             "module:test_only_mod" not in names3,
+        )
+        arm(
+            "an impl-only module whose string continues past a trailing backslash is NOT flagged",
+            "module:impl_ext" not in names3,
         )
         lib_ranges = test_line_ranges(read(root / "src" / "lib.rs"))
         arm(
