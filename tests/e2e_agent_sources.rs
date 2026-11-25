@@ -270,3 +270,58 @@ fn agent_scan_only_canonicalizes_codex_aliases() -> TestResult {
 
     Ok(())
 }
+
+/// `--root` replaces the home directory that `~/` probe paths expand against. It was parsed and
+/// then ignored, so a scan of another root silently reported the caller's own home.
+#[test]
+fn agent_scan_root_replaces_the_home_directory() -> TestResult {
+    let root = tempfile::tempdir().map_err(|error| format!("scan root tempdir: {error}"))?;
+    let root_text = root.path().display().to_string();
+    let scan = |label: &str| -> Result<Vec<Value>, String> {
+        let value = run_agent_scan(&["--only", "codex", "--root", &root_text])?;
+        value["data"]["paths"]
+            .as_array()
+            .cloned()
+            .ok_or_else(|| format!("{label}: data.paths must be an array; got {value}"))
+    };
+
+    let before = scan("empty root")?;
+    let tilde = before
+        .iter()
+        .find_map(|path| {
+            path["tildePath"]
+                .as_str()?
+                .strip_prefix("~/")
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| format!("codex must probe at least one ~/ path; got {before:?}"))?;
+    for path in &before {
+        let Some(relative) = path["tildePath"]
+            .as_str()
+            .and_then(|p| p.strip_prefix("~/"))
+        else {
+            continue;
+        };
+        let expected = root.path().join(relative).display().to_string();
+        ensure(
+            path["resolvedPath"].as_str() == Some(expected.as_str()),
+            format!("~/{relative} must resolve under --root {root_text}; got {path}"),
+        )?;
+        ensure(
+            path["exists"].as_bool() == Some(false),
+            format!("nothing exists under the empty root yet; got {path}"),
+        )?;
+    }
+
+    std::fs::create_dir_all(root.path().join(&tilde))
+        .map_err(|error| format!("create ~/{tilde} under the root: {error}"))?;
+    let after = scan("seeded root")?;
+    let seeded = format!("~/{tilde}");
+    ensure(
+        after.iter().any(|path| {
+            path["tildePath"].as_str() == Some(seeded.as_str())
+                && path["exists"].as_bool() == Some(true)
+        }),
+        format!("~/{tilde} created under --root must be reported as existing; got {after:?}"),
+    )
+}

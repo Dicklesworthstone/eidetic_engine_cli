@@ -253,7 +253,8 @@ Command-specific graph flags:
 | `ee graph snapshot refresh` | `--graph <GRAPH>` | `memory_links`, `causal`, `revision`, `rules`, `contradictions`, `all` | `memory_links` | Selects which graph family to refresh. |
 | `ee graph snapshot refresh` | `--min-weight`, `--min-confidence`, `--link-limit` | see above | omitted | Filters `memory_links` refreshes. |
 | `ee graph feature-enrichment` | `--dry-run` | boolean | false | Reads the persisted graph snapshot and reports enrichment without writes. |
-| `ee graph feature-enrichment` | `--database`, `--min-weight`, `--min-confidence`, `--link-limit` | see above | see above | Filters the enrichment graph. |
+| `ee graph feature-enrichment` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Reads the persisted graph snapshot. |
+| `ee graph feature-enrichment` | `--min-weight`, `--min-confidence`, `--link-limit` | see above | omitted | Accepted for parity, not applied: enrichment reads the persisted snapshot, so set them on `centrality-refresh` or `snapshot refresh`. |
 | `ee graph feature-enrichment` | `--max-features <COUNT>` | integer | omitted | Caps emitted enriched features. |
 | `ee graph feature-enrichment` | `--min-combined-score <SCORE>` | `0.0..=1.0` | omitted | Drops graph features below a combined score threshold. |
 | `ee graph feature-enrichment` | `--max-selection-boost <BOOST>` | float | omitted | Caps derived selection boosts. |

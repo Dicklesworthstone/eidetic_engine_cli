@@ -6065,15 +6065,18 @@ pub struct GraphFeatureEnrichmentArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 
-    /// Minimum link weight to include (0.0 - 1.0).
+    /// Not applied here: enrichment reads the persisted snapshot. Accepted for parity with the
+    /// other graph commands; set it on `ee graph centrality-refresh` or `ee graph snapshot refresh`.
     #[arg(long, value_name = "WEIGHT")]
     pub min_weight: Option<f32>,
 
-    /// Minimum link confidence to include (0.0 - 1.0).
+    /// Not applied here: enrichment reads the persisted snapshot. Accepted for parity with the
+    /// other graph commands; set it on `ee graph centrality-refresh` or `ee graph snapshot refresh`.
     #[arg(long, value_name = "CONFIDENCE")]
     pub min_confidence: Option<f32>,
 
-    /// Maximum number of links to process for centrality.
+    /// Not applied here: enrichment reads the persisted snapshot. Accepted for parity with the
+    /// other graph commands; set it on `ee graph centrality-refresh` or `ee graph snapshot refresh`.
     #[arg(long, value_name = "COUNT")]
     pub link_limit: Option<u32>,
 
@@ -8400,7 +8403,8 @@ pub struct PlanGoalArgs {
     #[arg(long, value_name = "TEXT")]
     pub goal: String,
 
-    /// Output profile (compact, full, safe).
+    /// Not applied: plan goal returns `plan recommend`'s ranked recipes. Accepted for
+    /// compatibility; bd-2iqsl decides whether the profile-aware planner replaces it.
     #[arg(long, value_name = "PROFILE", default_value = "full")]
     pub profile: String,
 }
@@ -19772,9 +19776,10 @@ where
             Ok((name, surface)) if human => {
                 write_stdout(stdout, &sandbox::render_diff_human(&name, &surface))
             }
-            Ok((name, surface)) => {
-                write_stdout(stdout, &(sandbox::render_diff_json(&name, &surface) + "\n"))
-            }
+            Ok((name, surface)) => write_stdout(
+                stdout,
+                &(sandbox::render_diff_json(&name, args.query.as_deref(), &surface) + "\n"),
+            ),
             Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
         },
         sandbox::SandboxCommand::Apply(args) => match sandbox::apply_session(&workspace, args) {
@@ -63526,7 +63531,11 @@ where
 
     let all_sources = default_probe_paths_tilde();
     let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    let home: Option<PathBuf> = std::env::var_os(home_var).map(PathBuf::from);
+    // `--root` stands in for the home directory that the `~/` probe paths expand against.
+    let home: Option<PathBuf> = args
+        .root
+        .clone()
+        .or_else(|| std::env::var_os(home_var).map(PathBuf::from));
 
     let only_slugs: Option<Vec<String>> = args.only.as_ref().map(|s| {
         s.split(',')

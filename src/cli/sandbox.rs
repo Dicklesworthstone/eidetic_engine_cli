@@ -577,12 +577,18 @@ pub fn render_propose_json(command: &str, outcome: &ProposeOutcome) -> String {
 
 /// Render an `ee.response.v2` envelope wrapping the `ee.sandbox.diff.v1` surface.
 #[must_use]
-pub fn render_diff_json(session_name: &str, surface: &SandboxDiffSurface) -> String {
+pub fn render_diff_json(
+    session_name: &str,
+    query: Option<&str>,
+    surface: &SandboxDiffSurface,
+) -> String {
     serde_json::json!({
         "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "sessionName": session_name,
+            // The caller's task context, echoed back unused: the change set is content-keyed.
+            "query": query,
             "diff": surface,
         },
         "degraded": [],
@@ -1081,7 +1087,7 @@ mod tests {
         for raw in [
             render_propose_json("sandbox remember", &propose),
             render_apply_json(&apply),
-            render_diff_json("default", &diff),
+            render_diff_json("default", None, &diff),
         ] {
             let envelope: serde_json::Value =
                 serde_json::from_str(&raw).expect("sandbox success envelope");
@@ -1089,5 +1095,11 @@ mod tests {
             assert_eq!(envelope["success"], true);
             assert_eq!(envelope["degraded"], serde_json::json!([]));
         }
+
+        // The diff's QUERY argument is documented as recorded for the agent; it was dropped.
+        let diff_with_query: serde_json::Value =
+            serde_json::from_str(&render_diff_json("default", Some("hotfix tests"), &diff))
+                .expect("sandbox diff envelope");
+        assert_eq!(diff_with_query["data"]["query"], "hotfix tests");
     }
 }
