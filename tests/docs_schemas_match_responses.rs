@@ -2522,8 +2522,8 @@ fn pack_schema_accepts_permanent_rerank_advisory_and_rejects_fake_repair() -> Te
 
 /// GH #60: per-item `evidenceFreshness` and `origin` are additive, typed and
 /// closed: a valid shape validates, an unknown status/lane or stray key does
-/// not. The item schema's `oneOf` (memory vs evidence-span identity) ends this
-/// file's validator early, so the two property schemas are checked directly.
+/// not. The whole golden is validated first; the two property schemas are
+/// then checked directly so a rejection names the property, not the item.
 #[test]
 fn pack_schema_types_item_evidence_freshness_and_origin() -> TestResult {
     let schema = schema_doc("ee.pack.v2")?;
@@ -3458,13 +3458,14 @@ fn validate_json_schema(
         }
     }
 
-    if let Some(options) = schema.get("oneOf").and_then(Value::as_array) {
-        if options
+    // A matching branch does not end validation: `properties`, `required` and
+    // the other keywords beside the union still apply
+    // (bd-test-validators-oneof-early-return-oadhv).
+    if let Some(options) = schema.get("oneOf").and_then(Value::as_array)
+        && !options
             .iter()
             .any(|candidate| validate_json_schema(value, candidate, root_schema, path).is_ok())
-        {
-            return Ok(());
-        }
+    {
         return Err(format!("{path} did not match any oneOf branch"));
     }
 
@@ -3614,4 +3615,44 @@ fn ensure_json_bool(value: &Value, pointer: &str, expected: bool) -> TestResult 
     } else {
         Err(format!("{pointer}: expected {expected}, got {actual}"))
     }
+}
+
+/// bd-test-validators-oneof-early-return-oadhv: a matching `oneOf` branch must
+/// not skip the `properties` beside it.
+#[test]
+fn validator_checks_properties_beside_a_matching_one_of() -> TestResult {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": { "count": { "type": "integer" } },
+        "oneOf": [{ "required": ["count"] }]
+    });
+    if validate_json_schema(
+        &serde_json::json!({ "count": "seven" }),
+        &schema,
+        &schema,
+        "$",
+    )
+    .is_ok()
+    {
+        return Err("validator accepted a string count beside a matching oneOf".to_owned());
+    }
+    validate_json_schema(&serde_json::json!({ "count": 7 }), &schema, &schema, "$")
+}
+
+/// The pack item schema carries a `oneOf` beside its `properties`, so before
+/// bd-test-validators-oneof-early-return-oadhv nothing under a context-pack item
+/// was checked. A wrongly typed item field must now be rejected.
+#[test]
+fn pack_schema_checks_item_properties_beside_the_identity_one_of() -> TestResult {
+    let schema = schema_doc("ee.pack.v2")?;
+    let mut response = read_json(&fixture_path("golden/agent/context_pack.json.golden"))?;
+    validate_json_schema(&response, &schema, &schema, "$")?;
+    let rank = response
+        .pointer_mut("/data/pack/items/0/rank")
+        .ok_or("context-pack golden must carry an item rank")?;
+    *rank = json!("first");
+    if validate_json_schema(&response, &schema, &schema, "$").is_ok() {
+        return Err("ee.pack.v2 accepted a string item rank".to_owned());
+    }
+    Ok(())
 }

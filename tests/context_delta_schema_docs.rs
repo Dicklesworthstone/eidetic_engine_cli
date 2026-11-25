@@ -140,13 +140,14 @@ fn validate_json_schema(
         return validate_json_schema(value, target, root_schema, path);
     }
 
-    if let Some(options) = schema.get("oneOf").and_then(Value::as_array) {
-        if options
+    // A matching branch does not end validation: `properties`, `required` and
+    // the other keywords beside the union still apply
+    // (bd-test-validators-oneof-early-return-oadhv).
+    if let Some(options) = schema.get("oneOf").and_then(Value::as_array)
+        && !options
             .iter()
             .any(|candidate| validate_json_schema(value, candidate, root_schema, path).is_ok())
-        {
-            return Ok(());
-        }
+    {
         return Err(format!("{path} did not match any oneOf branch"));
     }
 
@@ -451,4 +452,26 @@ fn context_delta_apply_guide_covers_agent_safety_rules() -> TestResult {
     }
 
     Ok(())
+}
+
+/// bd-test-validators-oneof-early-return-oadhv: a matching `oneOf` branch must
+/// not skip the `properties` beside it.
+#[test]
+fn validator_checks_properties_beside_a_matching_one_of() -> TestResult {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": { "count": { "type": "integer" } },
+        "oneOf": [{ "required": ["count"] }]
+    });
+    if validate_json_schema(
+        &serde_json::json!({ "count": "seven" }),
+        &schema,
+        &schema,
+        "$",
+    )
+    .is_ok()
+    {
+        return Err("validator accepted a string count beside a matching oneOf".to_owned());
+    }
+    validate_json_schema(&serde_json::json!({ "count": 7 }), &schema, &schema, "$")
 }
