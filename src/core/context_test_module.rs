@@ -1901,6 +1901,7 @@ mod tests {
             source_mode: options.source_mode,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -3339,6 +3340,7 @@ mod tests {
             source_mode: crate::core::search::SearchSourceMode::default(),
             strict_source_mode: false,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         };
         let (quality_hits, _policy_hash) = super::quality_scored_lexical_memory_fallback_hits(
@@ -9062,6 +9064,7 @@ pub fn unrelated_context() -> u64 {{
             source_mode: crate::core::search::SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
         let key_input = super::PackL2CacheKeyInput {
@@ -9274,6 +9277,7 @@ pub fn unrelated_context() -> u64 {{
             source_mode: crate::core::search::SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Verified,
+            no_global: false,
             strict_scope: false,
         };
         let key_input = super::PackL2CacheKeyInput {
@@ -15131,6 +15135,7 @@ pub fn unrelated_context() -> u64 {{
             source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
             strict_source_mode: false,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         };
         Ok((temp, options, connection))
@@ -15504,6 +15509,7 @@ pub fn unrelated_context() -> u64 {{
             source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
             strict_source_mode: false,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         };
         let run = |options: &SearchOptions| {
@@ -15750,6 +15756,7 @@ pub fn unrelated_context() -> u64 {{
             source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
             strict_source_mode: false,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         };
         let mut degraded = Vec::new();
@@ -17106,6 +17113,7 @@ pub fn unrelated_context() -> u64 {{
             source_mode: options.source_mode,
             strict_source_mode: false,
             memory_scope: options.memory_scope,
+            no_global: false,
             strict_scope: false,
         };
         let capture = || -> Result<(String, String, String), String> {

@@ -3106,6 +3106,7 @@ async fn run_context_pack_attempt(
         source_mode: options.source_mode,
         strict_source_mode: options.strict_source_mode,
         memory_scope: options.memory_scope,
+        no_global: false,
         strict_scope: options.strict_scope,
     };
     search_options

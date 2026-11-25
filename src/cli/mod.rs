@@ -9624,6 +9624,10 @@ pub struct RehearsePromotePlanArgs {
     after_help = "With --json, search documents live at data.results; result count lives at data.resultCount."
 )]
 pub struct SearchArgs {
+    /// Exclude the separate user-global memory store for this search.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "family")]
+    pub no_global: bool,
+
     /// Query string to search for. Omit it when retrieving an attempt family.
     #[arg(
         value_name = "QUERY",
@@ -18568,6 +18572,7 @@ fn run_eval_retrieval_queries(
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
         let report = crate::core::search::run_search_with_embedder(
@@ -36802,6 +36807,7 @@ where
         source_mode: SearchSourceMode::Hybrid,
         strict_source_mode: false,
         memory_scope: args.memory_scope,
+        no_global: false,
         strict_scope: args.strict_scope,
     };
 
@@ -51227,6 +51233,10 @@ fn daemon_search_fallback_degradation(reason: DaemonSearchFallbackReason) -> Sea
 fn daemon_search_unsupported_reason(args: &SearchArgs) -> Option<DaemonSearchFallbackReason> {
     [
         (
+            args.no_global,
+            DaemonSearchFallbackReason::UnsupportedCliOption("--no-global remains in-process"),
+        ),
+        (
             matches!(args.memory_scope, MemoryScope::SelfOnly | MemoryScope::Team),
             // Scope admission still resolves EE_AGENT_NAME in the executing
             // process. The request's agent_id is an attribution field, not a
@@ -52021,6 +52031,7 @@ fn all_workspaces_search_options(
         source_mode: args.source_mode,
         strict_source_mode: args.strict_source_mode,
         memory_scope: args.memory_scope,
+        no_global: args.no_global,
         strict_scope: args.strict_scope,
     }
 }
@@ -52415,6 +52426,7 @@ where
         source_mode: args.source_mode,
         strict_source_mode: args.strict_source_mode,
         memory_scope: args.memory_scope,
+        no_global: args.no_global,
         strict_scope: args.strict_scope,
     };
     command_timings.push(cli_performance_timing_json(
@@ -98481,6 +98493,7 @@ mod tests {
                 source_mode: SearchSourceMode::Hybrid,
                 strict_source_mode: false,
                 memory_scope: args.memory_scope,
+                no_global: args.no_global,
                 strict_scope: false,
             };
             let reason = search_via_daemon(&args, &options, None)
@@ -99514,6 +99527,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
         ensure_equal(
@@ -99666,6 +99680,7 @@ mod tests {
                     source_mode,
                     strict_source_mode: false,
                     memory_scope: MemoryScope::Swarm,
+                    no_global: false,
                     strict_scope: false,
                 };
                 let result = super::search_daemon_response_before(
@@ -99775,6 +99790,7 @@ mod tests {
                 source_mode: SearchSourceMode::Hybrid,
                 strict_source_mode: false,
                 memory_scope: MemoryScope::Swarm,
+                no_global: false,
                 strict_scope: false,
             };
             let result = super::search_daemon_response_before(
@@ -99925,6 +99941,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
         let started = std::time::Instant::now();

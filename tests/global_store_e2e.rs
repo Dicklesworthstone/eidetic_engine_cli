@@ -302,6 +302,43 @@ fn global_memory_policy_errors_never_enable_promotion_or_retrieval() -> TestResu
         "{found}"
     );
     assert_global_lane_exclusion(&found, None)?;
+    for daemon in [false, true] {
+        let mut args = search.to_vec();
+        args.push("--no-global");
+        if daemon {
+            args.push("--use-daemon");
+        }
+        let (code, excluded) = run(&format!("flag-search-daemon-{daemon}"), &args)?;
+        assert_eq!(code, 0, "{excluded}");
+        assert_global_lane_exclusion(&excluded, Some("disabled_by_flag"))?;
+        assert!(
+            excluded["data"]["results"]
+                .as_array()
+                .ok_or("results missing")?
+                .iter()
+                .all(|hit| hit["memoryId"] != global_id),
+            "{excluded}"
+        );
+    }
+    let (code, local_only) = run(
+        "flag-search-local",
+        &[
+            "search",
+            "Local promotion policy fixture",
+            "--no-global",
+            "--source-mode",
+            "lexical-only",
+        ],
+    )?;
+    assert_eq!(code, 0, "{local_only}");
+    assert!(
+        local_only["data"]["results"]
+            .as_array()
+            .ok_or("results missing")?
+            .iter()
+            .any(|hit| hit["memoryId"] == local_id),
+        "{local_only}"
+    );
     check_local_retrieval("missing-policy", None)?;
 
     // Warm a mixed-store primer, opt out for one invocation, then read the

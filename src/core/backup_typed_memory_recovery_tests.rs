@@ -248,6 +248,7 @@ fn all_typed_kinds_survive_two_backups_and_restore_live_decision_consumers() {
                 source_mode: SearchSourceMode::LexicalOnly,
                 strict_source_mode: true,
                 memory_scope: crate::models::MemoryScope::Swarm,
+                no_global: false,
                 strict_scope: false,
             };
             let mut search = run_search(&search_options).unwrap();

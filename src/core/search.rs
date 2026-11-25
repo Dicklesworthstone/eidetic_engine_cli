@@ -477,6 +477,8 @@ struct CachedLexicalRamTierSearchConfig {
 
 #[derive(Clone, Debug)]
 pub struct SearchOptions {
+    /// Exclude the separate user-global memory store for this request.
+    pub no_global: bool,
     pub workspace_path: PathBuf,
     pub database_path: Option<PathBuf>,
     pub index_dir: Option<PathBuf>,
@@ -10182,6 +10184,7 @@ async fn run_similar_with_cx_and_posture(
         source_mode,
         strict_source_mode: false,
         memory_scope: options.memory_scope,
+        no_global: false,
         strict_scope: options.strict_scope,
     };
     let determinism = Deterministic::from_seed(0);
@@ -15436,7 +15439,7 @@ fn admitted_global_store_memories(
             store_present: paths.database_path.exists(),
             participating: memory_config.participate.unwrap_or(true),
             config_enabled: memory_config.include_global.unwrap_or(true),
-            no_global_flag: false,
+            no_global_flag: options.no_global,
         });
     if !inclusion.included {
         // Presence is the first inclusion gate. Every other exclusion means
@@ -15685,6 +15688,7 @@ async fn global_store_snapshot_frankensearch_hits(
         source_mode: SearchSourceMode::LexicalOnly,
         strict_source_mode: false,
         memory_scope: MemoryScope::Global,
+        no_global: false,
         strict_scope: options.strict_scope,
     };
     if reconcile && !source_only {
@@ -19214,6 +19218,7 @@ mod tests {
                     source_mode: SearchSourceMode::SemanticOnly,
                     strict_source_mode: true,
                     memory_scope: MemoryScope::Workspace,
+                    no_global: false,
                     strict_scope: false,
                 };
                 Self {
@@ -21869,6 +21874,7 @@ mod tests {
             source_mode,
             strict_source_mode,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         }
     }
@@ -22010,6 +22016,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
         Ok((options, connection, selection))
@@ -25014,6 +25021,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -25150,6 +25158,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
         let mut degraded = Vec::new();
@@ -26237,6 +26246,7 @@ mod tests {
             source_mode: SearchSourceMode::LexicalOnly,
             strict_source_mode: true,
             memory_scope: MemoryScope::Global,
+            no_global: false,
             strict_scope: false,
         };
         let search = || {
@@ -26513,6 +26523,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -26666,6 +26677,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -26847,6 +26859,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -26964,6 +26977,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -27305,6 +27319,7 @@ mod tests {
             source_mode: SearchSourceMode::LexicalOnly,
             strict_source_mode: true,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         })
         .map_err(|error| error.to_string())?;
@@ -27632,6 +27647,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -27762,6 +27778,7 @@ mod tests {
             source_mode: SearchSourceMode::SemanticOnly,
             strict_source_mode: true,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         };
         let old = Arc::new(IdentityHashEmbedder::new(
@@ -28079,6 +28096,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -28115,6 +28133,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -28226,6 +28245,7 @@ mod tests {
             source_mode: SearchSourceMode::LexicalOnly,
             strict_source_mode: false,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -28312,6 +28332,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -28706,6 +28727,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         })
         .map_err(|error| format!("initial admitted-evidence search failed: {error}"))?;
@@ -28750,6 +28772,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -28965,6 +28988,7 @@ mod tests {
                 source_mode: SearchSourceMode::Hybrid,
                 strict_source_mode: false,
                 memory_scope: MemoryScope::Swarm,
+                no_global: false,
                 strict_scope: false,
             },
             Arc::clone(&hash_embedder),
@@ -29045,6 +29069,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         }
         .two_tier_config_for_limit(5);
@@ -29172,6 +29197,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -29255,6 +29281,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -29288,6 +29315,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
         let config = options.two_tier_config();
@@ -29331,6 +29359,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         };
 
@@ -31411,6 +31440,7 @@ mod tests {
             source_mode: SearchSourceMode::LexicalOnly,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
         }
     }
@@ -32449,6 +32479,7 @@ mod tests {
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         })
         .map_err(|error| error.to_string())?;

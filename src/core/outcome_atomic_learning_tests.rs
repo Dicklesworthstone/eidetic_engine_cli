@@ -1746,6 +1746,7 @@ fn published_memory_feedback_confidence_reaches_retrieval_scoring() {
         source_mode: SearchSourceMode::LexicalOnly,
         strict_source_mode: true,
         memory_scope: crate::models::MemoryScope::Workspace,
+        no_global: false,
         strict_scope: false,
     };
     let assert_retrieval_confidence = |expected: f32| {

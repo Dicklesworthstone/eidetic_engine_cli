@@ -408,6 +408,7 @@ pub fn run_impact(options: &ImpactOptions) -> Result<ImpactReport, ImpactError> 
             source_mode: options.source_mode,
             strict_source_mode: options.strict_source_mode,
             memory_scope: options.memory_scope,
+            no_global: false,
             strict_scope: options.strict_scope,
         };
         match run_search_with_read_connection(&search_options, &connection) {

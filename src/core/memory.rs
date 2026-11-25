@@ -6897,6 +6897,7 @@ fn remember_search_neighbor_ids(
         source_mode: crate::core::search::SearchSourceMode::Hybrid,
         strict_source_mode: false,
         memory_scope: crate::models::MemoryScope::Swarm,
+        no_global: false,
         strict_scope: false,
     })
     .map_err(|error| error.to_string())?;
@@ -17895,6 +17896,7 @@ mod tests {
                 source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
                 strict_source_mode: true,
                 memory_scope: crate::models::MemoryScope::Workspace,
+                no_global: false,
                 strict_scope: false,
             },
             None,
@@ -18112,6 +18114,7 @@ mod tests {
                 source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
                 strict_source_mode: true,
                 memory_scope: crate::models::MemoryScope::Workspace,
+                no_global: false,
                 strict_scope: false,
             },
             None,
@@ -20353,6 +20356,7 @@ mod tests {
                 source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
                 strict_source_mode: true,
                 memory_scope: crate::models::MemoryScope::Workspace,
+                no_global: false,
                 strict_scope: false,
             },
             None,
@@ -22071,6 +22075,7 @@ mod tests {
                 source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
                 strict_source_mode: true,
                 memory_scope: crate::models::MemoryScope::Workspace,
+                no_global: false,
                 strict_scope: false,
             },
             None,
@@ -22235,6 +22240,7 @@ mod tests {
                 source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
                 strict_source_mode: true,
                 memory_scope: crate::models::MemoryScope::Workspace,
+                no_global: false,
                 strict_scope: false,
             })
             .map_err(|e| e.to_string())?;
@@ -22493,6 +22499,7 @@ mod tests {
                 source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
                 strict_source_mode: true,
                 memory_scope: crate::models::MemoryScope::Workspace,
+                no_global: false,
                 strict_scope: false,
             },
             None,
@@ -22856,6 +22863,7 @@ mod tests {
                 source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
                 strict_source_mode: true,
                 memory_scope: crate::models::MemoryScope::Workspace,
+                no_global: false,
                 strict_scope: false,
             },
             None,
@@ -23730,6 +23738,7 @@ mod tests {
                 source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
                 strict_source_mode: true,
                 memory_scope: crate::models::MemoryScope::Workspace,
+                no_global: false,
                 strict_scope: false,
             },
             None,
@@ -23833,6 +23842,7 @@ mod tests {
                 source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
                 strict_source_mode: true,
                 memory_scope: crate::models::MemoryScope::Workspace,
+                no_global: false,
                 strict_scope: false,
             },
             None,
@@ -24010,6 +24020,7 @@ mod tests {
                 source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
                 strict_source_mode: true,
                 memory_scope: crate::models::MemoryScope::Workspace,
+                no_global: false,
                 strict_scope: false,
             })
             .map_err(|error| error.to_string())?;

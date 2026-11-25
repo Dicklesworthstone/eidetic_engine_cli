@@ -69,6 +69,7 @@ impl Fixture {
             source_mode: SearchSourceMode::LexicalOnly,
             strict_source_mode: false,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
         }
     }

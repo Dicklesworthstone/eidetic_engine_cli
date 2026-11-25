@@ -703,6 +703,7 @@ pub async fn collect_query_replays_with_cx(
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::default(),
+            no_global: false,
             strict_scope: false,
         };
         let report = run_search_with_read_connection_seeded_with_cx(

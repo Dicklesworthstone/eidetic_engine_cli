@@ -283,6 +283,7 @@ fn quick_stats_for_scale(count: usize) -> QuickStats {
         source_mode: SearchSourceMode::Hybrid,
         strict_source_mode: false,
         memory_scope: MemoryScope::Swarm,
+        no_global: false,
         strict_scope: false,
     };
 
@@ -459,6 +460,7 @@ fn run_criterion_mode() {
                 source_mode: SearchSourceMode::Hybrid,
                 strict_source_mode: false,
                 memory_scope: MemoryScope::Swarm,
+                no_global: false,
                 strict_scope: false,
             };
 

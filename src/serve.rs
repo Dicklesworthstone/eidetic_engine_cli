@@ -1858,6 +1858,7 @@ fn serve_search_options(
         source_mode: retrieval.source_mode,
         strict_source_mode: retrieval.strict_source_mode,
         memory_scope: retrieval.memory_scope,
+        no_global: false,
         strict_scope: retrieval.strict_scope,
     })
 }

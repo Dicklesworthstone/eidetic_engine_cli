@@ -102,6 +102,7 @@ fn fixture() -> Result<(tempfile::TempDir, SearchOptions, DbConnection), String>
         source_mode: SearchSourceMode::LexicalOnly,
         strict_source_mode: true,
         memory_scope: MemoryScope::Workspace,
+        no_global: false,
         strict_scope: false,
     };
     Ok((temp, options, db))

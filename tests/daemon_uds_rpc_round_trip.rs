@@ -2607,6 +2607,7 @@ fn daemon_pack_search_reuses_feedback_across_updates_and_restart_without_writes(
         source_mode: SearchSourceMode::LexicalOnly,
         strict_source_mode: true,
         memory_scope: MemoryScope::Swarm,
+        no_global: false,
         strict_scope: false,
     };
     let empty = successful_result(
