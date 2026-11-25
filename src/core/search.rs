@@ -2929,41 +2929,32 @@ impl SearchMemoryFilters<'_> {
         *hits = filtered;
         Ok(())
     }
+}
 
-    fn retain_global_memories_with_local_authority(
-        self,
-        connection: &DbConnection,
-        memories: &mut Vec<StoredMemory>,
-    ) -> Result<(), SearchError> {
-        if self.is_empty() || memories.is_empty() {
-            return Ok(());
-        }
-
-        // Later hydration gives a local row precedence over a same-ID global
-        // row. Admit that authoritative row before the global candidate can
-        // occupy retrieval, dedupe, floor or query-assist slots. The global
-        // row has already passed its own filters in the global snapshot.
-        // Bound each IN query even when the optional global corpus is large.
-        let mut excluded = BTreeSet::new();
-        for batch in memories.chunks(256) {
-            let ids = batch
-                .iter()
-                .map(|memory| memory.id.as_str())
-                .collect::<Vec<_>>();
-            let local = connection.get_memories_batch(&ids).map_err(|error| {
-                SearchError::Index(format!(
-                    "Failed to resolve local ownership for typed search filters: {error}"
-                ))
-            })?;
-            for memory in local.values() {
-                if !typed_memory_matches(connection, memory, self.kind, self.fields)? {
-                    excluded.insert(memory.id.clone());
-                }
-            }
-        }
-        memories.retain(|memory| !excluded.contains(&memory.id));
-        Ok(())
+/// Local rows own ID collisions during lifecycle and scope admission. Resolve
+/// that ownership before global retrieval so a different global body cannot
+/// lend its relevance to the local row or occupy a global candidate slot.
+fn retain_global_memories_without_local_owners(
+    connection: &DbConnection,
+    memories: &mut Vec<StoredMemory>,
+) -> Result<(), SearchError> {
+    let mut excluded = BTreeSet::new();
+    for batch in memories.chunks(128) {
+        let ids = batch
+            .iter()
+            .map(|memory| memory.id.as_str())
+            .collect::<Vec<_>>();
+        // Bound body hydration and use primary-key probes. Multi-bind IN
+        // predicates can scan the entire local corpus in FrankenSQLite.
+        let local = connection.get_memories_by_id_seeks(&ids).map_err(|error| {
+            SearchError::Index(format!(
+                "Failed to resolve local ownership for global retrieval: {error}"
+            ))
+        })?;
+        excluded.extend(local.into_keys());
     }
+    memories.retain(|memory| !excluded.contains(&memory.id));
+    Ok(())
 }
 
 /// Authoritative admission for a bounded indexed search. Both lanes use the
@@ -15601,15 +15592,13 @@ async fn global_store_frankensearch_hits(
     let Some((paths, mut snapshot)) = admitted else {
         return Vec::new();
     };
-    if !memory_filters.is_empty() && !snapshot.memories.is_empty() {
+    if !snapshot.memories.is_empty() {
         let admitted = local_connection.is_some_and(|connection| {
-            memory_filters
-                .retain_global_memories_with_local_authority(connection, &mut snapshot.memories)
-                .is_ok()
+            retain_global_memories_without_local_owners(connection, &mut snapshot.memories).is_ok()
         });
         if !admitted {
             degraded.push(SearchDegradation::scope_metadata_unavailable(
-                "Could not verify local memory ownership for filtered global retrieval; the optional global lane was withheld",
+                "Could not verify local memory ownership for global retrieval; the optional global lane was withheld",
             ));
             return Vec::new();
         }
@@ -16238,6 +16227,10 @@ pub(crate) fn global_store_search_metadata(
         "valid_from": &memory.valid_from,
         "valid_to": &memory.valid_to,
         "validity_status": search_validity_status_for_memory(memory, reference_time),
+        // The pinned source below supplies the entire body. Without this
+        // witness, lexical admission treats every global result as an unknown
+        // preview and cannot reject matches supported only by stopwords.
+        "content_truncated": false,
         "memory_scope": MemoryScope::Global.as_str(),
         "tags": [GLOBAL_MEMORY_SCOPE_TAG],
     });

@@ -32,15 +32,47 @@ For batches, write one JSON object per line and pipe it through stdin:
 
 ```bash
 printf '%s\n' \
-  '{"body":"RCH retry passed after rsync exclusion.","source":"hook","kind":"success"}' \
-  '{"body":"Pack item 2 cited stale release policy.","source":"hook","kind":"surprise"}' \
-  | ee journal append --workspace . --stdin --json
+  '{"body":"RCH retry passed after rsync exclusion.","kind":"observation","sessionKey":"session-42"}' \
+  '{"body":"Pack item 2 cited stale release policy.","kind":"surprise","sessionKey":"session-42"}' \
+  | ee journal append --workspace . --stdin --source hook --json
 ```
 
-Each line succeeds or fails independently. A retry with the same content and
-metadata is safe: journal ids and distillation proposal ids are deterministic
-for the reviewed evidence, and later distill/apply steps skip already-consumed
-entries instead of creating duplicate candidates.
+Set `--source hook` on the invocation and include `sessionKey` in each JSONL
+object to keep observations available to session-scoped distillation. Encode
+command output as JSON instead of interpolating it into shell arguments; this
+preserves quotes, newlines, and other command-output characters.
+
+Each line succeeds or fails independently. Inspect `results[]` and retry only
+failed entries. Each successful append receives a fresh journal id, so
+resending an accepted line creates another observation even when its content
+and metadata are identical. If a response is interrupted, inspect
+`ee journal list --workspace . --session "$SESSION_ID" --json` before replaying
+the batch.
+
+Distillation proposal ids are deterministic for the same reviewed evidence.
+`journal distill --apply` marks consumed entries as distilled, and later runs
+skip those entries instead of creating duplicate candidates from them.
+
+### Large Command Failures
+
+Capture the complete command in `cmd` and stderr in `stderrTail`. The journal
+screens both inputs before shortening them, so a secret or instruction-risk
+cue in an omitted part is still evaluated. Stored command evidence keeps a
+UTF-8 prefix of at most 2 KiB; stored stderr keeps a UTF-8 suffix of at most
+2 KiB, preserving the final diagnostic lines.
+
+The entire structured JSON sidecar is limited to 8 KiB, including escaped
+characters and metadata. If needed, command and stderr share the remaining
+encoded-byte budget equally and reuse the other field's unused share. Both
+can therefore be shorter than 2 KiB. Session identifiers, working directories,
+and paths retain their validation limits; oversized metadata is an error
+instead of a silently changed identifier or path.
+
+Successful capture reports `truncated: true` and the informational
+`journal_entry_truncated` code whenever the body or these evidence fields
+were shortened. This can happen with a short, unchanged body. Byte counts
+labeled `Body counts` in the message refer only to the body. Body evidence
+retains its existing 16 KiB UTF-8 prefix limit after screening.
 
 ## End-Of-Session Flush
 

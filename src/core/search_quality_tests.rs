@@ -2793,91 +2793,56 @@ fn assert_global_filter_collisions_obey_local_authority() {
 }
 
 #[test]
-fn global_memory_filter_admission_uses_the_pinned_local_source() {
+fn global_memory_ownership_admission_uses_the_pinned_local_source() {
     let fixture = Fixture::new();
-    let id = fixture.memory_with_kind(111, 0.8, 1.0, Utc::now(), BODY, "failure");
-    fixture
-        .db
-        .set_memory_typed_fields_json(&id, Some(r#"{"family":"target-cache"}"#))
-        .unwrap();
+    let id = fixture.memory(111, 0.8, 1.0, Utc::now());
     let mut global_only = fixture.db.get_memory(&id).unwrap().unwrap();
     global_only.id = MemoryId::from_uuid(uuid::Uuid::from_u128(112)).to_string();
     let candidates = vec![
         fixture.db.get_memory(&id).unwrap().unwrap(),
         global_only.clone(),
     ];
-    let fields = [TypedMemoryFieldFilter::parse("family=target-cache").unwrap()];
-    let filters = SearchMemoryFilters {
-        kind: Some("failure"),
-        fields: &fields,
-    };
     let reader =
         DbConnection::open_file_read_only(fixture.options().resolve_database_path()).unwrap();
     reader.begin_read_snapshot().unwrap();
-    assert!(
-        reader
-            .get_memory_typed_fields_json(&id)
-            .unwrap()
-            .unwrap()
-            .contains("target-cache")
-    );
-    fixture
-        .db
-        .set_memory_typed_fields_json(&id, Some(r#"{"family":"other-cache"}"#))
-        .unwrap();
+    assert!(reader.get_memory(&id).unwrap().is_some());
+
+    // A later local owner must not change the already-pinned candidate set.
+    assert_eq!(fixture.memory(112, 0.8, 1.0, Utc::now()), global_only.id);
     let mut pinned = candidates.clone();
-    filters
-        .retain_global_memories_with_local_authority(&reader, &mut pinned)
-        .unwrap();
+    retain_global_memories_without_local_owners(&reader, &mut pinned).unwrap();
     assert_eq!(
-        pinned.len(),
-        2,
-        "the local sidecar must use the held snapshot"
+        pinned.iter().map(|memory| &memory.id).collect::<Vec<_>>(),
+        vec![&global_only.id],
+        "ownership must use the held local snapshot"
     );
     reader.rollback_read_snapshot().unwrap();
     let mut current = candidates.clone();
-    filters
-        .retain_global_memories_with_local_authority(&reader, &mut current)
-        .unwrap();
-    assert_eq!(
-        current.iter().map(|memory| &memory.id).collect::<Vec<_>>(),
-        vec![&global_only.id]
+    retain_global_memories_without_local_owners(&reader, &mut current).unwrap();
+    assert!(
+        current.is_empty(),
+        "both IDs now have authoritative local owners"
     );
 
-    // Invalid typed data is not permission to reuse the global twin's fields.
+    // A failed local read cannot turn a global twin into source authority.
     fixture
         .db
         .execute_raw(&format!(
-            "UPDATE memories SET typed_fields_json = '{{\"family\":42}}' WHERE id = '{id}'"
+            "UPDATE memories SET content = X'ff' WHERE id = '{id}'"
         ))
         .unwrap();
     let mut malformed = candidates.clone();
-    filters
-        .retain_global_memories_with_local_authority(&reader, &mut malformed)
-        .unwrap();
-    assert_eq!(
-        malformed
-            .iter()
-            .map(|memory| &memory.id)
-            .collect::<Vec<_>>(),
-        vec![&global_only.id]
-    );
+    assert!(retain_global_memories_without_local_owners(&reader, &mut malformed).is_err());
+    assert_eq!(malformed, candidates, "failed admission must stay atomic");
 
     fixture
         .db
         .execute_raw("ALTER TABLE memories RENAME TO unavailable_global_collision_sources")
         .unwrap();
     let mut unavailable = candidates.clone();
-    assert!(
-        filters
-            .retain_global_memories_with_local_authority(&reader, &mut unavailable)
-            .is_err()
-    );
-    // Unfiltered retrieval adds neither a new store dependency nor extra reads.
-    SearchMemoryFilters::default()
-        .retain_global_memories_with_local_authority(&reader, &mut unavailable)
-        .unwrap();
-    assert_eq!(unavailable.len(), candidates.len());
+    assert!(retain_global_memories_without_local_owners(&reader, &mut unavailable).is_err());
+    assert_eq!(unavailable, candidates);
+    retain_global_memories_without_local_owners(&reader, &mut Vec::new()).unwrap();
 }
 
 #[test]

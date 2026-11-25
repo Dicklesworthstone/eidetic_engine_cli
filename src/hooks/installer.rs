@@ -3103,13 +3103,18 @@ print(json.dumps(payload, separators=(",", ":")))
 }
 
 fn post_bash_failure_python() -> &'static str {
-    r#"import json, subprocess, sys
+    r#"import hashlib, json, subprocess, sys
 ee = sys.argv[1]
+MAX_EVENT_BYTES = 1048576
+SESSION_KEY_MAX_BYTES = 128
 try:
-    data = json.load(sys.stdin)
+    raw = sys.stdin.buffer.read(MAX_EVENT_BYTES + 1)
+    if len(raw) > MAX_EVENT_BYTES:
+        sys.exit(0)
+    data = json.loads(raw)
 except Exception:
     sys.exit(0)
-if (data.get("tool_name") or "") != "Bash":
+if not isinstance(data, dict) or (data.get("tool_name") or "") != "Bash":
     sys.exit(0)
 tool_input = data.get("tool_input") or {}
 if not isinstance(tool_input, dict):
@@ -3118,25 +3123,43 @@ response = data.get("tool_response") or {}
 if not isinstance(response, dict):
     sys.exit(0)
 exit_code = response.get("exit_code", response.get("exitCode", response.get("status")))
+if isinstance(exit_code, bool) or not isinstance(exit_code, (int, str)):
+    sys.exit(0)
 try:
     exit_code = int(exit_code)
 except Exception:
     sys.exit(0)
-if exit_code == 0:
+if exit_code == 0 or not -(1 << 63) <= exit_code < (1 << 63):
     sys.exit(0)
-command = str(tool_input.get("command") or "")[:4000]
-stderr_tail = str(response.get("stderr") or response.get("stderr_tail") or response.get("output") or "")[-4000:]
-cwd = str(data.get("cwd") or "")
-body = "Harness observed a non-zero Bash exit code."
-cmd = [ee, "journal", "append", body, "--source", "hook", "--kind", "command_failure", "--exit-code", str(exit_code), "--json"]
-if command:
-    cmd.extend(["--cmd", command])
-if cwd:
-    cmd.extend(["--cwd", cwd])
-if stderr_tail:
-    cmd.extend(["--stderr-tail", stderr_tail])
+command = str(tool_input.get("command") or "")
+stderr_tail = str(response.get("stderr") or response.get("stderr_tail") or response.get("output") or "")
+cwd = data.get("cwd") or ""
+if not isinstance(cwd, str):
+    sys.exit(0)
+session = data.get("session_id") or data.get("sessionId")
+session = session.strip() if isinstance(session, str) else ""
 try:
-    subprocess.run(cmd, cwd=cwd or None, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    if len(session.encode("utf-8")) > SESSION_KEY_MAX_BYTES:
+        # Keep oversized IDs distinct; truncating a common prefix merges runs.
+        session = "hook-session:" + hashlib.sha256(session.encode("utf-8")).hexdigest()
+except UnicodeEncodeError:
+    session = ""
+entry = {
+    "body": "Harness observed a non-zero Bash exit code.",
+    "kind": "command_failure",
+    "sessionKey": session or None,
+    "cmd": command or None,
+    "exitCode": exit_code,
+    "cwd": cwd or None,
+    "stderrTail": stderr_tail or None,
+}
+# Send complete machine fields through the canonical ingestion screen before
+# it applies UTF-8 storage caps. Raw slicing here can split credentials and
+# used to exceed the journal's byte caps anyway, losing the entire observation.
+# JSONL also keeps leading hyphens, newlines, NULs, and long output out of argv.
+cmd = [ee, "journal", "append", "--stdin", "--source", "hook", "--json"]
+try:
+    subprocess.run(cmd, input=json.dumps(entry, separators=(",", ":")) + "\n", text=True, encoding="utf-8", cwd=cwd or None, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=9)
 except Exception:
     pass
 "#
@@ -3890,6 +3913,8 @@ fn is_legacy_unmanaged_ee_hook_command(command: &str, snippet: &HarnessHookSnipp
             "7c0e4b9c603619c8e92bf113db805b914ce0b16d15458db822443ec2acab3fd1",
             "406b9063abb9c6da10afe09224423196ce5be73f42fb8e9d019e164ce84e583c",
             "7d8eb84181d312dd03ecc7cafd893558d7deb6595389ecbc51dfa2e3a1adc0fe",
+            // Complete wrapper from main before JSONL journal transport.
+            "68a1bf46ddd39b12deeda0841fa83644abd7fa1c7f7ecf429cfe41be9ce1a9c9",
         ],
         "ee-ambient-session-orient" => &[
             "95fc71cc3d89ce5b87015fc83ab36d9a80a2c391f177f20a3fcb2e2d349c337c",
@@ -5890,6 +5915,7 @@ mod tests {
             pre_edit_python(),
             session_start_python(),
             session_end_capture_python(),
+            post_bash_failure_python(),
         ] {
             for event in ["[]", "null", "42", "\"unexpected\""] {
                 assert_eq!(run_python_snippet_exit_code(script, event), Some(0));
@@ -5942,12 +5968,15 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("spawn Python hook probe: {error}"))?;
-        child
+        if let Err(error) = child
             .stdin
             .take()
             .ok_or("hook probe stdin missing")?
             .write_all(event.to_string().as_bytes())
-            .map_err(|error| format!("write hook probe event: {error}"))?;
+            && error.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(format!("write hook probe event: {error}"));
+        }
         let output = child
             .wait_with_output()
             .map_err(|error| error.to_string())?;
@@ -6581,6 +6610,146 @@ for definition in payload["definitions"]:
             assert_eq!(state.degraded_messages, expected);
             assert_eq!(state.emitted_bytes, 0);
         }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn journal_hook_probe_binary(root: &Path) -> Result<PathBuf, String> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let binary = root.join("ee-journal-probe");
+        fs::write(
+            &binary,
+            r#"#!/usr/bin/env python3
+import json, pathlib, sys
+payload = sys.stdin.read()
+pathlib.Path("journal-hook-capture.json").write_text(json.dumps({"argv": sys.argv[1:], "stdin": payload}), encoding="utf-8")
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+        Ok(binary)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_bash_failure_hook_preserves_jsonl_evidence_and_session_identity() -> TestResult {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        let binary = journal_hook_probe_binary(temp.path())?;
+        let command = format!("--literal-option\n{}\0tail", "é".repeat(2500));
+        let stderr = format!("--stderr-option\n{}\0last failure", "失敗".repeat(1500));
+        assert!(
+            post_bash_failure_python().contains(&format!(
+                "SESSION_KEY_MAX_BYTES = {}",
+                crate::core::journal::JOURNAL_SESSION_KEY_MAX_BYTES
+            )),
+            "the hook identity bound must match the journal contract"
+        );
+        for (field, session) in [
+            ("session_id", " session-one ".to_owned()),
+            ("sessionId", "s".repeat(128)),
+            ("session_id", "會".repeat(43)),
+            ("sessionId", format!("{}different", "會".repeat(43))),
+        ] {
+            let mut event = serde_json::json!({
+                "cwd": workspace,
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "tool_response": {"exitCode": "-9", "stderr": stderr},
+            });
+            event[field] = serde_json::json!(session);
+            let output =
+                run_python_hook_probe(post_bash_failure_python(), &event, temp.path(), &binary)?;
+            assert!(output.stdout.is_empty());
+            assert!(output.stderr.is_empty());
+            let captured: serde_json::Value = serde_json::from_slice(
+                &fs::read(workspace.join("journal-hook-capture.json"))
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(
+                captured["argv"],
+                serde_json::json!(["journal", "append", "--stdin", "--source", "hook", "--json"]),
+                "no observed command, error text, session, or path belongs in argv"
+            );
+            let payload = captured["stdin"].as_str().ok_or("missing JSONL input")?;
+            assert_eq!(payload.lines().count(), 1);
+            let draft: serde_json::Value =
+                serde_json::from_str(payload).map_err(|error| error.to_string())?;
+            assert_eq!(draft["kind"], "command_failure");
+            assert_eq!(draft["cmd"], command);
+            assert_eq!(draft["stderrTail"], stderr);
+            assert_eq!(draft["cwd"], workspace.display().to_string());
+            assert_eq!(draft["exitCode"], -9);
+            let session = session.trim();
+            let expected_session =
+                if session.len() > crate::core::journal::JOURNAL_SESSION_KEY_MAX_BYTES {
+                    format!("hook-session:{}", harness_settings_hash(session.as_bytes()))
+                } else {
+                    session.to_owned()
+                };
+            assert_eq!(draft["sessionKey"], expected_session);
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_bash_failure_hook_ignores_invalid_successful_and_oversized_events() -> TestResult {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let binary = journal_hook_probe_binary(temp.path())?;
+        let mut events = Vec::new();
+        for code in [
+            serde_json::json!(0),
+            serde_json::json!(true),
+            serde_json::json!(false),
+            serde_json::json!(1.5),
+            serde_json::json!("failed"),
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!([]),
+            serde_json::json!("9223372036854775808"),
+        ] {
+            events.push(serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": "cargo test"},
+                "tool_response": {"exit_code": code},
+            }));
+        }
+        events.push(serde_json::json!({
+            "tool_name": "Read",
+            "tool_input": {"command": "cargo test"},
+            "tool_response": {"exit_code": 1},
+        }));
+        events.push(serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "x".repeat(1_048_576)},
+            "tool_response": {"exit_code": 1},
+        }));
+        for mut event in events {
+            event["cwd"] = serde_json::json!(temp.path());
+            let output =
+                run_python_hook_probe(post_bash_failure_python(), &event, temp.path(), &binary)?;
+            assert!(output.stdout.is_empty());
+            assert!(output.stderr.is_empty());
+            assert!(
+                !temp.path().join("journal-hook-capture.json").exists(),
+                "invalid or non-failure events must not invoke the journal writer"
+            );
+        }
+
+        let event = serde_json::json!({
+            "cwd": temp.path(),
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo test"},
+            "tool_response": {"exit_code": 101},
+        });
+        let output = run_python_hook_state_probe(post_bash_failure_python(), &event, temp.path())?;
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
         Ok(())
     }
 

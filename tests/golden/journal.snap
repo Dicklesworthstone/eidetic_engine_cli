@@ -7,7 +7,9 @@ schema:
 contracts:
   - journal append screens body AND every structured string field BEFORE persistence; raw secrets never reach the DB file
   - oversize bodies truncate deterministically at the last char boundary at or below 16 KiB and emit journal_entry_truncated (info); truncation never errors
-  - structured sidecar caps are per-field usage errors (cmd 2 KiB, cwd 1 KiB, stderr_tail 2 KiB, paths 16 x 1 KiB, serialized total 8 KiB)
+  - command and stderr are screened in full before UTF-8 truncation to a 2 KiB command prefix and a 2 KiB stderr suffix; journal_entry_truncated is emitted even when the body is unchanged
+  - the complete structured sidecar fits 8 KiB including JSON escaping; command and stderr share the remaining encoded-byte budget and may retain less than 2 KiB each
+  - session, cwd, and path limits remain strict validation errors (session 128 bytes, cwd 1 KiB, paths 16 x 1 KiB); metadata that alone exceeds the serialized 8 KiB sidecar cap is rejected
   - journal append --stdin persists each JSONL line independently (own transaction); one poisoned line cannot roll back a session flush
   - --stdin batches cap at 512 lines; exit 0 when >=1 line lands, exit 5 when all lines fail, usage errors exit 1
   - default kind is note, or command_failure when --cmd/--exit-code are present; default source is manual (hook passes --source hook, batch lines are stdin)
