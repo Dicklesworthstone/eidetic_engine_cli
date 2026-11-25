@@ -196,18 +196,34 @@ export function NegativeLedger() {
           <Loop latest={latest} />
         </div>
 
-        <p className="mt-6 rounded-xl border border-white/[0.07] bg-black/20 px-4 py-3 text-[13px] leading-relaxed text-slate-400">
-          <span className="font-semibold text-slate-200">What is invented, and what is ee&rsquo;s.</span> The landscape,
-          the agent and its preference for promising-looking ideas are made up, and so is curation running by itself at
-          a family&rsquo;s third failure. Nothing here is a measurement. The loop is ee&rsquo;s: a failure carries its
-          family as a typed field, a search on that field returns the family&rsquo;s failures together, a rule drawn
-          from them exists only after <span className="font-mono text-[12px] text-slate-300">ee curate apply</span> has
-          accepted it, and the next pack puts what not to do first. The threshold of three is also ee&rsquo;s:{" "}
-          <span className="font-mono text-[12px] text-slate-300">ee playbook extract</span> waits for three notes that
-          carry one lesson, and ee proposes an anti-pattern after three harmful outcomes. In this toy no family contains a
-          win. A real family might, so
-          an anti-pattern remains an audited rule with its evidence attached.
-        </p>
+        {/* What is made up and what is ee's, side by side: nothing in this figure is a measurement. */}
+        <div className="mt-6 grid grid-cols-1 gap-3 text-[13px] leading-snug sm:grid-cols-2">
+          <div className="rounded-xl border border-fuchsia-300/20 bg-fuchsia-300/[0.04] px-4 py-3">
+            <p className="font-mono text-[10.5px] tracking-[0.16em] text-fuchsia-200/90 uppercase">Invented for this page</p>
+            <ul className="mt-2 space-y-1.5 text-slate-400">
+              <li>The landscape, the agent, and its taste for promising-looking ideas.</li>
+              <li>Curation running by itself at a family&rsquo;s third failure.</li>
+              <li>
+                No family ever holding a win. A real one might, so an anti-pattern stays an audited rule with its evidence
+                attached.
+              </li>
+            </ul>
+          </div>
+          <div className="rounded-xl border border-orange-300/20 bg-orange-300/[0.04] px-4 py-3">
+            <p className="font-mono text-[10.5px] tracking-[0.16em] text-orange-200/90 uppercase">ee&rsquo;s own</p>
+            <ul className="mt-2 space-y-1.5 text-slate-300">
+              <li>A failure carries its family as a typed field, and a search on it returns the family together.</li>
+              <li>
+                A rule exists only once <span className="font-mono text-[12px] text-slate-200">ee curate apply</span> accepts
+                it, and the next pack puts what not to do first.
+              </li>
+              <li>
+                Three is ee&rsquo;s threshold: <span className="font-mono text-[12px] text-slate-200">ee playbook extract</span>{" "}
+                waits for three notes carrying one lesson, and three harmful outcomes propose an anti-pattern.
+              </li>
+            </ul>
+          </div>
+        </div>
       </div>
     </DemoFrame>
   );

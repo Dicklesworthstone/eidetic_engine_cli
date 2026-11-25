@@ -1534,8 +1534,7 @@ export function ScaleLadder() {
       <div ref={frame}>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="max-w-2xl text-[15px] leading-relaxed text-slate-300">
-            ee uses the same kind of store, the same trust classes and the same rules for one agent on one repository as
-            for every workspace you use. No scale needs a server. Where lanes overlap, the precedence rules below apply.
+            The same store, trust classes and rules at every scale, and none of them needs a server.
           </p>
           {/* The label says what a press does, so no aria-pressed as well: "Play, pressed" would read as playing. */}
           <DemoButton

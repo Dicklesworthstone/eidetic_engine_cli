@@ -8,10 +8,113 @@ import { RevealController } from "@/components/reveal-controller";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
 import { SkipOffscreen } from "@/components/skip-offscreen";
-import { COUNTED, chapters, heroStats, siteConfig } from "@/lib/content";
+import { COUNTED, chapters, heroStats } from "@/lib/content";
 import { cn } from "@/lib/utils";
 
-const link = "text-violet-300 underline decoration-violet-300/30 underline-offset-4 transition-colors hover:decoration-violet-300";
+const HERO_FACTS = ["one Rust binary", "no cloud or API key", "local store", "versioned JSON"];
+
+/** The short version, as a loop: where lessons come from, where they are kept, and what a task gets back. */
+const FLOW = [
+  {
+    step: "Record",
+    command: "ee remember · ee outcome",
+    note: "Agents add lessons as they work and say which ones helped. Recorded sessions can be imported.",
+  },
+  {
+    step: "Keep",
+    command: ".ee/ee.db",
+    note: "A local database in the workspace, beside a user-global store under ~/.local/share/ee.",
+  },
+  {
+    step: "Pack",
+    command: 'ee pack "<task>"',
+    note: "The memories that match the task, cut to a token budget, each with its source, score and trust level.",
+  },
+];
+
+/** A notes file loaded into every session, against ee, on the four points the summary turns on. */
+const VERSUS = [
+  { point: "What a session loads", notes: "the whole file", ee: "only what bears on the task" },
+  { point: "As lessons pile up", notes: "grows, and costs more", ee: "stays inside your budget" },
+  { point: "An out-of-date line", notes: "nothing marks it", ee: "demoted, then dropped" },
+  { point: "Each line says", notes: "nothing about itself", ee: "its source and score" },
+];
+
+const HARNESSES = ["Claude Code", "Codex", "shell scripts", "MCP, in an mcp-feature build"];
+
+function SummaryFigure() {
+  return (
+    <div className="mt-7 space-y-6">
+      <ol aria-label="How ee works" className="space-y-3">
+        {FLOW.map((item, at) => (
+          <li key={item.step} className="relative flex gap-4">
+            {/* The connector runs from this step's number to the next one's, and stops at the last. */}
+            {at < FLOW.length - 1 ? (
+              <span aria-hidden="true" className="absolute top-8 -bottom-4 left-[15px] w-px bg-violet-400/40" />
+            ) : null}
+            <span className="relative z-10 mt-1 flex h-[31px] w-[31px] shrink-0 items-center justify-center rounded-full border border-violet-300/40 bg-[#0d0a1a] font-mono text-[12px] font-bold text-violet-200">
+              {at + 1}
+            </span>
+            <div className="panel min-w-0 flex-1 rounded-xl px-4 py-3">
+              <p className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                <span className="font-bold text-white">{item.step}</span>
+                <Cmd>{item.command}</Cmd>
+              </p>
+              <p className="mt-1.5 text-[13.5px] leading-snug text-slate-400">{item.note}</p>
+            </div>
+          </li>
+        ))}
+      </ol>
+      <div className="panel overflow-hidden rounded-xl">
+        <table className="w-full text-left text-[13px]">
+          <caption className="sr-only">A notes file such as CLAUDE.md, compared with ee</caption>
+          <thead>
+            <tr className="border-b border-white/[0.06] font-mono text-[10.5px] tracking-[0.14em] uppercase">
+              <th scope="col" className="px-4 py-2.5 font-medium text-slate-500">
+                <span className="sr-only">Point</span>
+              </th>
+              <th scope="col" className="px-3 py-2.5 font-medium text-amber-300/80">
+                CLAUDE.md
+              </th>
+              <th scope="col" className="px-3 py-2.5 font-medium text-violet-300">
+                ee
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {VERSUS.map((row) => (
+              <tr key={row.point} className="border-b border-white/[0.04] last:border-0">
+                <th scope="row" className="px-4 py-2.5 align-top font-normal text-slate-500">
+                  {row.point}
+                </th>
+                <td className="px-3 py-2.5 align-top text-slate-400">
+                  <span aria-hidden="true" className="mr-1.5 text-rose-300/80">
+                    ×
+                  </span>
+                  {row.notes}
+                </td>
+                <td className="px-3 py-2.5 align-top text-slate-200">
+                  <span aria-hidden="true" className="mr-1.5 text-emerald-300">
+                    ✓
+                  </span>
+                  {row.ee}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-slate-500">
+        <span>The same JSON contracts for</span>
+        {HARNESSES.map((name) => (
+          <span key={name} className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-0.5 text-slate-300">
+            {name}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function HeroWords() {
   return (
@@ -28,20 +131,19 @@ function HeroWords() {
         <RecallTitle lit text="[coding agents.]" />
       </h1>
       <p className="lede mt-7 max-w-[37rem]">
-        Eidetic Engine (ee) records what your agents learn as they work: rules, decisions, failed attempts and the fixes
-        that worked. At the start of each task it gives the agent the part of that record that bears on the task, cut to
-        a token budget, with the source of every line and the reason it was chosen. It is one Rust binary and needs no
-        cloud service or API key.
+        Eidetic Engine (ee) records what your agents learn as they work. At the start of each task it hands the agent the
+        part of that record that bears on the task, cut to a token budget, with the source of every line.
       </p>
-      <p className="mt-4 max-w-[37rem] text-[15px] leading-relaxed text-slate-400">
-        <span className="font-semibold text-slate-200">New in {siteConfig.version}:</span> fix recall now reads Go
-        terminal failures, Rust syntax errors, and Vitest and Jest reports. Each retrieval response also says whether
-        the optional daemon or the local process served it, and that does not change the pack&apos;s hash.{" "}
-        <a className={link} href={siteConfig.changelog}>
-          What changed
-        </a>
-        .
-      </p>
+      <ul aria-label="At a glance" className="mt-6 flex max-w-[37rem] flex-wrap gap-2">
+        {HERO_FACTS.map((fact) => (
+          <li
+            key={fact}
+            className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 font-mono text-[11.5px] text-slate-300"
+          >
+            {fact}
+          </li>
+        ))}
+      </ul>
       <div className="mt-9 flex flex-wrap gap-3">
         <a
           href="#builder"
@@ -62,13 +164,6 @@ function HeroWords() {
           Install
         </a>
       </div>
-      <p className="mt-6 text-sm text-slate-500">
-        The source is on{" "}
-        <a className={link} href={siteConfig.github}>
-          GitHub
-        </a>
-        . Counts come from the repository at a named commit, and each explainer says what it is drawn from.
-      </p>
     </>
   );
 }
@@ -132,29 +227,11 @@ export default function Home() {
               <h2 id="summary-heading" className="display-3 mt-4 text-white">
                 <RecallTitle text="What ee does for an [agent]." />
               </h2>
-              <div className="mt-6 space-y-4 text-[15.5px] leading-relaxed text-slate-300">
-                <p>
-                  A coding agent starts each session with an empty context window. Whatever earlier sessions worked out,
-                  such as how the project builds, which approaches failed and why a decision went the way it did, is gone
-                  unless someone wrote it down. The usual answer is a notes file like CLAUDE.md or AGENTS.md that the
-                  harness loads into every session. That helps at first, but the file grows with every lesson, nothing in
-                  it marks a line as out of date, and every line costs tokens in every session whether the task needs it
-                  or not.
-                </p>
-                <p>
-                  ee keeps those lessons in a local database instead. Agents add to it as they work, with{" "}
-                  <Cmd className="whitespace-nowrap">ee remember</Cmd> and <Cmd className="whitespace-nowrap">ee outcome</Cmd>, and ee can import the sessions they have already
-                  recorded. When a task starts, <Cmd className="whitespace-nowrap">ee pack</Cmd> returns the memories that match it, fitted to a token
-                  budget, with each item&apos;s source, score and trust level. However large the store grows, the pack
-                  stays within the budget you set.
-                </p>
-                <p>
-                  It is a single Rust binary that needs no cloud service or API key. Each workspace keeps its store in
-                  its <Cmd>.ee</Cmd> directory, beside a user-global store under <Cmd>~/.local/share/ee</Cmd>. Claude
-                  Code, Codex and shell scripts call the same commands and, with <Cmd>--json</Cmd>, get the same JSON;
-                  MCP clients reach the same contracts in a build with the <Cmd>mcp</Cmd> feature.
-                </p>
-              </div>
+              <p className="mt-6 text-[15.5px] leading-relaxed text-slate-300">
+                A coding agent starts every session with an empty context window, so whatever earlier sessions learned is
+                gone unless someone wrote it down.
+              </p>
+              <SummaryFigure />
             </div>
             <nav aria-label="The eight chapters" className="lg:col-span-7">
               <p className="font-mono text-[11px] tracking-[0.22em] text-slate-500 uppercase">What you get, chapter by chapter</p>

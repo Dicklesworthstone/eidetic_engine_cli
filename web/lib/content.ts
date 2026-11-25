@@ -59,7 +59,7 @@ export const chapters: Chapter[] = [
     short: "Why",
     title: "Every session starts [from zero].",
     thesis:
-      "A new agent session re-learns the project's conventions, re-reads files an earlier session already read, and repeats failures an earlier session already hit, because nothing those sessions learned was kept where it could be found. The usual fix is a notes file loaded into every session, and each lesson added to it costs tokens in every later session, whether or not the task needs it.",
+      "A new agent session re-learns the project's conventions, re-reads what an earlier session already read, and repeats its failures, because nothing those sessions learned was kept where it could be found.",
     colour: "#fb7185",
     share: {
       title: "Why agents forget, and why a notes file doesn't fix it",
@@ -90,7 +90,7 @@ export const chapters: Chapter[] = [
     short: "Memory",
     title: "Typed memories with [half-lives].",
     thesis:
-      "A scratch note is useful for a day and a procedural rule for a year. ee stores typed memories at four levels, each with its own half-life. When the decay pass runs (ee maintenance run --include-decay), a stale memory is demoted, then tombstoned: it leaves retrieval, an audit entry records the change, and the row is kept.",
+      "A scratch note is useful for a day and a procedural rule for a year, so ee stores memories at four levels, each with its own half-life. A stale memory is demoted, then leaves retrieval with an audit entry.",
     colour: "#fbbf24",
     share: {
       title: "Typed memories with half-lives",
@@ -119,7 +119,7 @@ export const chapters: Chapter[] = [
     short: "Pack",
     title: "How ee builds [a pack].",
     thesis:
-      "The pack is the text an agent reads at the start of a task. A fixed pipeline selects memories for the task, fits them to a token budget, drops near-duplicates, and hashes the result so the same inputs give the same pack. Every item lists its source and its score.",
+      "The pack is what an agent reads at the start of a task: the memories that fit it, within a token budget, near-duplicates dropped, each item with its source and score. The same inputs give the same pack.",
     colour: "#a78bfa",
     share: {
       title: "How ee builds a context pack",
@@ -181,7 +181,7 @@ export const chapters: Chapter[] = [
     short: "Scale",
     title: "For work that runs for [weeks].",
     thesis:
-      "A lot of real work takes more than one session: a performance hunt that runs for a month, an incident that keeps recurring, a research question you return to every week. ee calls these campaigns. Each attempt is recorded as evidence, a repeated family of failures can be proposed as a rule, the decay pass retires unused material, and the pack each session reads stays within the same budget as the store grows.",
+      "Some work runs for weeks: a performance hunt, a recurring incident, a research question you keep returning to. ee records each attempt as evidence, can propose a repeated family of failures as a rule, and keeps each session's pack within the same budget as the store grows.",
     colour: "#fb923c",
     share: {
       title: "For work that runs for weeks",
@@ -212,7 +212,7 @@ export const chapters: Chapter[] = [
     short: "Agents",
     title: "Output an agent can [act on].",
     thesis:
-      "Most of ee's callers are agents, so its interface is designed for them. With --json, every command answers in one versioned JSON envelope with a typed exit code. Anything that ran in a reduced mode is listed under degraded with a code and, where ee knows one, a repair. Errors carry a ranked recovery plan when ee has one, and the documentation is a set of commands that return JSON.",
+      "Most of ee's callers are agents. With --json, every command answers in one versioned JSON envelope with a typed exit code; anything that ran in a reduced mode is listed with a code, and errors carry a recovery plan when ee has one.",
     colour: "#a3e635",
     share: {
       title: "Output an agent can act on",
@@ -242,7 +242,7 @@ export const chapters: Chapter[] = [
     short: "Graph",
     title: "Memories form a [graph].",
     thesis:
-      "A rule supports a decision, a failure derives from a session, one fact contradicts another. ee stores those links and runs graph algorithms over them to find the memories many others depend on, and the ones that are a topic's only connection to the rest, where one wrong memory cuts the topic off.",
+      "A rule supports a decision, a failure derives from a session, one fact contradicts another. ee stores those links and finds the memories many others rest on, and the ones that are a topic's only bridge to the rest.",
     colour: "#34d399",
     share: {
       title: "Memories form a graph",

@@ -662,15 +662,40 @@ export function GraphLens() {
         </div>
       </div>
 
-      <p className="mt-6 rounded-xl border border-white/[0.07] bg-black/20 px-4 py-3 text-[13px] leading-relaxed text-slate-400">
-        <span className="font-semibold text-slate-200">Current status.</span> Each lens is a command you run on demand
-        over your own store. The graph features that would change ranking, retention or pack explanations (Pack DNA,
-        proximity, HITS profiles, structural decay), and the knowledge skyline, are off by default under{" "}
-        <span className="font-mono text-[12px] text-slate-300">graph.feature.*</span>. Personalized PageRank is not
-        available in production: a request for it reports{" "}
-        <span className="font-mono text-[12px] text-slate-300">graph_ppr_upstream_unavailable</span> and falls back to
-        textual ranking.
-      </p>
+      {/* Current status, as three states: what runs, what is switched off, and what is not available. */}
+      <ul aria-label="Current status" className="mt-6 grid grid-cols-1 gap-3 text-[13px] leading-snug md:grid-cols-3">
+        <li className="rounded-xl border border-emerald-300/20 bg-emerald-300/[0.04] px-4 py-3">
+          <p className="flex items-center gap-2 font-mono text-[10.5px] tracking-[0.16em] text-emerald-200/90 uppercase">
+            <span aria-hidden="true" className="h-2 w-2 rounded-full bg-emerald-300" />
+            On demand
+          </p>
+          <p className="mt-2 text-slate-300">Each lens is a command you run over your own store.</p>
+        </li>
+        <li className="rounded-xl border border-amber-300/20 bg-amber-300/[0.04] px-4 py-3">
+          <p className="flex items-center gap-2 font-mono text-[10.5px] tracking-[0.16em] text-amber-200/90 uppercase">
+            <span aria-hidden="true" className="h-2 w-2 rounded-full border border-amber-300" />
+            Off by default
+          </p>
+          <p className="mt-2 text-slate-400">
+            What would change ranking, retention or pack explanations (Pack DNA, proximity, HITS profiles, structural
+            decay) and the knowledge skyline, under{" "}
+            <span className="font-mono text-[12px] text-slate-300">graph.feature.*</span>.
+          </p>
+        </li>
+        <li className="rounded-xl border border-rose-300/20 bg-rose-300/[0.04] px-4 py-3">
+          <p className="flex items-center gap-2 font-mono text-[10.5px] tracking-[0.16em] text-rose-200/90 uppercase">
+            <span aria-hidden="true" className="text-[12px] leading-none text-rose-300">
+              ×
+            </span>
+            Not available
+          </p>
+          <p className="mt-2 text-slate-400">
+            Personalized PageRank: a request reports{" "}
+            <span className="font-mono text-[12px] text-slate-300">graph_ppr_upstream_unavailable</span> and falls back to
+            textual ranking.
+          </p>
+        </li>
+      </ul>
     </DemoFrame>
   );
 }

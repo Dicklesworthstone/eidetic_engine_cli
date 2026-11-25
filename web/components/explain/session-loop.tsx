@@ -248,10 +248,8 @@ export function SessionLoop() {
     >
       <div ref={ref} className="min-w-0" onFocus={onFocusIn} onBlur={onFocusOut}>
         <p className="max-w-3xl text-[15px] leading-relaxed text-slate-300">
-          The session has nine stations: five only read from ee, three write to it, and one is the harness&apos;s own
-          work with no ee call. Every command here passes --json, so each response is JSON with a versioned schema and
-          the agent can read fields by name.
-          Pick a station to see its command and response, or press Play to step through them.
+          Nine stations: five read from ee, three write to it, one is the harness&apos;s own work. Pick one to see its
+          command and the JSON it returns, or press Play.
         </p>
 
         {mode === "stack" ? (

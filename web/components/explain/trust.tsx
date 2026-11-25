@@ -433,15 +433,30 @@ export function TrustPosterior() {
         </div>
       </div>
 
-      <p className="mt-7 max-w-3xl text-sm leading-relaxed text-slate-300">
-        A harmful outcome adds 2.5 to β and a helpful one adds 1 to α, so the mean falls faster than it rises. The
-        class is decided by the 90% interval rather than the mean: promotion needs the <em>lower</em> bound above one
-        threshold, demotion needs the <em>upper</em> bound below another, and between the two the class does not
-        change. No number of ordinary outcomes promotes a memory to{" "}
-        <span className="font-mono text-[13px]">human_explicit</span>; that step needs an outcome recorded with{" "}
-        <span className="font-mono text-[13px]">--source-type human_explicit</span>, a named{" "}
-        <span className="font-mono text-[13px]">--actor</span> and a <span className="font-mono text-[13px]">--reason</span>.
-      </p>
+      {/* The three rules the figure turns on, one card each. */}
+      <ul className="mt-7 grid grid-cols-1 gap-3 text-[13px] leading-snug md:grid-cols-3">
+        <li className="rounded-xl border border-white/[0.07] bg-black/20 px-4 py-3">
+          <p className="font-bold text-white">Harm weighs 2.5 times</p>
+          <p className="mt-1.5 font-mono text-[12px] text-slate-300">harmful β + 2.5 · helpful α + 1</p>
+          <p className="mt-1.5 text-slate-400">So the mean falls faster than it rises.</p>
+        </li>
+        <li className="rounded-xl border border-white/[0.07] bg-black/20 px-4 py-3">
+          <p className="font-bold text-white">The 90% interval decides</p>
+          <p className="mt-1.5 text-slate-400">
+            Promote when the <em>lower</em> bound clears one threshold, demote when the <em>upper</em> bound falls below
+            another. In between, the class holds.
+          </p>
+        </li>
+        <li className="rounded-xl border border-white/[0.07] bg-black/20 px-4 py-3">
+          <p className="font-bold text-white">The top class needs a person</p>
+          <p className="mt-1.5 text-slate-400">
+            No number of ordinary outcomes reaches <span className="font-mono text-[12px] text-slate-300">human_explicit</span>.
+            It takes <span className="font-mono text-[12px] text-slate-300">--source-type human_explicit</span>, a named{" "}
+            <span className="font-mono text-[12px] text-slate-300">--actor</span> and a{" "}
+            <span className="font-mono text-[12px] text-slate-300">--reason</span>.
+          </p>
+        </li>
+      </ul>
     </DemoFrame>
   );
 }

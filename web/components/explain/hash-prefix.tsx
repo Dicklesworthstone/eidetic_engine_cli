@@ -395,13 +395,25 @@ export function HashPrefix() {
         </div>
       </div>
 
-      <p className="mt-6 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3 text-[13px] leading-relaxed text-slate-400">
-        <span className="font-semibold text-slate-200">Guarantees and limits.</span> Given the same source and index
-        snapshots, config, profile, budget, seed, query and decision inputs, ties resolve the same way and the pack
-        hash reproduces. The composite is built from tagged component digests, so when two packs differ, the
-        component that differs can be found. Selection itself still compares raw f32 scores, and v7 does not yet
-        establish cross-process or cross-host determinism gates (ADR 0087).
-      </p>
+      <div className="mt-6 grid grid-cols-1 gap-3 text-[13px] leading-snug sm:grid-cols-2">
+        <div className="rounded-xl border border-emerald-300/20 bg-emerald-300/[0.04] px-4 py-3">
+          <p className="font-mono text-[10.5px] tracking-[0.16em] text-emerald-200/90 uppercase">Guaranteed</p>
+          <ul className="mt-2 space-y-1.5 text-slate-300">
+            <li>
+              Same source and index snapshots, config, profile, budget, seed, query and decision inputs: ties resolve the
+              same way and the pack hash reproduces.
+            </li>
+            <li>The composite is built from tagged component digests, so the component two packs differ in can be found.</li>
+          </ul>
+        </div>
+        <div className="rounded-xl border border-amber-300/20 bg-amber-300/[0.04] px-4 py-3">
+          <p className="font-mono text-[10.5px] tracking-[0.16em] text-amber-200/90 uppercase">Not yet</p>
+          <ul className="mt-2 space-y-1.5 text-slate-400">
+            <li>Selection itself still compares raw f32 scores.</li>
+            <li>v7 does not yet establish cross-process or cross-host determinism gates (ADR 0087).</li>
+          </ul>
+        </div>
+      </div>
     </DemoFrame>
   );
 }

@@ -107,11 +107,9 @@ function Amnesiac() {
         title="What happens as the notes file [grows]."
         kicker={
           <>
-            Most agent memory today is a markdown file that the harness loads whole at the start of every session. It
-            grows with every lesson, nothing in it marks a line as stale, and every line costs tokens in every session
-            whether the task needs it or not. A vector store keeps the size down by returning only the closest matches,
-            but on its own it ranks by similarity and does not track whether a chunk is stale or repeated. Move through
-            the weeks to compare all three.
+            A notes file is loaded whole into every session. A vector store returns only the closest matches, but ranks
+            by similarity alone and cannot tell a stale or repeated chunk from a current one. Move through the weeks to
+            compare both with ee.
           </>
         }
       >
@@ -180,9 +178,9 @@ function MemoryChapter() {
         title="How fast each level [fades]."
         kicker={
           <>
-            A memory&apos;s freshness halves on a schedule set by what it is: a day for working notes, a year for a
-            procedural rule. When the decay pass runs (<Cmd>ee maintenance run --include-decay</Cmd>), freshness times
-            confidence times utility decides whether it is demoted or tombstoned, with an audit entry either way.
+            Freshness halves on a schedule set by the kind of memory: a day for working notes, a year for a procedural
+            rule. The decay pass (<Cmd>ee maintenance run --include-decay</Cmd>) weighs freshness × confidence × utility to
+            demote or tombstone a memory, with an audit entry either way.
           </>
         }
       >
@@ -222,10 +220,9 @@ function MemoryChapter() {
         title="Fields a search can [filter on]."
         kicker={
           <>
-            A failure records its cause and the commit that reverted it; a decision records its options and when to
-            revisit it. Search filters on those fields by name, so an agent can ask for{" "}
-            <Cmd>--kind failure --field family^rustc</Cmd> instead of relying on matching words. A memory written as
-            plain prose gets no typed fields; ee does not invent them.
+            A failure records its cause and the commit that reverted it; a decision, its options and when to revisit it.
+            Search filters on those fields by name (<Cmd>--kind failure --field family^rustc</Cmd>). Plain prose gets no
+            typed fields; ee does not invent them.
           </>
         }
       >
@@ -297,9 +294,8 @@ function PackChapter() {
         title="Build a pack [yourself]."
         kicker={
           <>
-            Change the profile and the budget to see the pack change. Each candidate shows why it is in or out: its
-            marginal gain, the memory it duplicates, or the quota or budget it hit. With the redundancy penalty switched
-            off, near-duplicates fill the budget and the failure the task needed drops out.
+            Change the profile and the budget, and every candidate says why it is in or out. Switch off the redundancy
+            penalty and near-duplicates crowd out the failure the task needed.
           </>
         }
       >
@@ -374,9 +370,8 @@ function LearningChapter() {
           <>
             A memory&apos;s trust class comes from how it was written: <Cmd>human_explicit</Cmd> for an ordinary{" "}
             <Cmd>ee remember</Cmd>, <Cmd>agent_assertion</Cmd> for a registered agent&apos;s attempt-family write,{" "}
-            <Cmd>cass_evidence</Cmd> for a line imported from a session. Outcomes update a Beta posterior that starts
-            from the Jeffreys prior, and the class changes only when the 90% interval crosses a threshold. Use the
-            buttons to record outcomes.
+            <Cmd>cass_evidence</Cmd> for a line imported from a session. Outcomes move a Beta posterior, and the class
+            changes only when its 90% interval crosses a threshold.
           </>
         }
       >
@@ -407,10 +402,9 @@ function LearningChapter() {
         title="Proposed changes go through [review]."
         kicker={
           <>
-            Changes ee proposes start as candidates that can be reviewed, and applying one writes an audit entry. A
-            person can also tombstone a memory directly, and the decay pass demotes and tombstones on its own when run
-            with <Cmd>--include-decay</Cmd>; both are audited. Turning a session journal into candidates does not use
-            an LLM.
+            What ee proposes starts as a reviewable candidate, and applying one writes an audit entry. A person can also
+            tombstone a memory directly, and the decay pass demotes and tombstones with <Cmd>--include-decay</Cmd>; both
+            are audited. No LLM turns a session journal into candidates.
           </>
         }
       >
@@ -525,8 +519,7 @@ function CampaignsChapter() {
         title="Any work with sources and [decisions]."
         kicker={
           <>
-            Nothing in the memory model is specific to software. Where the work has durable facts, recurring decisions
-            and sources worth citing, the same loop applies: one workspace per matter, position or incident, and every
+            Nothing in the memory model is specific to software: one workspace per matter, position or incident, every
             memory pointing back at its source. Privileged work can opt out of the shared lane entirely.
           </>
         }
@@ -615,9 +608,8 @@ function AgentsChapter() {
         title="A session, the way an agent [runs] it."
         kicker={
           <>
-            Orient without changing anything, pull a pack and read what it left out, check the code you are about to
-            touch, do the work, write down what you learned, say what helped, and leave a capsule for whoever comes next.
-            Every step but the work itself is one ee command whose answer is JSON, with named fields the next step reads.
+            From orienting to handing off, every step but the work itself is one ee command, and its JSON answer has
+            named fields the next step reads.
           </>
         }
       >
@@ -737,9 +729,9 @@ function GraphChapter() {
         title="Each algorithm answers a [question]."
         kicker={
           <>
-            Each one is a command with deterministic JSON output. Every graph feature flag is off by default, so a tool
-            that needs one names the <Cmd>ee config set</Cmd> line that turns it on; the others work as installed. Graph views help
-            explain and navigate memory, but a memory&apos;s own provenance stays the record of where it came from.
+            Each is a command with deterministic JSON output. Graph feature flags are off by default, and a tool that
+            needs one names the <Cmd>ee config set</Cmd> line that turns it on. Provenance, not the graph, stays the
+            record of where a memory came from.
           </>
         }
       >
@@ -792,10 +784,9 @@ function ProofChapter() {
         title="Commands still answer with parts [missing]."
         kicker={
           <>
-            Any optional part of ee can be missing. Search, packs and the graph still answer without one, and report what
-            they lost as a machine-readable entry: a code, a severity and, where ee has one, a repair. An import from
-            cass is the exception: without cass it fails, with the same entry inside its error. Switch parts off below
-            to see what each command reports.
+            Search, packs and the graph still answer when an optional part is missing, and report what they lost as a
+            code, a severity and, where ee has one, a repair. A cass import is the exception: without cass it fails, with
+            the same entry in its error.
           </>
         }
       >

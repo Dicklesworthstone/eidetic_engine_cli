@@ -1,5 +1,6 @@
 "use client";
 
+import { ChevronRight } from "lucide-react";
 import { Fragment, type KeyboardEvent, type ReactNode, useRef } from "react";
 
 import { Heading } from "@/components/heading-level";
@@ -96,10 +97,16 @@ export function DemoFrame({
         <BasisBadge basis={basis} />
       </div>
       <div className="mt-6">{children}</div>
+      {/* The sources and the model's assumptions are one click away, so they do not stand under every figure as a block of text. */}
       {source ? (
-        <figcaption className="mt-6 flex gap-3 border-t border-white/[0.06] pt-4 font-mono text-[11px] leading-relaxed [overflow-wrap:anywhere] text-slate-500">
-          <span aria-hidden="true" className="mt-[3px] h-2.5 w-2.5 shrink-0 rounded-full border border-white/20" />
-          <span className="min-w-0">{source}</span>
+        <figcaption className="mt-6 border-t border-white/[0.06] pt-3">
+          <details className="group">
+            <summary className="inline-flex cursor-pointer list-none items-center gap-2 rounded-md py-1 font-mono text-[10.5px] tracking-[0.16em] text-slate-500 uppercase transition-colors hover:text-slate-300 [&::-webkit-details-marker]:hidden">
+              <ChevronRight aria-hidden="true" className="h-3.5 w-3.5 transition-transform group-open:rotate-90" />
+              Sources and assumptions
+            </summary>
+            <div className="mt-2 font-mono text-[11px] leading-relaxed [overflow-wrap:anywhere] text-slate-500">{source}</div>
+          </details>
         </figcaption>
       ) : null}
     </figure>
