@@ -762,8 +762,10 @@ mod seal_tests {
     #[test]
     fn unavailable_quarantine_authority_withholds_memories_and_similarity_seeds() -> TestResult {
         let (_temp, options, db) = fixture()?;
+        // Each DDL names its step: both tests fail deterministically with `database
+        // is busy` and the bare error did not say which rename (bd-obslc).
         db.execute_raw("ALTER TABLE feedback_quarantine RENAME TO private_unavailable_quarantine")
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("rename quarantine away, before admit_hits: {error}"))?;
         let mut degraded = Vec::new();
         let visible = admit_hits(
             &options,
@@ -781,7 +783,7 @@ mod seal_tests {
         );
         assert!(seed_is_visible(&db, HIDDEN, instant(TIME)?).is_err());
         db.execute_raw("ALTER TABLE private_unavailable_quarantine RENAME TO feedback_quarantine")
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("rename quarantine back, after admit_hits: {error}"))?;
         assert_eq!(
             ids(&admit_hits(
                 &options,
@@ -1079,8 +1081,9 @@ mod seal_tests {
     #[test]
     fn unavailable_seal_authority_withholds_memories_not_other_entity_types() -> TestResult {
         let (_temp, options, db) = fixture()?;
+        // Each DDL names its step (bd-obslc); see the quarantine variant.
         db.execute_raw("ALTER TABLE memory_seals RENAME TO private_unavailable_seals")
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("rename seals away, before admit_hits: {error}"))?;
         let mut degraded = Vec::new();
         let visible = admit_hits(
             &options,
@@ -1094,7 +1097,7 @@ mod seal_tests {
         assert!(!degraded[0].message.contains("private_unavailable_seals"));
         assert!(!degraded[0].message.contains(HIDDEN));
         db.execute_raw("ALTER TABLE private_unavailable_seals RENAME TO memory_seals")
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("rename seals back, after admit_hits: {error}"))?;
         assert_eq!(
             admit_hits(&options, vec![hit(HIDDEN)], &mut Vec::new(), None).len(),
             1
