@@ -585,11 +585,21 @@ fn pack_replay_and_diff_work_for_real_pack_records() -> TestResult {
 
     let query_file = tempdir.path().join("pack-replay-query.json");
     let query_text = "pack replay release";
+    // Both packs score recency against this one instant. Without it each pack
+    // reads the wall clock, and recency is bucketed by UTC minute
+    // (search::scoring::recency_unix_minute), so two packs either side of a
+    // minute boundary score every item differently while their content hash
+    // still matches. That reads as nondeterminism: red at 73e80cc9a, green at
+    // d01adf122, with no pack code changed between the two runs. It is set
+    // after the memories exist so the validity window still admits them.
+    let as_of = (chrono::Utc::now() + chrono::Duration::minutes(5))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     fs::write(
         &query_file,
         format!(
             r#"{{
   "version": "ee.query.v1",
+  "asOf": "{as_of}",
   "query": {{"text": "{query_text}"}},
   "budget": {{"maxTokens": 2000, "candidatePool": 20}},
   "output": {{"profile": "compact"}}
