@@ -2995,8 +2995,10 @@ type ContextPackAttemptFuture<'a> = std::pin::Pin<
 ///
 /// `run_context_pack_attempt` awaits itself once, on a rejected daemon handoff. Boxed as
 /// its own opaque type, proving the pack future `Send` (which a task spawned on a runtime
-/// requires) has to walk that type through its own body, and on 2026-11-24 the lib-test
-/// build began failing E0275 there at any recursion limit. The trait object ends the walk.
+/// requires) has to walk that type through its own body. The recursion dates from
+/// 2026-11-02 and compiled until the 2026-11-24 changes to the search futures it awaits;
+/// then the lib-test build failed E0275 at recursion limits 256 and 512 alike, without
+/// rustc's suggestion to raise the limit. The trait object ends the walk.
 fn run_context_pack_attempt_boxed<'a>(
     options: &'a ContextPackOptions,
     command: &'static str,
@@ -13891,7 +13893,7 @@ fn push_symbol_index_stale_degradation(
     );
 }
 
-const SYMBOL_INDEX_STALE_REPAIR: &str = "Symbols are re-read from workspace sources on every pack, so there is no index to rebuild; check that the memories carry file-span provenance and that their Rust sources are readable.";
+const SYMBOL_INDEX_STALE_REPAIR: &str = "Symbols are re-read from workspace sources on every pack, so there is no index to rebuild; check that `git status` runs in the workspace, that the memories carry file-span provenance, and that their Rust sources are readable.";
 
 fn context_proximity_feature_enabled(workspace_path: &Path) -> Result<bool, String> {
     let config = context_workspace_config(workspace_path, "Proximity-to-seed scoring")?;

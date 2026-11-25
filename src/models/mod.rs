@@ -1119,7 +1119,9 @@ pub fn repair_action_safety(kind: RecoveryKind, command: Option<&str>) -> Repair
         || command_lower.starts_with("ee schema list")
         || command_lower.starts_with("ee curate candidates")
         || command_lower.starts_with("ee curate show")
-        || command_lower.starts_with("ee curate validate")
+        // Without --dry-run, validate updates the candidate's status and writes audit.
+        || (command_lower.starts_with("ee curate validate")
+            && command_has_flag(&command_lower, "--dry-run"))
         || command_lower.starts_with("ee reflect request-ledger diagnostics")
         || command_lower.starts_with("ee preflight check")
         || command_lower.starts_with("git status")
@@ -1166,6 +1168,7 @@ pub fn repair_action_safety(kind: RecoveryKind, command: Option<&str>) -> Repair
         || command_lower.starts_with("ee init")
         || command_lower.starts_with("ee doctor --fix")
         || command_lower.starts_with("ee curate propose-derived")
+        || command_lower.starts_with("ee curate validate")
         || command_lower.starts_with("ee curate apply")
         || command_lower.starts_with("ee reflect propose")
         || command_lower.starts_with("ee support bundle")
@@ -2803,6 +2806,23 @@ mod tests {
         );
         assert!(!support_bundle_create.requires_human_approval);
         assert!(!support_bundle_create.mutates_external_state);
+
+        let validate_dry_run = super::repair_action_safety(
+            super::RecoveryKind::Command,
+            Some("ee curate validate curate_x --workspace . --dry-run --json"),
+        );
+        assert_eq!(
+            validate_dry_run.risk_class,
+            super::RepairActionRiskClass::ReadOnlyProbe
+        );
+        let validate = super::repair_action_safety(
+            super::RecoveryKind::Command,
+            Some("ee curate validate curate_x --workspace . --json"),
+        );
+        assert_eq!(
+            validate.risk_class,
+            super::RepairActionRiskClass::MutatingLocalRepair
+        );
 
         let agent_mail_repair = super::repair_action_safety(
             super::RecoveryKind::Command,

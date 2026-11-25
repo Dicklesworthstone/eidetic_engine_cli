@@ -343,7 +343,8 @@ Use containment when a peer appears unexpected, drift crosses the documented
 thresholds, a policy decision surprises the operator, or an agent reports a
 body/embedding export that was not explicitly approved.
 
-Start with read-only evidence:
+Start with evidence that changes no peer or policy state (the auto-enroll dry
+runs append audit rows, nothing else):
 
 ```bash
 ee mesh status --workspace . --json
@@ -437,7 +438,8 @@ agent workflows should stay `off`, `cache`, or `revisable`.
 
 ## Diagnosing Stale Or Unreachable Peers
 
-Start with read-only status surfaces:
+Start with status surfaces that change no peer or policy state (the auto-enroll
+dry runs append audit rows, nothing else):
 
 ```bash
 ee mesh status --workspace . --json

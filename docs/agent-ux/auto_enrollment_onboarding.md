@@ -58,11 +58,17 @@ returns `auto_enrollment_already_complete` (info). Reversal:
 ee mesh disable --workspace . --json
 ```
 
-Read-only inspection (never writes):
+Read-only inspection (never writes; it probes the tailnet on every run):
 
 ```bash
 ee mesh status --workspace . --json
-ee mesh auto-enroll --workspace . --dry-run --json   # re-run discovery, write nothing
+```
+
+Preview an enrollment without writing peer rows (each run still appends its
+intended and outcome audit rows):
+
+```bash
+ee mesh auto-enroll --workspace . --dry-run --json
 ee mesh auto-enroll --workspace . --dry-run --explain-skip <node-key> --json
 ```
 
@@ -147,11 +153,11 @@ tailscale shields-up).
 |---|---|---|
 | `ee status --json` | `ee.status.v1` (with `mesh.tailscale` block) | no |
 | `ee mesh status --json` | `ee.mesh.status.v1` (with `autoEnrollment` block) | no |
-| `ee mesh auto-enroll --dry-run --explain-skip <key> --json` | `ee.mesh.auto_enrollment_result.v1` (one peer's decision) | no |
-| `ee mesh auto-enroll --dry-run --json` | `ee.mesh.auto_enrollment_result.v1` | no |
+| `ee mesh auto-enroll --dry-run --explain-skip <key> --json` | `ee.mesh.auto_enrollment_result.v1` (one peer's decision) | audit rows only |
+| `ee mesh auto-enroll --dry-run --json` | `ee.mesh.auto_enrollment_result.v1` | audit rows only |
 | `ee mesh auto-enroll --json` | `ee.mesh.auto_enrollment_result.v1` | YES (after audit row) |
 | `ee mesh auto-enroll --include <key>* --exclude <key>* --json` | same | YES |
-| `ee mesh auto-enroll --explain --json` | decision-tree view, no envelope mutation | no |
+| `ee mesh auto-enroll --explain --json` | decision-tree view, no envelope mutation | audit rows only |
 | `ee mesh auto-enroll --replace-manual-with-auto --json` | same as auto-enroll | YES (migration audit row) |
 | `ee mesh disable --workspace . --json` | `ee.mesh.disable_result.v1` | YES (rollback audit row) |
 | `ee mesh disable --dry-run --json` | same | no |

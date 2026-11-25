@@ -5,7 +5,7 @@
     "bead": "bd-3a1op.2",
     "epic_letter": "ADR0066"
   },
-  "surfaces": ["steward run retrieval_affinity_refresh", "graph suggest-links"],
+  "surfaces": ["job run retrieval_affinity_refresh", "graph suggest-links"],
   "severity": "info",
   "repair_present": true,
   "trigger": {

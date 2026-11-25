@@ -583,7 +583,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `l2_pack_cache_unavailable` | low | bd-ndzfg.4 |
 | `source_unparsable` | medium | (TBD) |
 | `stale_line_span` | warning | (TBD) |
-| `symbol_index_stale` | warning | (TBD) |
+| `symbol_index_stale` | low | bd-2xuu7.6 |
 
 #### Hook readiness (3)
 | Code | Severity (canonical) | Bead |

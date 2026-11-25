@@ -14,6 +14,6 @@ expression: normalized
   "repair_hints": [
     "Add new evidence: ee context \"refresh handoff evidence\" --workspace . --json",
     "Refresh: ee handoff create --workspace . --out handoff-refresh.json --json",
-    "Significant drift; consider rebuilding: ee handoff create --workspace ."
+    "Significant drift; consider rebuilding: ee handoff create --workspace . --out handoff-refresh.json --json"
   ]
 }

@@ -15050,7 +15050,7 @@ ee resume --workspace . --json
 
 **Severity:** info
 
-**Surfaces:** steward run retrieval_affinity_refresh, graph suggest-links
+**Surfaces:** job run retrieval_affinity_refresh, graph suggest-links
 
 **Introduced by:** bd-3a1op.2 (epic ADR0066)
 
@@ -17483,31 +17483,29 @@ EE_SWARM_SCALE_FORCE_FAILURE=nondeterminism scripts/e2e_overhaul/swarm_scale.sh
 
 ## `symbol_index_stale`
 
-**Severity:** warning
+**Severity:** low
 
-**Surfaces:** symbol snapshot, context, why
+**Surfaces:** context
 
 **Introduced by:** bd-2xuu7.6 (epic G)
 
-**Trigger.** A persisted symbol snapshot was generated from an older source manifest than the current workspace, so symbol-boosted retrieval may lag source edits.
+**Trigger.** A context pack asked for changed-symbol boosting (--changed-symbol or --changed-symbols-from-git), but git status failed, no candidate memory carried file-span provenance, or none of their Rust sources was readable, so the boost was skipped. Symbols are extracted from sources on every pack; there is no persisted snapshot.
 
 **Setup.**
 
 ```bash
 ee init --workspace .
-ee symbol snapshot --workspace . --json
-printf 'pub fn changed() {}\n' >> src/lib.rs
 ```
 
 **Invocation.**
 
 ```bash
-ee context 'changed symbol' --workspace . --json
+ee context 'changed symbol' --workspace . --changed-symbol changed --json
 ```
 
-**Expected emission.** Message contains: `Symbol index is stale ... snapshot`
+**Expected emission.** Message contains: `Symbol index is stale`
 
-**Repair hint.** Symbols are re-read from workspace sources on every pack, so there is no index to rebuild; check that the memories carry file-span provenance and that their Rust sources are readable.
+**Repair hint.** Symbols are re-read from workspace sources on every pack, so there is no index to rebuild; check that `git status` runs in the workspace, that the memories carry file-span provenance, and that their Rust sources are readable.
 
 **Fixture.** [`tests/fixtures/failure_modes/symbol_index_stale.json`](../tests/fixtures/failure_modes/symbol_index_stale.json)
 
@@ -19639,5 +19637,5 @@ the gap is one of:
 For new degraded codes, follow the J6 fixture-authoring workflow in
 `tests/fixtures/failure_modes/` (see any existing fixture as a
 template), then regenerate.
-<!-- degraded-codes-fingerprint inputs=sha256:91ed0dcc1f3cbb0a6a527de3c3a55cc7fa3b6dd737df763a2ba363d315bb2d7e -->
-<!-- degraded-codes-fingerprint body=sha256:c8192142332925165b499c48dd39320a74e22c0fc9027b196de89d222cc896b2 -->
+<!-- degraded-codes-fingerprint inputs=sha256:8d7c726555dc51ab18f9cf2fb0588eecd138fba6d5d5dc44f1eb168b3894088d -->
+<!-- degraded-codes-fingerprint body=sha256:b1c1210901bc4c31a161640e32b1adccb5ac122c0418eb0ac6d5159ba2a0cbeb -->

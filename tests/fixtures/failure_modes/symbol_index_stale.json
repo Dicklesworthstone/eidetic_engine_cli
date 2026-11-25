@@ -5,23 +5,21 @@
     "bead": "bd-2xuu7.6",
     "epic_letter": "G"
   },
-  "surfaces": ["symbol snapshot", "context", "why"],
-  "severity": "warning",
+  "surfaces": ["context"],
+  "severity": "low",
   "repair_present": true,
   "trigger": {
-    "description": "A persisted symbol snapshot was generated from an older source manifest than the current workspace, so symbol-boosted retrieval may lag source edits.",
+    "description": "A context pack asked for changed-symbol boosting (--changed-symbol or --changed-symbols-from-git), but git status failed, no candidate memory carried file-span provenance, or none of their Rust sources was readable, so the boost was skipped. Symbols are extracted from sources on every pack; there is no persisted snapshot.",
     "setup_commands": [
-      "ee init --workspace .",
-      "ee symbol snapshot --workspace . --json",
-      "printf 'pub fn changed() {}\\n' >> src/lib.rs"
+      "ee init --workspace ."
     ],
-    "invocation": "ee context 'changed symbol' --workspace . --json"
+    "invocation": "ee context 'changed symbol' --workspace . --changed-symbol changed --json"
   },
   "expected_emission": {
     "code": "symbol_index_stale",
-    "severity": "warning",
-    "message_contains": ["Symbol index is stale", "snapshot"],
+    "severity": "low",
+    "message_contains": ["Symbol index is stale"],
     "repair_contains": "no index to rebuild",
-    "repair_string": "Symbols are re-read from workspace sources on every pack, so there is no index to rebuild; check that the memories carry file-span provenance and that their Rust sources are readable."
+    "repair_string": "Symbols are re-read from workspace sources on every pack, so there is no index to rebuild; check that `git status` runs in the workspace, that the memories carry file-span provenance, and that their Rust sources are readable."
   }
 }

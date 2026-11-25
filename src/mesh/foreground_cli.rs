@@ -3583,9 +3583,12 @@ fn auto_status_next_action_hint(
         return "You are the first ee instance on this tailnet. Other machines will appear automatically when they run ee with mesh enabled. Status: waiting for first peer."
             .to_owned();
     }
+    // `ee mesh status`, the only producer of this hint, probes the tailnet on
+    // every run, so re-running it is the recheck.
     if snapshot.storage.peer_count == 0 && signals.discovered_peer_count == 0 {
-        return "Tailnet status was not refreshed by this read-only command. Run `ee mesh auto-enroll --dry-run --json` to recheck discovery without enrolling, or run ee on a second machine in this tailnet."
-            .to_owned();
+        return format!(
+            "No ee peers were discovered on this tailnet. Run ee with mesh enabled on a second machine in this tailnet, then re-run `ee mesh status --workspace {workspace_arg}`."
+        );
     }
     if snapshot.storage.peer_count == 0 && signals.discovered_peer_count > 0 {
         return format!(
