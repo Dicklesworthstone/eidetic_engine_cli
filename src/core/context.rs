@@ -2983,6 +2983,41 @@ async fn run_context_pack_with_performance_inner(
     .await
 }
 
+type ContextPackAttemptFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<ContextPackPerformanceRun, ContextPackError>>
+            + Send
+            + 'a,
+    >,
+>;
+
+/// The local retry inside [`run_context_pack_attempt`], erased to `dyn Future + Send`.
+///
+/// `run_context_pack_attempt` awaits itself once, on a rejected daemon handoff. Boxed as
+/// its own opaque type, proving the pack future `Send` (which a task spawned on a runtime
+/// requires) has to walk that type through its own body, and on 2026-11-24 the lib-test
+/// build began failing E0275 there at any recursion limit. The trait object ends the walk.
+fn run_context_pack_attempt_boxed<'a>(
+    options: &'a ContextPackOptions,
+    command: &'static str,
+    determinism: &'a mut Deterministic<Seed>,
+    pack_record_persistence: PackRecordPersistence,
+    control: ContextPackControl<'a>,
+    fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
+    attempt: ContextPackAttempt,
+) -> ContextPackAttemptFuture<'a> {
+    Box::pin(run_context_pack_attempt(
+        options,
+        command,
+        determinism,
+        pack_record_persistence,
+        control,
+        fast_embedder_override,
+        None,
+        attempt,
+    ))
+}
+
 #[allow(clippy::expect_used, clippy::too_many_arguments)]
 async fn run_context_pack_attempt(
     options: &ContextPackOptions,
@@ -3273,20 +3308,19 @@ async fn run_context_pack_attempt(
         drop(validated_handoff_feedback);
         drop(read_snapshot);
         trace.record_elapsed("daemonHandoffRejected", total_start);
-        let mut run = Box::pin(run_context_pack_attempt(
+        let mut run = run_context_pack_attempt_boxed(
             options,
             command,
             determinism,
             pack_record_persistence,
             control,
             fast_embedder_override,
-            None,
             ContextPackAttempt {
                 total_start,
                 embedder_resolved_before,
                 trace,
             },
-        ))
+        )
         .await?;
         push_search_degradations(
             &mut run.response.data.degraded,
