@@ -2315,6 +2315,9 @@ run_stage "E2E Execution Coverage Contract" "python3 scripts/check-e2e-execution
 run_stage "Freshness Vocabulary Contract" "python3 scripts/check-freshness-vocabulary.py --self-test && python3 scripts/check-freshness-vocabulary.py"
 run_stage "Open-Coded Success Baseline Contract" "python3 scripts/check-open-coded-success-baseline.py --self-test && python3 scripts/check-open-coded-success-baseline.py"
 run_stage "Doc-Governance Invariants Contract" "python3 scripts/check-doc-governance-invariants.py --self-test && python3 scripts/check-doc-governance-invariants.py"
+# Mirrors readme_invariant_manifest_schema.rs and readme_invariant_harness.rs,
+# which can only run on the lane, so a README edit sees anchor drift locally.
+run_stage "README Invariant Manifest Contract" "python3 scripts/check-readme-invariants.py --self-test && python3 scripts/check-readme-invariants.py"
 
 # Gate 3.9051: jq `//` and negation vacuity (bd-9h1z5, class fixed under bd-o8e1n).
 #

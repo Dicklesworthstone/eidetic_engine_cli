@@ -801,6 +801,12 @@ name = "Doc-Governance Invariants Contract"
 expected_seconds_p50 = 1
 regression_factor = 1.5
 
+[[stage]]
+name = "README Invariant Manifest Contract"
+# P50_PROVENANCE measured=2026-11-24 host=mac-dev-1 load=60.40 samples_s=0.42,0.42,0.44 median_s=0.42 declared_p50_s=1
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
 # The two jq-vacuity stages (bd-9h1z5, 2026-10-22). Two seconds declared for a
 # pair of scans measured at 0.08s and 0.11s, following the convention of the
 # group above: a sub-second static check declares 1s.
