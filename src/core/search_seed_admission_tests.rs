@@ -271,3 +271,97 @@ fn malformed_similarity_revision_fails_without_echoing_the_source_value() -> Tes
     );
     Ok(())
 }
+
+/// bd-2vq2z.25: one database holds two workspaces. A seed must belong to the
+/// requested workspace or the global lane, and must pass `--memory-scope`,
+/// before its content can become the similarity query.
+#[test]
+fn similarity_seed_is_confined_to_the_requested_workspace_and_scope() -> TestResult {
+    const OTHER_WORKSPACE: &str = "wsp_00000000000000000000000032";
+    const PRIVATE: &str = "mem_00000000000000000000000032";
+    const SHARED: &str = "mem_00000000000000000000000033";
+    let (_root, db, mut options) = fixture()?;
+    let other_path = options.workspace_path.join("other");
+    std::fs::create_dir_all(&other_path).map_err(|e| e.to_string())?;
+    db.insert_workspace(
+        OTHER_WORKSPACE,
+        &CreateWorkspaceInput {
+            path: other_path.to_string_lossy().into_owned(),
+            name: None,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    for (id, tags) in [(PRIVATE, Vec::new()), (SHARED, vec!["global".to_owned()])] {
+        db.insert_memory_with_timestamps(
+            id,
+            &CreateMemoryInput {
+                workspace_id: OTHER_WORKSPACE.to_owned(),
+                level: "procedural".to_owned(),
+                kind: "rule".to_owned(),
+                content: "Rotate the other workspace's deploy key monthly.".to_owned(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.7,
+                importance: 0.8,
+                provenance_uri: Some("manual://seed-admission".to_owned()),
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: None,
+                tags,
+                valid_from: Some("2026-01-01T00:00:00Z".to_owned()),
+                valid_to: Some("2099-01-01T00:00:00Z".to_owned()),
+            },
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-01T00:00:00+00:00",
+            id,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    let workspace_path = options.workspace_path.clone();
+    let scope = |scope: MemoryScope| {
+        MemoryScopeContext::for_workspace_with_connection(&workspace_path, scope, false, Some(&db))
+    };
+    let not_found = |result: Result<crate::db::StoredMemory, SimilarError>| {
+        matches!(result, Err(SimilarError::MemoryNotFound { .. }))
+    };
+
+    // Another workspace's memory cannot seed this workspace's query, though it
+    // seeds its own.
+    options.memory_id = PRIVATE.to_owned();
+    assert!(not_found(resolve_similar_seed_memory(
+        &db,
+        &options,
+        WORKSPACE,
+        &scope(MemoryScope::Workspace)
+    )));
+    let own = resolve_similar_seed_memory(
+        &db,
+        &options,
+        OTHER_WORKSPACE,
+        &scope(MemoryScope::Workspace),
+    )
+    .map_err(|e| e.to_string())?;
+    assert_eq!(own.id, PRIVATE);
+
+    // A global-lane memory crosses workspaces, under either scope that admits it.
+    options.memory_id = SHARED.to_owned();
+    for lane in [MemoryScope::Workspace, MemoryScope::Global] {
+        let shared = resolve_similar_seed_memory(&db, &options, WORKSPACE, &scope(lane))
+            .map_err(|e| e.to_string())?;
+        assert_eq!(shared.id, SHARED);
+    }
+
+    // The trust lane applies to the seed itself: this workspace's own untagged
+    // memory is refused under `--memory-scope global`.
+    options.memory_id = MEMORY.to_owned();
+    assert!(not_found(resolve_similar_seed_memory(
+        &db,
+        &options,
+        WORKSPACE,
+        &scope(MemoryScope::Global)
+    )));
+    assert_eq!(
+        resolve(&db, &options).map_err(|e| e.to_string())?.id,
+        MEMORY
+    );
+    Ok(())
+}
