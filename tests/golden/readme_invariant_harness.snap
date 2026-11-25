@@ -12,6 +12,7 @@ invariants:
   - Manifest entries must point to an existing test path or a tracked defer marker.
   - Adding or removing README invariant prose without manifest updates must fail the harness.
 verified_by:
-  - cargo test --test readme_invariant_harness
-  - cargo test --test readme_invariant_manifest_schema
+  - cargo test --test integration_n_r readme_invariant_harness
+  - cargo test --test integration_n_r readme_invariant_manifest_schema
+  - python3 scripts/check-readme-invariants.py
 

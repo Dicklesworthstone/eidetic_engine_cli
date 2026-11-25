@@ -5,8 +5,9 @@ THIS IS A PRECHECK, NOT THE AUTHORITY. The authoritative assertions are
 `readme_invariant_manifest_schema_is_pinned` in
 tests/readme_invariant_manifest_schema.rs and
 `readme_invariant_harness_covers_all_candidates` in
-tests/readme_invariant_harness.rs. Both run only on the dispatch lane, inside
-the integration_n_r and readme_invariant_harness targets. This script replays
+tests/readme_invariant_harness.rs. Both run only on the dispatch lane, and only
+as modules of the integration_n_r target (`--test integration_n_r
+readme_invariant`); neither file is a target of its own. This script replays
 them in Python so a README edit learns its verdict before it is committed.
 
 WHY IT EXISTS. Measured 2026-11-24 by replaying both assertions over history:
