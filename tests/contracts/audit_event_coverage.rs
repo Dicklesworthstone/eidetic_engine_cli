@@ -379,6 +379,7 @@ fn ee_context_writes_pack_assembled_and_included_mem_rows() -> TestResult {
         relevance_floor: None,
         redaction_level: ee::models::RedactionLevel::Minimal,
         memory_scope: MemoryScope::Swarm,
+        no_global: false,
         strict_scope: false,
         ppr_weight: None,
         changed_symbols: Vec::new(),

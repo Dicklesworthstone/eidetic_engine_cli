@@ -6794,6 +6794,7 @@ impl DaemonContextParams {
             relevance_floor: self.relevance_floor,
             redaction_level: self.redaction_level,
             memory_scope: self.memory_scope,
+            no_global: false,
             strict_scope: self.strict_scope,
             ppr_weight: self.ppr_weight,
             changed_symbols: self.changed_symbols.clone(),

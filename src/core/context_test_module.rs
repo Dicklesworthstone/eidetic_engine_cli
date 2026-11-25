@@ -897,6 +897,7 @@ mod tests {
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -8680,6 +8681,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -8852,6 +8854,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::SelfOnly,
+            no_global: false,
             strict_scope: true,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -9032,6 +9035,7 @@ pub fn unrelated_context() -> u64 {{
             // mutable-state bypass depend on whether a global store exists on
             // this host, as l2_try_hit_fixture already notes.
             memory_scope: MemoryScope::Verified,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -9245,6 +9249,7 @@ pub fn unrelated_context() -> u64 {{
             // Verified, not Swarm: the Swarm scope makes the mutable-state
             // bypass depend on whether a global store exists on this host.
             memory_scope: MemoryScope::Verified,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -9879,6 +9884,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::SelfOnly,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -10013,6 +10019,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -10161,6 +10168,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Verified,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -10220,6 +10228,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -10320,6 +10329,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Verified,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -10471,6 +10481,7 @@ pub fn unrelated_context() -> u64 {{
                     relevance_floor: None,
                     redaction_level: crate::models::RedactionLevel::Minimal,
                     memory_scope: MemoryScope::Swarm,
+                    no_global: false,
                     strict_scope: false,
                     ppr_weight: None,
                     changed_symbols: Vec::new(),
@@ -10608,6 +10619,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -10780,6 +10792,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -11695,6 +11708,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -11993,6 +12007,7 @@ pub fn unrelated_context() -> u64 {{
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -14945,7 +14960,7 @@ pub fn unrelated_context() -> u64 {{
         let root = directory.path().join("global");
         let paths = crate::core::global_store::GlobalStorePaths::from_root(&root);
         let mut policy = crate::config::MemoryConfig::default();
-        let (posture, binding) = super::context_global_store_scope_for_paths(&paths, &policy);
+        let (posture, binding) = super::context_global_store_scope_for_paths(&paths, &policy, false);
         assert_eq!(posture, "store_absent");
         assert!(binding.is_none());
 
@@ -14953,7 +14968,7 @@ pub fn unrelated_context() -> u64 {{
         let connection =
             DbConnection::open_file(&paths.database_path).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
-        let (posture, binding) = super::context_global_store_scope_for_paths(&paths, &policy);
+        let (posture, binding) = super::context_global_store_scope_for_paths(&paths, &policy, false);
         assert_eq!(posture, "included");
         let empty = binding.ok_or("empty global store should have an observed binding")?;
         assert!(empty.binding_available);
@@ -14969,7 +14984,7 @@ pub fn unrelated_context() -> u64 {{
                 },
             )
             .map_err(|error| error.to_string())?;
-        let (_, binding) = super::context_global_store_scope_for_paths(&paths, &policy);
+        let (_, binding) = super::context_global_store_scope_for_paths(&paths, &policy, false);
         let bound = binding.ok_or("global store should be included")?;
         assert!(bound.binding_available);
         assert_eq!(bound.workspace_id.as_deref(), Some(workspace_id.as_str()));
@@ -14981,11 +14996,14 @@ pub fn unrelated_context() -> u64 {{
         std::fs::write(&corrupt.database_path, b"not a database")
             .map_err(|error| error.to_string())?;
         policy.include_global = Some(false);
-        let (posture, binding) = super::context_global_store_scope_for_paths(&corrupt, &policy);
+        let (posture, binding) = super::context_global_store_scope_for_paths(&corrupt, &policy, false);
         assert_eq!(posture, "disabled_by_config");
         assert!(binding.is_none(), "disabled stores must not be opened");
         policy.include_global = Some(true);
-        let (_, binding) = super::context_global_store_scope_for_paths(&corrupt, &policy);
+        let (posture, binding) = super::context_global_store_scope_for_paths(&corrupt, &policy, true);
+        assert_eq!(posture, "disabled_by_flag");
+        assert!(binding.is_none());
+        let (_, binding) = super::context_global_store_scope_for_paths(&corrupt, &policy, false);
         assert!(!binding.ok_or("present global address")?.binding_available);
         assert_eq!(
             std::fs::read(&corrupt.database_path).map_err(|error| error.to_string())?,

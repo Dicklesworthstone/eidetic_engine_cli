@@ -1947,6 +1947,7 @@ fn serve_context_options(
         relevance_floor: retrieval.relevance_floor,
         redaction_level: RedactionLevel::Minimal,
         memory_scope: retrieval.memory_scope,
+        no_global: false,
         strict_scope: retrieval.strict_scope,
         ppr_weight: None,
         changed_symbols: Vec::new(),

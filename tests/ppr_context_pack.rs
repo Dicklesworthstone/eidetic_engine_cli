@@ -134,6 +134,7 @@ fn context_options(
         relevance_floor: None,
         redaction_level: ee::models::RedactionLevel::Minimal,
         memory_scope: MemoryScope::Swarm,
+        no_global: false,
         strict_scope: false,
         ppr_weight,
         changed_symbols: Vec::new(),

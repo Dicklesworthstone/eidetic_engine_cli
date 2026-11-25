@@ -798,6 +798,8 @@ pub struct ContextTaskLens {
 
 #[derive(Clone, Debug)]
 pub struct ContextPackOptions {
+    /// Exclude the separate user-global memory store for this pack.
+    pub no_global: bool,
     /// Literal workspace-relative task targets for directory/file-scoped rules.
     pub task_paths: Vec<String>,
     pub workspace_path: PathBuf,
@@ -2200,6 +2202,7 @@ fn pack_explanation_replay_command(
     for (enabled, flag) in [
         (options.strict_source_mode, "strict-source-mode"),
         (options.strict_scope, "strict-scope"),
+        (options.no_global, "no-global"),
         (options.include_tombstoned, "include-tombstoned"),
         (options.include_expired, "include-expired"),
         (options.include_future, "include-future"),
@@ -3124,7 +3127,7 @@ async fn run_context_pack_attempt(
         source_mode: options.source_mode,
         strict_source_mode: options.strict_source_mode,
         memory_scope: options.memory_scope,
-        no_global: false,
+        no_global: options.no_global,
         strict_scope: options.strict_scope,
     };
     search_options
@@ -9338,6 +9341,9 @@ fn context_pack_l2_feature_flags_hash(
     // Feedback can change ranking without changing the memory row. Bind the
     // actually scored candidate pool before reusing assembly.
     hash_pack_quality_candidates(&mut hasher, &search_report.results);
+    if options.no_global {
+        hash_labeled_bool(&mut hasher, "no_global", true);
+    }
     // Incident cards can be discovered only during assembly. Their feedback
     // can change without altering the retrieved hits or workspace generation.
     // Reuse the complete ledger proof already consumed by this retrieval.
@@ -10694,19 +10700,20 @@ fn context_global_store_scope(
     let Ok(policy) = crate::config::workspace_memory_policy(&options.workspace_path) else {
         return ("policy_unavailable", None);
     };
-    context_global_store_scope_for_paths(&paths, &policy)
+    context_global_store_scope_for_paths(&paths, &policy, options.no_global)
 }
 
 fn context_global_store_scope_for_paths(
     paths: &crate::core::global_store::GlobalStorePaths,
     policy: &crate::config::MemoryConfig,
+    no_global: bool,
 ) -> (&'static str, Option<ContextStoreScopeBinding>) {
     let inclusion = crate::core::global_store::resolve_global_inclusion(
         &crate::core::global_store::GlobalInclusionInput {
             store_present: paths.database_path.exists(),
             participating: policy.participate.unwrap_or(true),
             config_enabled: policy.include_global.unwrap_or(true),
-            no_global_flag: false,
+            no_global_flag: no_global,
         },
     );
     if !inclusion.included {
@@ -10912,6 +10919,9 @@ fn context_effective_config_policy(
 ) -> String {
     let mut hasher = blake3::Hasher::new();
     hash_labeled_bytes(&mut hasher, "schema", b"ee.pack.effective_config.v1");
+    if options.no_global {
+        hash_labeled_bool(&mut hasher, "no_global", true);
+    }
     let exec_domain = crate::pack::PackExecutionDomain::current().portable_domain_key();
     for (label, value) in [
         ("speed", options.speed.as_str()),

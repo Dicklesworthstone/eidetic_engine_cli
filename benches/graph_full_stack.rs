@@ -306,6 +306,7 @@ fn context_options(fixture: &BenchFixture, query: &str, mode: CacheMode) -> Cont
         relevance_floor: None,
         redaction_level: RedactionLevel::Minimal,
         memory_scope: MemoryScope::Swarm,
+        no_global: false,
         strict_scope: false,
         ppr_weight: Some(0.5),
         changed_symbols: Vec::new(),

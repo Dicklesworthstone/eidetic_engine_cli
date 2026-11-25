@@ -341,6 +341,52 @@ fn global_memory_policy_errors_never_enable_promotion_or_retrieval() -> TestResu
     );
     check_local_retrieval("missing-policy", None)?;
 
+    let query_text = "Globalpolicysentinel Local promotion policy fixture";
+    let query_file = root.join("local-pack.eeq.json");
+    std::fs::write(
+        &query_file,
+        serde_json::json!({"version": "ee.query.v1", "query": {"text": query_text}}).to_string(),
+    )
+    .map_err(|error| error.to_string())?;
+    let query_file = query_file.to_str().ok_or("non-UTF8 query fixture path")?;
+    for (label, mut args, expected_global) in [
+        ("pack-flag-control", vec!["pack", query_text], true),
+        ("pack-flag", vec!["pack", query_text, "--no-global"], false),
+        (
+            "context-flag",
+            vec!["context", query_text, "--no-global", "--use-daemon"],
+            false,
+        ),
+        (
+            "query-file-flag",
+            vec!["pack", "--query-file", query_file, "--no-global"],
+            false,
+        ),
+        (
+            "build-flag",
+            vec!["pack", "build", "--query-file", query_file, "--no-global"],
+            false,
+        ),
+    ] {
+        args.extend([
+            "--read-only",
+            "--source-mode",
+            "lexical-only",
+            "--relevance-floor",
+            "0",
+        ]);
+        let (code, packed) = run(label, &args)?;
+        assert_eq!(code, 0, "{packed}");
+        let ids = pack_item_memory_ids(&packed);
+        assert!(ids.iter().any(|id| id == local_id), "{packed}");
+        assert_eq!(
+            ids.iter().any(|id| id == global_id),
+            expected_global,
+            "{packed}"
+        );
+        assert_global_lane_exclusion(&packed, (!expected_global).then_some("disabled_by_flag"))?;
+    }
+
     // Warm a mixed-store primer, opt out for one invocation, then read the
     // ordinary primer again. Cache hits must respect the selected source set.
     for (label, args, include_global) in [

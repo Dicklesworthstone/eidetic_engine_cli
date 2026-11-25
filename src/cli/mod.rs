@@ -3316,6 +3316,10 @@ pub struct ContextShowArgs {
 /// Arguments for `ee context`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct ContextArgs {
+    /// Exclude the separate user-global memory store when building this pack.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub no_global: bool,
+
     /// Literal workspace-relative task path for scoped procedural rules; repeat for multiple files.
     #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
     pub task_paths: Vec<String>,
@@ -3690,6 +3694,10 @@ impl From<CompletionShell> for Shell {
     after_help = "With --json, selected memories live at data.pack.items; omitted memories live at data.pack.omitted."
 )]
 pub struct PackArgs {
+    /// Exclude the separate user-global memory store when building this pack.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub no_global: bool,
+
     /// Literal workspace-relative task path for scoped procedural rules; repeat for multiple files.
     #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
     pub task_paths: Vec<String>,
@@ -3950,6 +3958,10 @@ pub enum PackCommand {
 /// Arguments for `ee pack build`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct PackBuildArgs {
+    /// Exclude the separate user-global memory store when building this pack.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub no_global: bool,
+
     /// Literal workspace-relative task path for scoped procedural rules; repeat for multiple files.
     #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
     pub task_paths: Vec<String>,
@@ -4167,6 +4179,7 @@ impl PackArgs {
             source_mode: self.source_mode,
             strict_source_mode: self.strict_source_mode,
             memory_scope: self.memory_scope,
+            no_global: self.no_global,
             strict_scope: self.strict_scope,
             read_fence: self.read_fence,
             strict_read_fence: self.strict_read_fence,
@@ -17971,6 +17984,7 @@ fn pack_quality_actuals_for_cases(
             relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -43117,8 +43131,19 @@ fn context_stream_pack_id(
     );
     let digest = blake3::hash(source.as_bytes()).to_hex().to_string();
     let bound = crate::core::context::task_paths_query_hash(&digest, &request.task_paths);
+    let bound = pack_query_hash_with_global_policy(bound, pack_options.no_global);
     let digest = bound.strip_prefix("blake3:").unwrap_or(&bound);
     format!("pack_stream_{}", &digest[..26])
+}
+
+fn pack_query_hash_with_global_policy(hash: String, no_global: bool) -> String {
+    if !no_global {
+        return hash;
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.pack.query.no_global.v1\0");
+    hasher.update(hash.as_bytes());
+    format!("blake3:{}", hasher.finalize().to_hex())
 }
 
 fn context_stream_header_frame(
@@ -43738,6 +43763,7 @@ where
             relevance_floor: None,
             redaction_level: BackupRedaction::Minimal.to_model(),
             memory_scope: MemoryScope::Swarm,
+            no_global: false,
             strict_scope: false,
             ppr_weight: None,
             changed_symbols: Vec::new(),
@@ -44656,6 +44682,7 @@ where
         relevance_floor: args.relevance_floor,
         redaction_level: redaction.level,
         memory_scope: args.memory_scope,
+        no_global: args.no_global,
         strict_scope: args.strict_scope,
         ppr_weight: args.ppr_weight,
         changed_symbols: args.changed_symbols.clone(),
@@ -48116,6 +48143,7 @@ where
                 .memory_scope
                 .or(lens_memory_scope)
                 .unwrap_or(MemoryScope::Swarm),
+            no_global: args.no_global,
             strict_scope: args.strict_scope,
             coordination_snapshot: args.coordination_snapshot.clone(),
             coordination_stale_after_ms: args.coordination_stale_after_ms,
@@ -48140,8 +48168,20 @@ where
     }
 
     match &args.command {
+        Some(PackCommand::Build(build_args)) if args.no_global => {
+            let mut build_args = build_args.clone();
+            build_args.no_global = true;
+            handle_pack(process, cli, &build_args, stdout, stderr)
+        }
         Some(PackCommand::Build(build_args)) => {
             handle_pack(process, cli, build_args, stdout, stderr)
+        }
+        Some(PackCommand::Replay(_) | PackCommand::Diff(_)) if args.no_global => {
+            let error = DomainError::Usage {
+                message: "--no-global selects input stores when building a new pack.".to_owned(),
+                repair: Some("Use ee pack <task> --no-global for a fresh selection.".to_owned()),
+            };
+            write_domain_error(&error, cli.renderer(), stdout, stderr)
         }
         Some(PackCommand::Replay(replay_args)) => {
             handle_pack_replay(cli, replay_args, stdout, stderr)
@@ -48283,6 +48323,7 @@ where
         };
         let query_hash = crate::models::compute_query_shape_hash(&request.query, &request.filters);
         let query_hash = crate::core::context::task_paths_query_hash(&query_hash, &task_paths);
+        let query_hash = pack_query_hash_with_global_policy(query_hash, args.no_global);
         let offset = match &request.pagination.cursor {
             Some(cursor_token) => match crate::models::PaginationCursor::decode(cursor_token) {
                 Ok(cursor) => {
@@ -48370,6 +48411,7 @@ where
             .memory_scope
             .or(lens_memory_scope)
             .unwrap_or(MemoryScope::Swarm),
+        no_global: args.no_global,
         strict_scope: args.strict_scope,
         ppr_weight: None,
         changed_symbols: Vec::new(),
@@ -51579,7 +51621,11 @@ fn run_context_pack_with_daemon_retrieval(
     }
     let serving = std::sync::Mutex::new(None);
     let provider = |search_options: &SearchOptions, require_cached_local: bool| {
-        let result = if !options.filters.filters.is_empty() {
+        let result = if options.no_global {
+            Err(DaemonSearchFallbackReason::UnsupportedCliOption(
+                "--no-global remains in-process",
+            ))
+        } else if !options.filters.filters.is_empty() {
             Err(DaemonSearchFallbackReason::UnsupportedCliOption(
                 "metadata field filters remain in-process",
             ))
@@ -57546,6 +57592,7 @@ where
         relevance_floor: None,
         redaction_level: BackupRedaction::Minimal.to_model(),
         memory_scope: MemoryScope::Swarm,
+        no_global: false,
         strict_scope: false,
         ppr_weight: None,
         changed_symbols: Vec::new(),
@@ -75648,6 +75695,7 @@ mod tests {
             relevance_floor: None,
             redaction_level: RedactionLevel::Minimal,
             memory_scope: MemoryScope::Workspace,
+            no_global: false,
             strict_scope: true,
             ppr_weight: None,
             changed_symbols: Vec::new(),
