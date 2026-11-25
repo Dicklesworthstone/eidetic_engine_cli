@@ -14960,7 +14960,8 @@ pub fn unrelated_context() -> u64 {{
         let root = directory.path().join("global");
         let paths = crate::core::global_store::GlobalStorePaths::from_root(&root);
         let mut policy = crate::config::MemoryConfig::default();
-        let (posture, binding) = super::context_global_store_scope_for_paths(&paths, &policy, false);
+        let (posture, binding) =
+            super::context_global_store_scope_for_paths(&paths, &policy, false);
         assert_eq!(posture, "store_absent");
         assert!(binding.is_none());
 
@@ -14968,7 +14969,8 @@ pub fn unrelated_context() -> u64 {{
         let connection =
             DbConnection::open_file(&paths.database_path).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
-        let (posture, binding) = super::context_global_store_scope_for_paths(&paths, &policy, false);
+        let (posture, binding) =
+            super::context_global_store_scope_for_paths(&paths, &policy, false);
         assert_eq!(posture, "included");
         let empty = binding.ok_or("empty global store should have an observed binding")?;
         assert!(empty.binding_available);
@@ -14996,11 +14998,13 @@ pub fn unrelated_context() -> u64 {{
         std::fs::write(&corrupt.database_path, b"not a database")
             .map_err(|error| error.to_string())?;
         policy.include_global = Some(false);
-        let (posture, binding) = super::context_global_store_scope_for_paths(&corrupt, &policy, false);
+        let (posture, binding) =
+            super::context_global_store_scope_for_paths(&corrupt, &policy, false);
         assert_eq!(posture, "disabled_by_config");
         assert!(binding.is_none(), "disabled stores must not be opened");
         policy.include_global = Some(true);
-        let (posture, binding) = super::context_global_store_scope_for_paths(&corrupt, &policy, true);
+        let (posture, binding) =
+            super::context_global_store_scope_for_paths(&corrupt, &policy, true);
         assert_eq!(posture, "disabled_by_flag");
         assert!(binding.is_none());
         let (_, binding) = super::context_global_store_scope_for_paths(&corrupt, &policy, false);
@@ -15189,7 +15193,12 @@ pub fn unrelated_context() -> u64 {{
         }
 
         for (requested, speed, strict, fallback) in [
-            (SearchSourceMode::LexicalOnly, SpeedMode::Default, true, false),
+            (
+                SearchSourceMode::LexicalOnly,
+                SpeedMode::Default,
+                true,
+                false,
+            ),
             (SearchSourceMode::Hybrid, SpeedMode::Default, false, true),
             (SearchSourceMode::Hybrid, SpeedMode::Instant, false, false),
         ] {
@@ -15205,9 +15214,12 @@ pub fn unrelated_context() -> u64 {{
             assert_eq!(plan["fallbackApplied"], fallback);
             assert_eq!(run.response.data.embed_backend, EmbedBackend::HashFallback);
             assert!(
-                run.response.data.pack.items.iter().any(|item| {
-                    item.memory_id.to_string() == pack_source_authority_id(4)
-                })
+                run.response
+                    .data
+                    .pack
+                    .items
+                    .iter()
+                    .any(|item| { item.memory_id.to_string() == pack_source_authority_id(4) })
             );
         }
         Ok(())
@@ -15334,7 +15346,10 @@ pub fn unrelated_context() -> u64 {{
         options.max_tokens = Some(4_000);
         options.relevance_floor = Some(0.0);
         let reader = DbConnection::open_file_read_only(
-            options.database_path.as_ref().ok_or("missing fixture path")?,
+            options
+                .database_path
+                .as_ref()
+                .ok_or("missing fixture path")?,
         )
         .map_err(|error| error.to_string())?;
         let recent = || -> Result<BTreeSet<String>, String> {

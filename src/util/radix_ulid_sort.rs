@@ -166,9 +166,9 @@ pub(crate) fn sort_slice_by_ulid_payload_or_lexical<T, F>(items: &mut [T], key: 
 where
     F: Fn(&T) -> &str,
 {
-    if items.is_sorted_by(|left, right| {
-        compare_ulid_payload_or_lexical(key(left), key(right)).is_le()
-    }) {
+    if items
+        .is_sorted_by(|left, right| compare_ulid_payload_or_lexical(key(left), key(right)).is_le())
+    {
         return;
     }
 

@@ -6647,7 +6647,8 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_family_origins_reject_preview_and_apply_without_creating_storage() -> TestResult {
+    fn conflicting_family_origins_reject_preview_and_apply_without_creating_storage() -> TestResult
+    {
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         for origin in ["declared", "unknown"] {
             let mut records = linked_jsonl_values()?;
@@ -6669,7 +6670,10 @@ mod tests {
                 .map_err(|error| error.to_string())?;
                 assert_eq!(report.status, "rejected");
                 assert!(
-                    report.issues.iter().any(|issue| issue.code == "invalid_memory_attempt_family")
+                    report
+                        .issues
+                        .iter()
+                        .any(|issue| issue.code == "invalid_memory_attempt_family")
                 );
                 assert!(!database_path(&options).exists());
             }
@@ -6705,7 +6709,10 @@ mod tests {
         let conflict = import_jsonl_records(&options).map_err(|error| error.to_string())?;
         assert_eq!(conflict.status, "rejected");
         assert!(
-            conflict.issues.iter().any(|issue| issue.code == "reimport_divergent_existing_family")
+            conflict
+                .issues
+                .iter()
+                .any(|issue| issue.code == "reimport_divergent_existing_family")
         );
         let db =
             DbConnection::open_file(database_path(&options)).map_err(|error| error.to_string())?;
@@ -6719,11 +6726,13 @@ mod tests {
             Some((None, "legacy_v094".to_owned()))
         );
         assert_eq!(
-            db.count_table_rows("memories").map_err(|error| error.to_string())?,
+            db.count_table_rows("memories")
+                .map_err(|error| error.to_string())?,
             1
         );
         assert_eq!(
-            db.count_table_rows("memory_links").map_err(|error| error.to_string())?,
+            db.count_table_rows("memory_links")
+                .map_err(|error| error.to_string())?,
             0
         );
         db.close().map_err(|error| error.to_string())?;

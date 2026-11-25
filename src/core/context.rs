@@ -3466,11 +3466,14 @@ async fn run_context_pack_attempt(
         && search_options.strict_source_mode
         && search_options.execution_source_mode() != SearchSourceMode::LexicalOnly
     {
-        return Err(ContextPackError::Search(SearchError::SourceModeUnavailable {
-            requested: search_options.source_mode,
-            reason: "the search index is unavailable and stored-memory retrieval is lexical only"
-                .to_owned(),
-        }));
+        return Err(ContextPackError::Search(
+            SearchError::SourceModeUnavailable {
+                requested: search_options.source_mode,
+                reason:
+                    "the search index is unavailable and stored-memory retrieval is lexical only"
+                        .to_owned(),
+            },
+        ));
     }
     let can_add_tombstones = options.include_tombstoned
         && match search_options.execution_source_mode() {

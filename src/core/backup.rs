@@ -49,17 +49,17 @@ use crate::db::shard::{
 };
 use crate::db::{
     CASS_BACKUP_CHUNK_ROWS, CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput,
-    CreateGraphSnapshotInput,
-    CreateTaskEpisodeInput, CreateWorkspaceInput, DatabaseConfig, DbConnection, GraphSnapshotType,
-    MeshStorageStatus, StoredAgent, StoredAgentContextProfile, StoredArtifact, StoredArtifactLink,
-    StoredAuditEntry, StoredCausalEvidence, StoredCertificateRecord, StoredCurationCandidate,
-    StoredCurationTtlPolicy, StoredEpisodeAction, StoredErrorFingerprint, StoredErrorRepairLink,
-    StoredEvidenceSpan, StoredFeedbackEvent, StoredFeedbackQuarantine, StoredGraphAlgorithmResult,
-    StoredGraphAlgorithmWitness, StoredGraphSnapshot, StoredImportLedger, StoredJournalEntry,
-    StoredLearningObservation, StoredMaintenanceHistory, StoredMemory, StoredMemoryLink,
-    StoredOutcomeEvidence, StoredPackHistory, StoredProceduralRule, StoredProcedure,
-    StoredProcedureEvent, StoredRationaleTrace, StoredRationaleTraceLink, StoredRchVerifyRun,
-    StoredRecorderEvent, StoredRecorderRun, StoredSearchIndexJob, StoredSession, StoredTaskEpisode,
+    CreateGraphSnapshotInput, CreateTaskEpisodeInput, CreateWorkspaceInput, DatabaseConfig,
+    DbConnection, GraphSnapshotType, MeshStorageStatus, StoredAgent, StoredAgentContextProfile,
+    StoredArtifact, StoredArtifactLink, StoredAuditEntry, StoredCausalEvidence,
+    StoredCertificateRecord, StoredCurationCandidate, StoredCurationTtlPolicy, StoredEpisodeAction,
+    StoredErrorFingerprint, StoredErrorRepairLink, StoredEvidenceSpan, StoredFeedbackEvent,
+    StoredFeedbackQuarantine, StoredGraphAlgorithmResult, StoredGraphAlgorithmWitness,
+    StoredGraphSnapshot, StoredImportLedger, StoredJournalEntry, StoredLearningObservation,
+    StoredMaintenanceHistory, StoredMemory, StoredMemoryLink, StoredOutcomeEvidence,
+    StoredPackHistory, StoredProceduralRule, StoredProcedure, StoredProcedureEvent,
+    StoredRationaleTrace, StoredRationaleTraceLink, StoredRchVerifyRun, StoredRecorderEvent,
+    StoredRecorderRun, StoredSearchIndexJob, StoredSession, StoredTaskEpisode,
     StoredTrustQuarantine, audit_actions,
 };
 use crate::models::{
@@ -30154,8 +30154,7 @@ mod tests {
             include_graph_cache: include_derived,
             dry_run: false,
         };
-        let (created, queries) =
-            crate::db::capture_query_sql_for_test(|| create_backup(&options));
+        let (created, queries) = crate::db::capture_query_sql_for_test(|| create_backup(&options));
         let created = created.map_err(|error| error.message())?;
         let ordered_reads: Vec<_> = queries
             .iter()

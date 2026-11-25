@@ -15386,12 +15386,14 @@ pub(crate) fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
     }
     // Choose the policy once for the whole pool. Switching comparators for
     // each pair can form a cycle when only some hits carry quality metadata.
-    let compare: fn(&SearchHit, &SearchHit) -> std::cmp::Ordering =
-        if hits.iter().any(|hit| hit.ranking_components_json().is_some()) {
-            quality_scored_hit_order
-        } else {
-            rerank_aware_hit_order
-        };
+    let compare: fn(&SearchHit, &SearchHit) -> std::cmp::Ordering = if hits
+        .iter()
+        .any(|hit| hit.ranking_components_json().is_some())
+    {
+        quality_scored_hit_order
+    } else {
+        rerank_aware_hit_order
+    };
     hits.sort_by(compare);
     let mut run_start = 0_usize;
     while run_start < hits.len() {
@@ -30819,8 +30821,12 @@ mod tests {
         }));
         let original = [reranked, ordinary, quality];
         for order in [
-            [0, 1, 2], [0, 2, 1], [1, 0, 2],
-            [1, 2, 0], [2, 0, 1], [2, 1, 0],
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
         ] {
             let mut hits = order.map(|i| original[i].clone());
             sort_search_hits_by_score_order(&mut hits);
