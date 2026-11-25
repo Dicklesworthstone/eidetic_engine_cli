@@ -1186,7 +1186,6 @@ fn public_provenance_admission_accepts_redacted_ids_and_explicit_legacy_history(
     Ok(())
 }
 
-
 fn code_anchor_fixture(level: RedactionLevel, missing: bool) -> Result<Fixture, String> {
     use crate::models::MemoryAnchorKind::{Path, Symbol};
 
@@ -1351,7 +1350,8 @@ fn explicit_code_anchor_history_survives_restore_and_rebackup() -> TestResult {
 }
 
 #[test]
-fn redacted_code_anchor_history_retains_negative_states_without_private_commitments() -> TestResult {
+fn redacted_code_anchor_history_retains_negative_states_without_private_commitments() -> TestResult
+{
     let fixture = code_anchor_fixture(RedactionLevel::Strict, false)?;
     let chunk = read_code_anchor_chunk(&fixture)?;
     let encoded = serde_json::to_string(&chunk).map_err(|error| error.to_string())?;
@@ -1418,7 +1418,8 @@ fn missing_canonical_code_anchor_is_explicitly_unavailable_and_restores_suspect(
 }
 
 #[test]
-fn legacy_anchor_history_keeps_old_wire_authentication_and_reports_suspect_locators() -> TestResult {
+fn legacy_anchor_history_keeps_old_wire_authentication_and_reports_suspect_locators() -> TestResult
+{
     // Independently spell the shipped v2 shape so new optional fields cannot
     // silently change the exact bytes authenticated by the older writer.
     #[derive(serde::Serialize)]

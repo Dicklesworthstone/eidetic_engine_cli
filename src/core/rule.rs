@@ -7490,7 +7490,9 @@ mod tests {
                     .ok_or("expected the imported rule to be persisted")?;
                 ensure(
                     stored.trust_class == expected.as_str(),
-                    format!("wrong stored trust for alias {alias:?}, authenticated={authenticated}"),
+                    format!(
+                        "wrong stored trust for alias {alias:?}, authenticated={authenticated}"
+                    ),
                 )?;
                 ensure(
                     decision

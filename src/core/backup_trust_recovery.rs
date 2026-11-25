@@ -9,10 +9,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Rows, recovery_error, storage_error};
 use crate::core::backup::{
-    BackupCodeAnchorKey, BackupCodeAnchorSnapshot, BackupCodeAnchorState,
-    BackupMemoryProvenance, BackupRestoredDerivedAssetReport, BackupTrustHistory,
-    WORK_HISTORY_CHUNK_ROWS, read_restored_derived_json, restored_memory_provenance,
-    valid_trust_history_schema, validate_code_anchor_state, validate_memory_provenance,
+    BackupCodeAnchorKey, BackupCodeAnchorSnapshot, BackupCodeAnchorState, BackupMemoryProvenance,
+    BackupRestoredDerivedAssetReport, BackupTrustHistory, WORK_HISTORY_CHUNK_ROWS,
+    read_restored_derived_json, restored_memory_provenance, valid_trust_history_schema,
+    validate_code_anchor_state, validate_memory_provenance,
 };
 use crate::db::DbConnection;
 use crate::models::DomainError;
@@ -205,8 +205,7 @@ impl TrustExpectation {
                 let matches = match state {
                     Some(expected) => *expected == BackupCodeAnchorSnapshot::from(actual),
                     None => {
-                        actual.freshness_state
-                            == crate::models::MemoryAnchorFreshnessState::Suspect
+                        actual.freshness_state == crate::models::MemoryAnchorFreshnessState::Suspect
                     }
                 };
                 if !matches || !keys.insert(key) {
@@ -221,7 +220,9 @@ impl TrustExpectation {
             .as_ref()
             .is_some_and(|rows| rows.len() != keys.len())
         {
-            return Err(recovery_error("Restored code-anchor coverage is incomplete"));
+            return Err(recovery_error(
+                "Restored code-anchor coverage is incomplete",
+            ));
         }
         Ok(())
     }

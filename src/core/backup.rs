@@ -66,10 +66,9 @@ use crate::models::{
     BACKUP_MANIFEST_SCHEMA_V1, BACKUP_MANIFEST_SCHEMA_V2, BACKUP_RESTORE_SCHEMA_V1,
     BACKUP_VERIFY_SCHEMA_V1, BackupId, CreateMemorySentinelSpecInput, DomainError,
     ExportAuditRecord, ExportFooter, ExportHeader, ExportLinkRecord, ExportMemoryRecord,
-    ExportScope, ExportTagRecord, ExportWorkspaceRecord, ImportSource,
-    MemoryAnchorFreshnessState, MemoryAnchorSource, MemorySeal,
-    MemorySentinelSpec, RedactionLevel, StoredMemoryAnchor, StoredMemorySentinelSpec, TrustLevel,
-    jsonl::ExportRecordBuildError,
+    ExportScope, ExportTagRecord, ExportWorkspaceRecord, ImportSource, MemoryAnchorFreshnessState,
+    MemoryAnchorSource, MemorySeal, MemorySentinelSpec, RedactionLevel, StoredMemoryAnchor,
+    StoredMemorySentinelSpec, TrustLevel, jsonl::ExportRecordBuildError,
 };
 use crate::output::jsonl_export::{
     ExportStats, JsonlExporter, redact_content, redact_memory_record, redact_provenance_uri,
@@ -10542,7 +10541,9 @@ fn collect_trust_history_payloads(
                     if redaction != RedactionLevel::None
                         && state.captured_span_hash != surface.anchor.captured_span_hash
                     {
-                        state.captured_span_hash.clone_from(&surface.anchor.captured_span_hash);
+                        state
+                            .captured_span_hash
+                            .clone_from(&surface.anchor.captured_span_hash);
                         if state.freshness_state == "current" {
                             state.freshness_state = "suspect".to_owned();
                         }
@@ -11025,12 +11026,16 @@ fn restored_code_anchors(
             None => None,
         };
         if let Some(state) = snapshot {
-            anchor.redacted_anchor_value.clone_from(&state.redacted_anchor_value);
+            anchor
+                .redacted_anchor_value
+                .clone_from(&state.redacted_anchor_value);
             anchor.confidence = state.confidence;
             anchor.source = MemoryAnchorSource::parse(&state.source)
                 .ok_or_else(|| work_history_error("invalid recovered code-anchor source"))?;
             anchor.provenance.clone_from(&state.provenance);
-            anchor.captured_span_hash.clone_from(&state.captured_span_hash);
+            anchor
+                .captured_span_hash
+                .clone_from(&state.captured_span_hash);
             anchor.freshness_state = MemoryAnchorFreshnessState::parse(&state.freshness_state)
                 .ok_or_else(|| work_history_error("invalid recovered code-anchor freshness"))?;
             anchor.generation = state.generation;
@@ -11259,8 +11264,10 @@ fn restore_trust_history(
     chunks.sort_by_key(|c| c.chunk_index);
     let source_id = chunks[0].workspace_id.clone();
     let schema = chunks[0].schema.clone();
-    let has_memory_provenance =
-        matches!(schema.as_str(), TRUST_HISTORY_SCHEMA | TRUST_HISTORY_SCHEMA_V2);
+    let has_memory_provenance = matches!(
+        schema.as_str(),
+        TRUST_HISTORY_SCHEMA | TRUST_HISTORY_SCHEMA_V2
+    );
     let has_code_anchor_history = schema == TRUST_HISTORY_SCHEMA;
     let count = chunks.len();
     for (index, chunk) in chunks.iter_mut().enumerate() {
