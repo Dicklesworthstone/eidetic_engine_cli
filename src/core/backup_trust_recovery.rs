@@ -9,9 +9,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Rows, recovery_error, storage_error};
 use crate::core::backup::{
+    BackupCodeAnchorKey, BackupCodeAnchorSnapshot, BackupCodeAnchorState,
     BackupMemoryProvenance, BackupRestoredDerivedAssetReport, BackupTrustHistory,
     WORK_HISTORY_CHUNK_ROWS, read_restored_derived_json, restored_memory_provenance,
-    valid_trust_history_schema, validate_memory_provenance,
+    valid_trust_history_schema, validate_code_anchor_state, validate_memory_provenance,
 };
 use crate::db::DbConnection;
 use crate::models::DomainError;
@@ -22,6 +23,7 @@ pub(super) struct TrustExpectation {
     workspace_id: String,
     rows: Rows,
     memory_provenance: Option<BTreeMap<String, BackupMemoryProvenance>>,
+    code_anchor_states: Option<BTreeMap<BackupCodeAnchorKey, BackupCodeAnchorState>>,
 }
 
 impl TrustExpectation {
@@ -36,6 +38,7 @@ impl TrustExpectation {
         let mut source_schema: Option<String> = None;
         let mut rows = Rows::default();
         let mut memory_provenance = None;
+        let mut code_anchor_states = None;
         for asset in assets.iter().filter(|a| a.kind == "trust_history") {
             let chunk: BackupTrustHistory =
                 serde_json::from_value(read_restored_derived_json(asset)?)
@@ -57,6 +60,7 @@ impl TrustExpectation {
                     chunk.certificates.len(),
                     chunk.agents.len(),
                     chunk.memory_provenance.as_ref().map_or(0, Vec::len),
+                    chunk.code_anchor_states.as_ref().map_or(0, Vec::len),
                 ]
                 .into_iter()
                 .any(|n| n > WORK_HISTORY_CHUNK_ROWS)
@@ -74,6 +78,17 @@ impl TrustExpectation {
                     if captured.insert(row.memory_id.clone(), row).is_some() {
                         return Err(recovery_error(
                             "Recovered history repeats an identity in memory provenance",
+                        ));
+                    }
+                }
+            }
+            if let Some(states) = chunk.code_anchor_states {
+                let captured = code_anchor_states.get_or_insert_with(BTreeMap::new);
+                for row in states {
+                    validate_code_anchor_state(&row)?;
+                    if captured.insert(row.key(), row).is_some() {
+                        return Err(recovery_error(
+                            "Recovered history repeats an identity in code-anchor state",
                         ));
                     }
                 }
@@ -105,12 +120,14 @@ impl TrustExpectation {
             workspace_id: workspace_id.to_owned(),
             rows,
             memory_provenance,
+            code_anchor_states,
         })
     }
 
     pub(super) fn verify_connection(&self, db: &DbConnection) -> Result<(), DomainError> {
         self.verify_trust_rows(db)?;
-        self.verify_memory_provenance(db)
+        self.verify_memory_provenance(db)?;
+        self.verify_code_anchor_states(db)
     }
 
     fn verify_trust_rows(&self, db: &DbConnection) -> Result<(), DomainError> {
@@ -150,6 +167,63 @@ impl TrustExpectation {
         // Recheck all four populations in the same snapshot, including after
         // derived-state rebuilding, without releasing or re-verifying a row.
         self.rows.verify_complete(&actual, db, TRUST_TABLES)
+    }
+
+    fn verify_code_anchor_states(&self, db: &DbConnection) -> Result<(), DomainError> {
+        let mut keys = BTreeSet::new();
+        for memory in db
+            .list_memories(&self.workspace_id, None, true)
+            .map_err(storage_error)?
+        {
+            let canonical = db.list_memory_anchors(&memory.id).map_err(storage_error)?;
+            for surface in db
+                .list_memory_code_anchor_sources(&memory.id)
+                .map_err(storage_error)?
+            {
+                let key = (
+                    memory.id.clone(),
+                    surface.anchor.anchor_kind.as_str().to_owned(),
+                    surface.anchor.anchor_value_hash.clone(),
+                );
+                let actual = canonical
+                    .iter()
+                    .find(|anchor| {
+                        anchor.anchor_kind == surface.anchor.anchor_kind
+                            && anchor.anchor_value_hash == surface.anchor.anchor_value_hash
+                    })
+                    .ok_or_else(|| recovery_error("Restored code-anchor state is missing"))?;
+                let state = match &self.code_anchor_states {
+                    Some(rows) => rows
+                        .get(&key)
+                        .ok_or_else(|| recovery_error("Restored code-anchor identity differs"))?
+                        .state
+                        .as_ref(),
+                    None => None,
+                };
+                // Compare all historical fields to the frozen carrier, never
+                // to values manufactured by the importer or recovery writer.
+                let matches = match state {
+                    Some(expected) => *expected == BackupCodeAnchorSnapshot::from(actual),
+                    None => {
+                        actual.freshness_state
+                            == crate::models::MemoryAnchorFreshnessState::Suspect
+                    }
+                };
+                if !matches || !keys.insert(key) {
+                    return Err(recovery_error(
+                        "Restored code-anchor state differs from authenticated history",
+                    ));
+                }
+            }
+        }
+        if self
+            .code_anchor_states
+            .as_ref()
+            .is_some_and(|rows| rows.len() != keys.len())
+        {
+            return Err(recovery_error("Restored code-anchor coverage is incomplete"));
+        }
+        Ok(())
     }
 
     fn verify_memory_provenance(&self, db: &DbConnection) -> Result<(), DomainError> {
@@ -335,6 +409,7 @@ mod population_tests {
                 rows: seed(&db, &source, table)?,
                 workspace_id: source.clone(),
                 memory_provenance: None,
+                code_anchor_states: None,
             };
             exact
                 .verify_trust_rows(&db)

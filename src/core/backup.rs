@@ -66,8 +66,9 @@ use crate::models::{
     BACKUP_MANIFEST_SCHEMA_V1, BACKUP_MANIFEST_SCHEMA_V2, BACKUP_RESTORE_SCHEMA_V1,
     BACKUP_VERIFY_SCHEMA_V1, BackupId, CreateMemorySentinelSpecInput, DomainError,
     ExportAuditRecord, ExportFooter, ExportHeader, ExportLinkRecord, ExportMemoryRecord,
-    ExportScope, ExportTagRecord, ExportWorkspaceRecord, ImportSource, MemorySeal,
-    MemorySentinelSpec, RedactionLevel, StoredMemorySentinelSpec, TrustLevel,
+    ExportScope, ExportTagRecord, ExportWorkspaceRecord, ImportSource,
+    MemoryAnchorFreshnessState, MemoryAnchorSource, MemorySeal,
+    MemorySentinelSpec, RedactionLevel, StoredMemoryAnchor, StoredMemorySentinelSpec, TrustLevel,
     jsonl::ExportRecordBuildError,
 };
 use crate::output::jsonl_export::{
@@ -98,9 +99,12 @@ const RECORDED_HISTORY_SCHEMA: &str = "ee.backup.recorded_history.v1";
 const ERROR_RECALL_SCHEMA: &str = "ee.backup.error_recall.v1";
 const ARTIFACT_REGISTRY_SCHEMA: &str = "ee.backup.artifact_registry.v1";
 const REASONING_HISTORY_SCHEMA: &str = "ee.backup.reasoning_history.v1";
-const TRUST_HISTORY_SCHEMA: &str = "ee.backup.trust_history.v2";
+const TRUST_HISTORY_SCHEMA: &str = "ee.backup.trust_history.v3";
+const TRUST_HISTORY_SCHEMA_V2: &str = "ee.backup.trust_history.v2";
 const TRUST_HISTORY_SCHEMA_V1: &str = "ee.backup.trust_history.v1";
 pub const BACKUP_MEMORY_PROVENANCE_UNAVAILABLE_CODE: &str = "backup_memory_provenance_unavailable";
+pub const BACKUP_CODE_ANCHOR_FRESHNESS_UNAVAILABLE_CODE: &str =
+    "backup_code_anchor_freshness_unavailable";
 const BACKUP_RULE_REDACTION_REVIEW_REQUIRED_CODE: &str = "backup_rule_redaction_review_required";
 const MAINTENANCE_HISTORY_SCHEMA: &str = "ee.backup.maintenance_history.v1";
 const AUDIT_HISTORY_SCHEMA: &str = "ee.backup.audit_history.v1";
@@ -1808,10 +1812,12 @@ struct BackupTrustHistory {
     quarantines: Vec<StoredTrustQuarantine>,
     certificates: Vec<StoredCertificateRecord>,
     agents: Vec<StoredAgent>,
-    // The absent v1 field must stay absent when reconstructing its MAC input.
-    // A v2 chunk always carries Some, including chunks with no memory rows.
+    // Absent fields must stay absent when reconstructing old MAC inputs.
+    // V2/v3 carry memory provenance; only v3 carries explicit anchor history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     memory_provenance: Option<Vec<BackupMemoryProvenance>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    code_anchor_states: Option<Vec<BackupCodeAnchorState>>,
     authentication: Option<AuthenticatedHeader>,
 }
 
@@ -1835,6 +1841,60 @@ impl From<&StoredMemory> for BackupMemoryProvenance {
             provenance_verification_status: memory.provenance_verification_status.clone(),
             provenance_verified_at: memory.provenance_verified_at.clone(),
             provenance_verification_note: memory.provenance_verification_note.clone(),
+        }
+    }
+}
+
+type BackupCodeAnchorKey = (String, String, String);
+
+/// Only explicit code locators admitted by the primary records are covered.
+/// Extracted non-code anchors remain derived. Missing canonical state is
+/// represented explicitly, never taken from the source reader's defaults.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupCodeAnchorState {
+    memory_id: String,
+    anchor_kind: String,
+    anchor_value_hash: String,
+    state: Option<BackupCodeAnchorSnapshot>,
+}
+
+impl BackupCodeAnchorState {
+    fn key(&self) -> BackupCodeAnchorKey {
+        (
+            self.memory_id.clone(),
+            self.anchor_kind.clone(),
+            self.anchor_value_hash.clone(),
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupCodeAnchorSnapshot {
+    redacted_anchor_value: String,
+    confidence: f32,
+    source: String,
+    provenance: String,
+    captured_span_hash: String,
+    freshness_state: String,
+    generation: i64,
+    created_at: String,
+    updated_at: String,
+}
+
+impl From<&StoredMemoryAnchor> for BackupCodeAnchorSnapshot {
+    fn from(anchor: &StoredMemoryAnchor) -> Self {
+        Self {
+            redacted_anchor_value: anchor.redacted_anchor_value.clone(),
+            confidence: anchor.confidence,
+            source: anchor.source.as_str().to_owned(),
+            provenance: anchor.provenance.clone(),
+            captured_span_hash: anchor.captured_span_hash.clone(),
+            freshness_state: anchor.freshness_state.as_str().to_owned(),
+            generation: anchor.generation,
+            created_at: anchor.created_at.clone(),
+            updated_at: anchor.updated_at.clone(),
         }
     }
 }
@@ -2006,7 +2066,14 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
         "model_registry" | "agent_installations" | "agent_history_sources" => {
             BackupTablePolicy::new("maintain", "derived_rebuildable", "rediscover_on_restore")
         }
-        "memory_anchors" | "memory_sentinel_results" => {
+        // Explicit code-anchor decisions travel in authenticated trust history;
+        // the remaining extracted anchors can be rebuilt from primary content.
+        "memory_anchors" => BackupTablePolicy::new(
+            "maintain",
+            "mixed_canonical_and_derived",
+            "explicit_code_trust_history_and_rebuild",
+        ),
+        "memory_sentinel_results" => {
             BackupTablePolicy::new("maintain", "derived_rebuildable", "rebuild_on_restore")
         }
 
@@ -3808,9 +3875,12 @@ fn restore_backup_to_side_path_with_recovery_hooks(
     let mut restore_degraded = restore_manifest_degradations(&manifest_bytes);
     // Admit and freeze the primary projection before any destination work,
     // including previews of legacy archives with no provenance carrier.
-    // Reuse v2 preparation when its source key window is unchanged; rotation
+    // Reuse preparation when its source key window is unchanged; rotation
     // retains the previous fresh-root native trust cap through recapture.
     let memory_provenance_available = verified_records.is_some();
+    let code_anchor_history_complete = verified_records
+        .as_ref()
+        .is_some_and(|records| records.code_anchor_history_complete);
     let expected_records = match verified_records {
         Some(records) if records.source_key_ids == source_auth.window_key_ids() => {
             records.expectation
@@ -3836,6 +3906,14 @@ fn restore_backup_to_side_path_with_recovery_hooks(
             BACKUP_MEMORY_PROVENANCE_UNAVAILABLE_CODE,
             "Backup has no authenticated memory provenance history; recovered memories retain missing commitments and are not reverified.",
             "Recreate a private backup from the original workspace with a current binary to preserve provenance history; review source provenance before treating recovered memories as verified.",
+        ));
+    }
+
+    if expected_records.code_anchors().next().is_some() && !code_anchor_history_complete {
+        restore_degraded.push(BackupDegradation::warning(
+            BACKUP_CODE_ANCHOR_FRESHNESS_UNAVAILABLE_CODE,
+            "Backup lacks authenticated freshness history for some explicit code anchors; their locators are retained with Suspect freshness.",
+            "Recreate a private backup from the original workspace with a current binary to preserve code-anchor history; run an explicit drift check before treating recovered anchors as current.",
         ));
     }
 
@@ -10435,11 +10513,52 @@ fn collect_trust_history_payloads(
 ) -> Result<(), DomainError> {
     let workspace_id = &export_data.workspace.workspace_id;
     let mut memory_provenance = Vec::with_capacity(export_data.memories.len());
+    let mut code_anchor_states = Vec::new();
     for memory in &export_data.memories {
         let restored_id = memory_ids.get(&memory.id).ok_or_else(|| {
             work_history_error("provenance memory is missing from the backup projection")
         })?;
         memory_provenance.push(backup_memory_provenance(memory, restored_id, redaction)?);
+        if let Some(locators) = export_data.code_anchors_by_memory.get(&memory.id) {
+            let canonical = connection
+                .list_memory_anchors(&memory.id)
+                .map_err(work_history_error)?;
+            for locator in locators {
+                let surface = locator.to_surface(restored_id).ok_or_else(|| {
+                    work_history_error("invalid code anchor in backup projection")
+                })?;
+                let original = canonical.iter().find(|anchor| {
+                    anchor.anchor_kind == surface.anchor.anchor_kind
+                        && anchor.anchor_value_hash == surface.anchor.anchor_value_hash
+                });
+                let state = original.map(|anchor| {
+                    let mut state = BackupCodeAnchorSnapshot::from(anchor);
+                    state.redacted_anchor_value =
+                        redact_content(&state.redacted_anchor_value, redaction);
+                    state.provenance = redact_provenance_uri(&state.provenance, redaction);
+                    // A commitment to withheld span content cannot travel in a
+                    // redacted export. Bind the available public locator and
+                    // retain negative freshness instead of manufacturing proof.
+                    if redaction != RedactionLevel::None
+                        && state.captured_span_hash != surface.anchor.captured_span_hash
+                    {
+                        state.captured_span_hash.clone_from(&surface.anchor.captured_span_hash);
+                        if state.freshness_state == "current" {
+                            state.freshness_state = "suspect".to_owned();
+                        }
+                    }
+                    state
+                });
+                let row = BackupCodeAnchorState {
+                    memory_id: restored_id.clone(),
+                    anchor_kind: surface.anchor.anchor_kind.as_str().to_owned(),
+                    anchor_value_hash: surface.anchor.anchor_value_hash,
+                    state,
+                };
+                validate_code_anchor_state(&row)?;
+                code_anchor_states.push(row);
+            }
+        }
     }
     let mut seals = connection
         .list_memory_seals_for_recovery(workspace_id)
@@ -10459,6 +10578,7 @@ fn collect_trust_history_payloads(
         .max(certificates.len())
         .max(agents.len())
         .max(memory_provenance.len())
+        .max(code_anchor_states.len())
         .div_ceil(WORK_HISTORY_CHUNK_ROWS);
     if count == 0 {
         return Ok(());
@@ -10547,6 +10667,11 @@ fn collect_trust_history_payloads(
                     [start.min(memory_provenance.len())..end.min(memory_provenance.len())]
                     .to_vec(),
             ),
+            code_anchor_states: Some(
+                code_anchor_states
+                    [start.min(code_anchor_states.len())..end.min(code_anchor_states.len())]
+                    .to_vec(),
+            ),
             authentication: None,
         };
         payloads.push(derived_payload(
@@ -10619,11 +10744,13 @@ fn backup_memory_provenance(
 struct VerifiedMemoryRecords {
     expectation: BackupRecordsExpectation,
     source_key_ids: Vec<crate::policy::store_auth::KeyId>,
+    code_anchor_history_complete: bool,
 }
 
 /// Admit trust-history authentication and provenance coverage before public
 /// verification succeeds or restore creates any destination files. Legacy
-/// carriers remain recoverable; v2 must cover the exact prepared memory IDs.
+/// carriers remain recoverable; v2/v3 cover the exact prepared memory IDs and
+/// v3 also covers every explicit code binding, including unavailable state.
 /// Return the frozen primary projection for reuse by the publication fences.
 fn verify_backup_memory_provenance(
     backup_path: &Path,
@@ -10638,6 +10765,7 @@ fn verify_backup_memory_provenance(
     let mut schema: Option<String> = None;
     let mut slots = BTreeSet::new();
     let mut memory_ids = BTreeSet::new();
+    let mut code_anchor_states = BTreeMap::new();
     for asset in &assets {
         let bytes = read_manifest_bound_backup_asset(
             backup_path,
@@ -10663,6 +10791,7 @@ fn verify_backup_memory_provenance(
                 chunk.certificates.len(),
                 chunk.agents.len(),
                 chunk.memory_provenance.as_ref().map_or(0, Vec::len),
+                chunk.code_anchor_states.as_ref().map_or(0, Vec::len),
             ]
             .into_iter()
             .any(|count| count > WORK_HISTORY_CHUNK_ROWS)
@@ -10697,9 +10826,20 @@ fn verify_backup_memory_provenance(
                 ));
             }
         }
+        for row in chunk.code_anchor_states.into_iter().flatten() {
+            validate_code_anchor_state(&row)?;
+            if code_anchor_states.insert(row.key(), row).is_some() {
+                return Err(work_history_error(
+                    "duplicate identity in authenticated code-anchor history",
+                ));
+            }
+        }
         schema = Some(chunk.schema);
     }
-    if schema.as_deref() != Some(TRUST_HISTORY_SCHEMA) {
+    if !matches!(
+        schema.as_deref(),
+        Some(TRUST_HISTORY_SCHEMA | TRUST_HISTORY_SCHEMA_V2)
+    ) {
         return Ok(None);
     }
 
@@ -10739,9 +10879,31 @@ fn verify_backup_memory_provenance(
             ));
         }
     }
+    let has_code_anchor_history = schema.as_deref() == Some(TRUST_HISTORY_SCHEMA);
+    if has_code_anchor_history {
+        let expected_keys = expected
+            .code_anchors()
+            .map(|(memory_id, surface)| {
+                (
+                    memory_id.to_owned(),
+                    surface.anchor.anchor_kind.as_str().to_owned(),
+                    surface.anchor.anchor_value_hash.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        if expected_keys.len() != expected.code_anchors().count()
+            || expected_keys != code_anchor_states.keys().cloned().collect()
+        {
+            return Err(work_history_error(
+                "authenticated code-anchor history does not cover the exact primary bindings",
+            ));
+        }
+    }
     Ok(Some(VerifiedMemoryRecords {
         expectation: expected,
         source_key_ids: source_auth.window_key_ids(),
+        code_anchor_history_complete: has_code_anchor_history
+            && code_anchor_states.values().all(|row| row.state.is_some()),
     }))
 }
 
@@ -10783,10 +10945,119 @@ fn read_manifest_bound_backup_asset(
 
 fn valid_trust_history_schema(chunk: &BackupTrustHistory) -> bool {
     match chunk.schema.as_str() {
-        TRUST_HISTORY_SCHEMA => chunk.memory_provenance.is_some(),
-        TRUST_HISTORY_SCHEMA_V1 => chunk.memory_provenance.is_none(),
+        TRUST_HISTORY_SCHEMA => {
+            chunk.memory_provenance.is_some() && chunk.code_anchor_states.is_some()
+        }
+        TRUST_HISTORY_SCHEMA_V2 => {
+            chunk.memory_provenance.is_some() && chunk.code_anchor_states.is_none()
+        }
+        TRUST_HISTORY_SCHEMA_V1 => {
+            chunk.memory_provenance.is_none() && chunk.code_anchor_states.is_none()
+        }
         _ => false,
     }
+}
+
+fn validate_code_anchor_state(row: &BackupCodeAnchorState) -> Result<(), DomainError> {
+    let digest = |value: &str| {
+        value.strip_prefix("blake3:").is_some_and(|hash| {
+            hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    };
+    if row.memory_id.trim().is_empty()
+        || !matches!(row.anchor_kind.as_str(), "path" | "symbol")
+        || !digest(&row.anchor_value_hash)
+        || row.state.as_ref().is_some_and(|state| {
+            !state.confidence.is_finite()
+                || !(0.0..=1.0).contains(&state.confidence)
+                || state.generation < 0
+                || MemoryAnchorSource::parse(&state.source).is_none()
+                || MemoryAnchorFreshnessState::parse(&state.freshness_state).is_none()
+                || !digest(&state.captured_span_hash)
+                || state.redacted_anchor_value.trim().is_empty()
+                || state.provenance.trim().is_empty()
+                || chrono::DateTime::parse_from_rfc3339(&state.created_at).is_err()
+                || chrono::DateTime::parse_from_rfc3339(&state.updated_at).is_err()
+        })
+    {
+        return Err(work_history_error("invalid recovered code-anchor state"));
+    }
+    Ok(())
+}
+
+/// Resolve only bindings already admitted from primary JSONL. An absent source
+/// snapshot retains the locator but cannot make an importer default Current.
+/// This projection is used only by authenticated recovery, never JSONL import.
+fn restored_code_anchors(
+    db: &DbConnection,
+    memory_id: &str,
+    archived: Option<&BTreeMap<BackupCodeAnchorKey, BackupCodeAnchorState>>,
+) -> Result<Vec<StoredMemoryAnchor>, DomainError> {
+    let canonical = db
+        .list_memory_anchors(memory_id)
+        .map_err(work_history_error)?;
+    let mut restored = Vec::new();
+    for surface in db
+        .list_memory_code_anchor_sources(memory_id)
+        .map_err(work_history_error)?
+    {
+        let mut anchor = canonical
+            .iter()
+            .find(|anchor| {
+                anchor.anchor_kind == surface.anchor.anchor_kind
+                    && anchor.anchor_value_hash == surface.anchor.anchor_value_hash
+            })
+            .cloned()
+            .ok_or_else(|| {
+                work_history_error("restored code-anchor binding has no canonical row")
+            })?;
+        let key = (
+            memory_id.to_owned(),
+            anchor.anchor_kind.as_str().to_owned(),
+            anchor.anchor_value_hash.clone(),
+        );
+        let snapshot = match archived {
+            Some(rows) => rows
+                .get(&key)
+                .ok_or_else(|| work_history_error("incomplete recovered code-anchor history"))?
+                .state
+                .as_ref(),
+            None => None,
+        };
+        if let Some(state) = snapshot {
+            anchor.redacted_anchor_value.clone_from(&state.redacted_anchor_value);
+            anchor.confidence = state.confidence;
+            anchor.source = MemoryAnchorSource::parse(&state.source)
+                .ok_or_else(|| work_history_error("invalid recovered code-anchor source"))?;
+            anchor.provenance.clone_from(&state.provenance);
+            anchor.captured_span_hash.clone_from(&state.captured_span_hash);
+            anchor.freshness_state = MemoryAnchorFreshnessState::parse(&state.freshness_state)
+                .ok_or_else(|| work_history_error("invalid recovered code-anchor freshness"))?;
+            anchor.generation = state.generation;
+            anchor.created_at.clone_from(&state.created_at);
+            anchor.updated_at.clone_from(&state.updated_at);
+        } else {
+            // These are import clocks, not a recovered source observation.
+            anchor.freshness_state = MemoryAnchorFreshnessState::Suspect;
+        }
+        restored.push(anchor);
+    }
+    Ok(restored)
+}
+
+fn write_restored_code_anchors(
+    db: &DbConnection,
+    anchors: &[StoredMemoryAnchor],
+) -> crate::db::Result<()> {
+    for anchor in anchors {
+        if !db.restore_code_anchor_state_for_recovery(anchor)? {
+            return Err(crate::db::DbError::MalformedRow {
+                operation: crate::db::DbOperation::Execute,
+                message: "recovered code-anchor binding disappeared before writing".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_memory_provenance(row: &BackupMemoryProvenance) -> Result<(), DomainError> {
@@ -10959,7 +11230,17 @@ fn restore_trust_history(
         // it as if it were evidence recovered from the original store.
         let db = DbConnection::open_file(database).map_err(work_history_error)?;
         let workspaces = db.list_workspaces().map_err(work_history_error)?;
+        let mut code_anchors = Vec::new();
+        for workspace in &workspaces {
+            for memory in db
+                .list_memories(&workspace.id, None, true)
+                .map_err(work_history_error)?
+            {
+                code_anchors.extend(restored_code_anchors(&db, &memory.id, None)?);
+            }
+        }
         db.with_transaction(|| {
+            write_restored_code_anchors(&db, &code_anchors)?;
             for workspace in &workspaces {
                 for memory in db.list_memories(&workspace.id, None, true)? {
                     write_restored_memory_provenance(
@@ -10978,7 +11259,9 @@ fn restore_trust_history(
     chunks.sort_by_key(|c| c.chunk_index);
     let source_id = chunks[0].workspace_id.clone();
     let schema = chunks[0].schema.clone();
-    let has_memory_provenance = schema == TRUST_HISTORY_SCHEMA;
+    let has_memory_provenance =
+        matches!(schema.as_str(), TRUST_HISTORY_SCHEMA | TRUST_HISTORY_SCHEMA_V2);
+    let has_code_anchor_history = schema == TRUST_HISTORY_SCHEMA;
     let count = chunks.len();
     for (index, chunk) in chunks.iter_mut().enumerate() {
         if !valid_trust_history_schema(chunk)
@@ -10993,6 +11276,7 @@ fn restore_trust_history(
                 chunk.certificates.len(),
                 chunk.agents.len(),
                 chunk.memory_provenance.as_ref().map_or(0, Vec::len),
+                chunk.code_anchor_states.as_ref().map_or(0, Vec::len),
             ]
             .into_iter()
             .any(|n| n > WORK_HISTORY_CHUNK_ROWS)
@@ -11035,7 +11319,18 @@ fn restore_trust_history(
     let (mut seals, mut quarantines, mut certificates, mut agents) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut memory_provenance = BTreeMap::new();
+    let mut code_anchor_states = BTreeMap::new();
     for chunk in chunks {
+        for row in chunk.code_anchor_states.into_iter().flatten() {
+            validate_code_anchor_state(&row)?;
+            if !memories.contains_key(&row.memory_id)
+                || code_anchor_states.insert(row.key(), row).is_some()
+            {
+                return Err(work_history_error(
+                    "orphan or duplicate recovered code-anchor state",
+                ));
+            }
+        }
         seals.extend(chunk.seals);
         quarantines.extend(chunk.quarantines);
         certificates.extend(chunk.certificates);
@@ -11055,6 +11350,17 @@ fn restore_trust_history(
     }
     if has_memory_provenance && memory_provenance.len() != memories.len() {
         return Err(work_history_error("incomplete recovered memory provenance"));
+    }
+    let mut code_anchors = Vec::new();
+    for memory_id in memories.keys() {
+        code_anchors.extend(restored_code_anchors(
+            &db,
+            memory_id,
+            has_code_anchor_history.then_some(&code_anchor_states),
+        )?);
+    }
+    if has_code_anchor_history && code_anchors.len() != code_anchor_states.len() {
+        return Err(work_history_error("orphan recovered code-anchor state"));
     }
     let mut ids = BTreeSet::new();
     for seal in &seals {
@@ -11103,6 +11409,7 @@ fn restore_trust_history(
         row.workspace_id.clone_from(&workspace_id);
     }
     db.with_transaction(|| {
+        write_restored_code_anchors(&db, &code_anchors)?;
         for seal in &seals { db.insert_memory_seal_for_recovery(seal)?; }
         for row in &quarantines { db.insert_trust_quarantine_for_recovery(row)?; }
         for row in &certificates { db.insert_certificate_for_recovery(row)?; }
@@ -11119,7 +11426,8 @@ fn restore_trust_history(
             target_id: Some(backup_id.to_owned()), details: Some(json!({"sourceWorkspaceId": source_id,
                 "seals": seals.len(), "quarantines": quarantines.len(), "certificates": certificates.len(), "agents": agents.len(),
                 "memoryProvenance": memory_provenance.len(), "memoryProvenanceAvailable": has_memory_provenance,
-                "reason": "Recovered historical seal, quarantine, certificate, agent, and memory provenance records. Recovery neither reveals memory content, generates provenance commitments, nor verifies certificate payloads or signatures."}).to_string()),
+                "codeAnchorStates": code_anchors.len(), "codeAnchorHistoryAvailable": has_code_anchor_history,
+                "reason": "Recovered historical trust and explicit code-anchor decisions. Recovery neither reveals memory content, generates provenance commitments, nor verifies certificate payloads or code freshness."}).to_string()),
         })?;
         Ok(())
     }).map_err(work_history_error)?;
@@ -26435,6 +26743,7 @@ mod tests {
                 last_seen_at: "2026-09-04T00:00:00Z".to_owned(),
             }],
             memory_provenance: None,
+            code_anchor_states: None,
             authentication: None,
         }
     }
@@ -26625,6 +26934,7 @@ mod tests {
                     .map_err(|error| error.to_string())?;
                     chunk.schema = "ee.backup.trust_history.v1".to_owned();
                     chunk.memory_provenance = None;
+                    chunk.code_anchor_states = None;
                     let mut payloads = vec![derived_payload(
                         relative,
                         "trust_history",

@@ -326,6 +326,18 @@ impl BackupRecordsExpectation {
             .map(|memory| memory.id.as_str())
     }
 
+    /// Explicit public code bindings after primary identity preparation.
+    pub(crate) fn code_anchors(
+        &self,
+    ) -> impl Iterator<Item = (&str, &crate::models::ExtractedAnchorSurface)> {
+        self.records.memories.iter().flat_map(|memory| {
+            memory
+                .code_anchors
+                .iter()
+                .map(move |anchor| (memory.id.as_str(), anchor))
+        })
+    }
+
     /// Read-only verification of the exact primary graph, including both live
     /// and superseded revisions. Other durable tables retain their own fence.
     pub(crate) fn verify_database(&self, database_path: &Path) -> Result<(), DomainError> {

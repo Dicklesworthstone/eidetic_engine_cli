@@ -33,6 +33,8 @@ const REQUIRED_TABLES: &[(&str, &str, &str)] = &[
     ("workspaces", "maintain", "authenticated_manifest"),
     ("memories", "retrieve", "records_jsonl"),
     ("memory_tags", "retrieve", "records_jsonl"),
+    // Primary records cover locators; trust-history v3 covers their canonical
+    // decisions. Legacy carriers retain locators with Suspect freshness.
     ("memory_code_anchor_sources", "retrieve", "records_jsonl"),
     ("memory_links", "retrieve", "records_jsonl"),
     ("attempt_families", "learn", "records_jsonl"),
@@ -225,9 +227,17 @@ impl RestoreInventory {
                 return Err(recovery_error("Backup recovery inventory repeats a table"));
             }
             let policy = super::backup_table_policy(name);
+            // Shipped v1/v2 carriers classified all canonical anchors as
+            // rebuildable. Accept that exact historical pair only here; the
+            // authenticated trust reader still admits complete v3 bindings,
+            // and legacy restore marks unavailable code freshness Suspect.
+            let legacy_anchor_policy = name == "memory_anchors"
+                && row.get("disposition").and_then(Value::as_str) == Some("derived_rebuildable")
+                && row.get("coverage").and_then(Value::as_str) == Some("rebuild_on_restore");
             if !policy.schema_covered()
-                || row.get("disposition").and_then(Value::as_str) != Some(policy.disposition)
-                || row.get("coverage").and_then(Value::as_str) != Some(policy.coverage)
+                || (!legacy_anchor_policy
+                    && (row.get("disposition").and_then(Value::as_str) != Some(policy.disposition)
+                        || row.get("coverage").and_then(Value::as_str) != Some(policy.coverage)))
             {
                 // Do not echo an untrusted table name or let archive labels
                 // turn a required table into a cache or rekeyed credential.
@@ -886,6 +896,7 @@ mod tests {
                     .map(crate::core::backup::BackupMemoryProvenance::from)
                     .collect(),
             ),
+            code_anchor_states: Some(Vec::new()),
             authentication: None,
         };
         let captured_trust = root.path().join("trust-history.json");

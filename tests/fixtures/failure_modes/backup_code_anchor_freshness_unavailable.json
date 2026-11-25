@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "backup_code_anchor_freshness_unavailable",
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.88",
+    "epic_letter": "C"
+  },
+  "surfaces": [
+    "backup restore"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Restore or preview an authenticated backup containing explicit code locators without complete canonical freshness history. Legacy trust-history v1/v2 carriers omit that history; v3 explicitly records a missing canonical source row. Recovery retains the locators with Suspect freshness.",
+    "setup_commands": [
+      "# Select the original source workspace and an authenticated backup with explicit code locators but missing canonical anchor history."
+    ],
+    "invocation": "ee backup restore <backup-path> --workspace <source-workspace> --side-path <new-recovery-path> --json"
+  },
+  "expected_emission": {
+    "code": "backup_code_anchor_freshness_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "lacks authenticated freshness history",
+      "locators are retained",
+      "Suspect freshness"
+    ],
+    "repair_contains": "original workspace",
+    "repair_string": "Recreate a private backup from the original workspace with a current binary to preserve code-anchor history; run an explicit drift check before treating recovered anchors as current."
+  }
+}
