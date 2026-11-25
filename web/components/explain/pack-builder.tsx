@@ -3,7 +3,6 @@
 import { type CSSProperties, useMemo, useState } from "react";
 
 import { DemoFrame, Readout, Segmented, Slider } from "@/components/explain/demo";
-import { Cmd } from "@/components/instrument";
 import { type PackSection, SECTION_COLOUR } from "@/lib/palette";
 import { cn, grouped } from "@/lib/utils";
 
@@ -28,7 +27,7 @@ interface Memory {
 
 const TASK = "prepare the v0.20 release";
 
-const MEMORIES: readonly Memory[] = [
+export const MEMORIES: readonly Memory[] = [
   { id: "m01", section: "rules", level: "procedural", kind: "rule", tag: "release", relevance: 0.93, tokens: 60, text: "Run cargo fmt --check and the clippy gate before tagging." },
   { id: "m02", section: "failures", level: "episodic", kind: "failure", tag: "changelog", relevance: 0.9, tokens: 110, text: "Tag pushed before CHANGELOG.md was updated; the installer checksum went stale for a day." },
   { id: "m03", section: "rules", level: "procedural", kind: "rule", tag: "changelog", relevance: 0.89, tokens: 70, text: "Bump Cargo.toml and CHANGELOG.md in the same commit as the version tag." },
@@ -53,11 +52,11 @@ const MEMORIES: readonly Memory[] = [
 // ─── ee's rule (src/pack/mod.rs), at toy scale ───────────────────────────────
 
 /** DEFAULT_MMR_RELEVANCE_WEIGHT. */
-const RELEVANCE_WEIGHT = 0.75;
+export const RELEVANCE_WEIGHT = 0.75;
 /** DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR. */
-const FLOOR = 0.05;
+export const FLOOR = 0.05;
 /** PackLodBudgetShares::default_70_20_10. */
-const LOD_BPS = { full: 7000, preview: 2000, link: 1000 } as const;
+export const LOD_BPS = { full: 7000, preview: 2000, link: 1000 } as const;
 /** A link-only item's body is `Memory <id>`: a few tokens whatever the memory's size (toy estimate). */
 const LINK_TOKENS = 14;
 /** Below this a truncated preview has no room for a word and its " ..." (toy). */
@@ -73,7 +72,7 @@ const SECTION_KEY: Record<PackSection, string> = {
 };
 
 /** Built-in profiles' section mixes in basis points (src/models/context_profile.rs). */
-const PROFILES = {
+export const PROFILES = {
   compact: { rules: 5000, decisions: 1500, failures: 2000, evidence: 1000, artifacts: 500 },
   balanced: { rules: 3000, decisions: 2000, failures: 2000, evidence: 2000, artifacts: 1000 },
   thorough: { rules: 2000, decisions: 2000, failures: 2000, evidence: 2500, artifacts: 1500 },
@@ -94,6 +93,11 @@ export type Outcome =
       simWith: string | null;
       tier: Tier;
       cost: number;
+      /**
+       * For a preview or a link: the room left for its full text, the limit that left only that much, and what
+       * was left of the preview tier when it was placed.
+       */
+      room?: { tokens: number; limit: string; previewLeft: number };
     }
   | {
       kind: "omitted";
@@ -209,16 +213,29 @@ export function assemble(profile: Profile, budget: number, mode: Mode): Assembly
     if (available >= MIN_PREVIEW) return "tiers";
     return quotaLeft <= budgetLeft ? "quota" : "budget";
   };
+  /** Why a whole memory did not fit: the smallest of the full-text tier, its section's quota and the budget. */
+  const roomForFullText = (memory: Memory): { tokens: number; limit: string; previewLeft: number } => {
+    const fullLeft = lodLimits.full - lodUsed.full;
+    const quotaLeft = quotas[memory.section] - sectionUsed[memory.section];
+    const budgetLeft = budget - used;
+    const previewLeft = Math.max(0, lodLimits.preview - lodUsed.preview);
+    if (fullLeft < Math.min(quotaLeft, budgetLeft))
+      return { tokens: Math.max(0, fullLeft), limit: "full-text tier (70% of the budget)", previewLeft };
+    return quotaLeft <= budgetLeft
+      ? { tokens: Math.max(0, quotaLeft), limit: `${SECTION_KEY[memory.section]} quota`, previewLeft }
+      : { tokens: Math.max(0, budgetLeft), limit: "pack budget", previewLeft };
+  };
   const take = (memory: Memory, phase: Phase, gain: number, sim: { value: number; with: string | null }) => {
     const chosen = plan(memory);
     if (!chosen) return false;
+    const room = chosen.tier === "full" ? undefined : roomForFullText(memory);
     rank += 1;
     used += chosen.cost;
     sectionUsed[memory.section] += chosen.cost;
     lodUsed[chosen.tier] += chosen.cost;
     selected.push(memory);
     order.push(memory.id);
-    outcomes.set(memory.id, { kind: "selected", rank, phase, gain, maxSim: sim.value, simWith: sim.with, tier: chosen.tier, cost: chosen.cost });
+    outcomes.set(memory.id, { kind: "selected", rank, phase, gain, maxSim: sim.value, simWith: sim.with, tier: chosen.tier, cost: chosen.cost, room });
     return true;
   };
   /** Each tier's refusal, in words: how much room it had and what limited that room. */
@@ -379,12 +396,20 @@ function explanation(memory: Memory, outcome: Outcome, mode: Mode): string[] {
       lines.push("reserved first: the highest-relevance failure above the floor, rendered under “What NOT to do”");
     if (outcome.phase === "coverageFill")
       lines.push("its gain had fallen to zero or below, so it waited; coverage fill then admitted it because room was left");
+    const room = outcome.room;
+    const short = room ? `room for ${room.tokens} of its ${memory.tokens} tokens under the ${room.limit}` : "";
+    // A preview is cut to whichever is smallest: the memory less its ellipsis, the room left, or the preview tier.
+    const previewTier =
+      room && outcome.cost === room.previewLeft && room.previewLeft < memory.tokens - 2
+        ? `; the preview tier (20%) had ${room.previewLeft} left`
+        : "";
+    const noPreview = room && room.previewLeft < MIN_PREVIEW ? "the preview tier (20%) was spent" : "no room for a preview";
     lines.push(
       outcome.tier === "full"
         ? `rendered in full: ${outcome.cost} tokens`
         : outcome.tier === "preview"
-          ? `the full-text tier (70% of the budget) was spent: a ${outcome.cost}-token truncated preview of ${memory.tokens}`
-          : `only a link fitted: “Memory ${memory.id}”, ${outcome.cost} tokens, in the peripheral index`,
+          ? `${short}${previewTier}, so a ${outcome.cost}-token truncated preview`
+          : `${short}, and ${noPreview}: a link, “Memory ${memory.id}”, ${outcome.cost} tokens, in the peripheral index`,
     );
   } else {
     lines.push(`omitted: ${outcome.reason}${outcome.detail ? ` · ${outcome.detail}` : ""}`);
@@ -417,6 +442,7 @@ function PackPreview({ assembly, profile, budget }: { assembly: Assembly; profil
   return (
     <div
       className="max-h-[26rem] overflow-y-auto rounded-xl border border-white/[0.08] bg-black/40 p-4 font-mono text-[11.5px] leading-relaxed [scrollbar-width:thin]"
+      role="region"
       aria-label="The rendered pack, as Markdown"
       tabIndex={0}
     >
@@ -500,7 +526,7 @@ export function PackBuilder() {
       <p className="font-mono text-[12px] leading-relaxed break-words text-slate-400">
         <span className="text-slate-600">$ </span>
         <span className="text-violet-200">ee pack</span> &quot;{TASK}&quot; --profile {profile} --max-tokens {budget}
-        {mode === "mmr" ? " --explain" : ""}
+        {mode === "mmr" ? " --explain" : <span className="text-slate-600"> # no ee flag turns the redundancy penalty off</span>}
       </p>
 
       <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-[auto_auto_minmax(0,1fr)] md:items-end">

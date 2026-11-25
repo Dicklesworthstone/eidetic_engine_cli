@@ -1,6 +1,7 @@
 import { BookOpen, Link as LinkIcon } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
 
+import { Heading, HeadingShift } from "@/components/heading-level";
 import { MicroLabel, RecallTitle } from "@/components/instrument";
 import { Reveal } from "@/components/reveal";
 import type { Chapter } from "@/lib/content";
@@ -93,7 +94,8 @@ export function ChapterBlock({
           </Reveal>
         </div>
       </section>
-      {children}
+      {/* On its own page the chapter title is the h1, so its sections are h2 and its figures h3. */}
+      <HeadingShift by={mode === "page" ? 1 : 0}>{children}</HeadingShift>
     </div>
   );
 }
@@ -144,9 +146,9 @@ export function Section({
         <Reveal className="grid grid-cols-1 items-end gap-5 lg:grid-cols-12 lg:gap-12">
           <div className="space-y-5 lg:col-span-7">
             {label}
-            <h3 id={headingId} className="display-3 text-white">
+            <Heading level={3} id={headingId} className="display-3 text-white">
               <RecallTitle text={title} />
-            </h3>
+            </Heading>
           </div>
           {kicker ? <div className="text-base leading-relaxed text-slate-400 lg:col-span-5 lg:pb-1.5">{kicker}</div> : null}
         </Reveal>
@@ -165,9 +167,9 @@ export function Section({
       <div className="grid grid-cols-1 items-start gap-9 lg:grid-cols-12 lg:gap-16">
         <Reveal className="space-y-5 lg:sticky lg:top-28 lg:col-span-4">
           {label}
-          <h3 id={headingId} className="display-3 text-white">
+          <Heading level={3} id={headingId} className="display-3 text-white">
             <RecallTitle text={title} />
-          </h3>
+          </Heading>
           {kicker ? <div className="max-w-md text-base leading-relaxed text-slate-400">{kicker}</div> : null}
         </Reveal>
         <div className="min-w-0 lg:col-span-8">{children}</div>

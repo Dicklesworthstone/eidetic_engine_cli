@@ -8,30 +8,13 @@ import { ImageResponse } from "next/og";
 import { type Art, amnesiaArt, campaignsArt, dataUri, graphArt, homeArt, type Label, latticeArt, learningArt, memoryArt, packArt } from "@/lib/og-art";
 import { type Chapter, chapters, heroStats, rigor, siteConfig } from "@/lib/content";
 import { SECTION_COLOUR } from "@/lib/palette";
+import { type CardId, HOME_CARD } from "@/lib/share";
 
 const INK = "#05040d";
 const HOST = new URL(siteConfig.url).host;
 
-/** "home", or a chapter's id. */
-export type CardId = "home" | Chapter["id"];
-
-const HOME = {
-  kicker: "Memory for AI agents · Rust · local-first",
-  headline: "Long-term memory for",
-  accent: "coding agents.",
-  line: "Stores what your agents learn and gives each session a context pack within a token budget.",
-  colour: "#a78bfa",
-};
-
 function chapterFor(id: CardId): Chapter | undefined {
   return chapters.find((chapter) => chapter.id === id);
-}
-
-/** The alt text for a card. */
-export function shareAlt(id: CardId = "home"): string {
-  const chapter = chapterFor(id);
-  if (!chapter) return `${siteConfig.name} (ee): long-term memory for coding agents. ee ${HOME.line.charAt(0).toLowerCase()}${HOME.line.slice(1)}`;
-  return `${siteConfig.name} (ee), chapter ${chapter.number}: ${chapter.share.headline} ${chapter.share.accent} ${chapter.share.line}`;
 }
 
 // ─── Fonts ──────────────────────────────────────────────────────────────────
@@ -287,7 +270,7 @@ function PackCorner({ height }: { height: number }) {
 export async function shareCard(width: number, height: number, id: CardId = "home"): Promise<Response> {
   const [display, body, mono] = await fonts();
   const chapter = chapterFor(id);
-  const words = chapter ? { ...chapter.share, colour: chapter.colour } : HOME;
+  const words = chapter ? { ...chapter.share, colour: chapter.colour } : HOME_CARD;
   const colour = words.colour;
   const artWidth = 600;
   // A drawing in two parts sits in one layer: Satori drops a fragment held in a variable.

@@ -4,10 +4,11 @@
 
 import { describe, expect, test } from "bun:test";
 
+import { radioKeyTarget } from "@/components/explain/demo";
 import { assemble } from "@/components/explain/pack-builder";
 import { BALANCED_BPS, BUDGETS, CANDIDATE_FLOOR, pack, STORE_SIZE, TASKS, toyHash } from "@/components/hero";
 import { chapterById, chapters, heroStats, rigor } from "@/lib/content";
-import { SHARE_IMAGE_PATHS, SHARE_IMAGE_TYPE } from "@/lib/share";
+import { chapterShareImages, SHARE_IMAGE_PATHS, SHARE_IMAGE_SIZE, SHARE_IMAGE_TYPE, shareAlt } from "@/lib/share";
 import worker from "../worker";
 
 describe("the chapters", () => {
@@ -50,6 +51,31 @@ describe("the chapters", () => {
       expect(SHARE_IMAGE_PATHS).toContain(`/${chapter.slug}/twitter-image`);
     }
     expect(SHARE_IMAGE_PATHS).toHaveLength(2 + chapters.length * 2);
+  });
+
+  test("each chapter page names its own two images, at their served paths, with its own alt text", () => {
+    const alts = new Set([shareAlt()]);
+    const versions = new Set<string>();
+    for (const chapter of chapters) {
+      const images = chapterShareImages(chapter);
+      const named = [...images.openGraph, ...images.twitter];
+      expect(named).toHaveLength(2);
+      for (const image of named) {
+        const [path = "", query] = image.url.split("?");
+        expect(SHARE_IMAGE_PATHS).toContain(path);
+        expect(query).toMatch(/^v=[0-9a-f]{8}$/);
+        versions.add(query ?? "");
+        expect(image.alt).toBe(shareAlt(chapter.id));
+        expect(image.type).toBe(SHARE_IMAGE_TYPE);
+      }
+      expect(images.openGraph[0]).toMatchObject(SHARE_IMAGE_SIZE.openGraph);
+      expect(images.twitter[0]).toMatchObject(SHARE_IMAGE_SIZE.twitter);
+      expect(shareAlt(chapter.id)).toContain(`chapter ${chapter.number}`);
+      expect(shareAlt(chapter.id)).toContain(chapter.share.line);
+      alts.add(shareAlt(chapter.id));
+    }
+    expect(alts.size).toBe(chapters.length + 1);
+    expect(versions.size).toBe(chapters.length);
   });
 });
 
@@ -150,6 +176,23 @@ describe("the hero's pack", () => {
       return toyHash(task.value, result.selected);
     });
     expect(new Set(hashes).size).toBe(TASKS.length);
+  });
+});
+
+describe("the radio groups' keys (every figure's Segmented control)", () => {
+  test("the arrows wrap, Home and End go to the ends, and anything else is left to the browser", () => {
+    expect(radioKeyTarget("ArrowRight", 0, 3)).toBe(1);
+    expect(radioKeyTarget("ArrowDown", 2, 3)).toBe(0);
+    expect(radioKeyTarget("ArrowLeft", 0, 3)).toBe(2);
+    expect(radioKeyTarget("ArrowUp", 1, 3)).toBe(0);
+    expect(radioKeyTarget("Home", 2, 3)).toBe(0);
+    expect(radioKeyTarget("End", 0, 3)).toBe(2);
+    for (const key of ["Enter", " ", "Tab", "a", "PageDown"]) expect(radioKeyTarget(key, 1, 3)).toBeNull();
+  });
+
+  test("one option stays put, and no options means no target", () => {
+    for (const key of ["ArrowRight", "ArrowLeft", "Home", "End"]) expect(radioKeyTarget(key, 0, 1)).toBe(0);
+    expect(radioKeyTarget("ArrowRight", 0, 0)).toBeNull();
   });
 });
 

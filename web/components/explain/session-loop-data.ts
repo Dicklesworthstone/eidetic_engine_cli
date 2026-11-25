@@ -161,7 +161,7 @@ export const STATIONS: readonly Station[] = [
     returns:
       "The memories that fit the token budget, each with why it was chosen, its provenance and its trust class, then the memories left out with the reason for each.",
     because:
-      "The token budget caps how much of the agent's context window the pack uses. Memories left out of the pack are listed with a reason such as token_budget_exceeded or redundant_candidate (the 50 most relevant are listed; skippedTotal counts all of them). Anything that weakened retrieval is in degraded[] with a repair command, so the agent can tell an empty pack caused by a fault from one where nothing matched.",
+      "The token budget caps how much of the agent's context window the pack uses. Memories left out of the pack are listed with a reason such as token_budget_exceeded or redundant_candidate (the 50 with the highest relevance plus utility are listed; skippedTotal counts all of them). Anything that weakened retrieval is in degraded[] with a code, a severity and, where ee has one, a repair, so the agent can tell an empty pack caused by a fault from one where nothing matched.",
     json: excerpt(`
 {
   "schema": "ee.response.v2",
@@ -169,9 +169,9 @@ export const STATIONS: readonly Station[] = [
     "pack": {
       "budget": { "maxTokens": 4000, "usedTokens": …, … },
 >     "items": [{
-        "why": "matched … via lexical (relevance …)",
+        "trust": { "class": "human_explicit", … },
         "provenance": [{ "uri": "file://AGENTS.md#L164-173", … }],
-        "trust": { "class": "human_explicit", … }
+        "why": "matched … via lexical (relevance …)"
       }, …],
 >     "skippedTotal": …,
 >     "skipped": [
@@ -268,7 +268,7 @@ export const STATIONS: readonly Station[] = [
     "source": { "kind": "builtin", "name": "git_reset_hard" },
     "resolution": "matched"
   }],
-> "matchedMemories": [{ "kind": "failure", "severity": "high", … }],
+> "matchedMemories": [{ "kind": "failure", "severity": "medium", … }],
   "degraded": []
 }
 `),
@@ -276,6 +276,7 @@ export const STATIONS: readonly Station[] = [
       { file: "docs/schemas/ee.preflight.guard.v1.json", mark: "intentionally not wrapped in the ee.response.v2 envelope" },
       { file: "src/core/preflight_guard.rs", mark: '"builtin:git_reset_hard"' },
       { file: "src/core/preflight_guard.rs", mark: 'matches!(kind, "risk" | "anti-pattern" | "failure" | "rule")' },
+      { file: "src/core/preflight_guard.rs", mark: '"failure" => "medium",' },
       { file: "src/cli/mod.rs", mark: "Keeps the raw command off argv" },
       { file: "src/core/effect.rs", mark: "without granting or revoking execution authority" },
     ],
@@ -356,7 +357,7 @@ export const STATIONS: readonly Station[] = [
     reads: ["data.status", "data.confidence", "data.quarantine"],
     returns: "Whether the feedback was recorded, and the memory's confidence just before and just after it.",
     because:
-      "The response shows how far the signal moved the memory's confidence, so the agent needs no follow-up call. After five harmful reports in an hour from one source, the next is quarantined rather than applied, so one misbehaving source cannot keep lowering a memory's confidence. --event-id makes a retry safe.",
+      "The response shows how far the signal moved the memory's confidence, so the agent needs no follow-up call. By default, after five harmful reports in an hour from one source, the next is quarantined rather than applied, so one misbehaving source cannot keep lowering a memory's confidence. --event-id makes a retry safe.",
     json: excerpt(`
 {
   "schema": "ee.response.v2",
@@ -374,6 +375,7 @@ export const STATIONS: readonly Station[] = [
 `),
     sources: [
       { file: "src/core/outcome.rs", mark: "pub const DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR: u32 = 5;" },
+      { file: "src/core/outcome.rs", mark: "pub const DEFAULT_HARMFUL_BURST_WINDOW_SECONDS: u32 = 3600;" },
       { file: "src/core/outcome.rs", mark: '"confidence": self.confidence_before' },
       { file: "src/core/outcome.rs", mark: 'Self::Recorded => "recorded",' },
       { file: "src/core/outcome.rs", mark: 'const HELPFUL_SIGNALS: &[&str] = &["positive", "confirmation", "helpful"];' },

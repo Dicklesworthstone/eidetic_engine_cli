@@ -90,10 +90,13 @@ come from `src/pack/mod.rs` and `src/models/context_profile.rs`.
 
 The newer figures keep their models apart from their drawings (`scale-model.ts`, `campaign-model.ts`,
 `ledger-model.ts`, `agent-contract-data.ts`, `session-loop-data.ts`), and `tests/` checks each model's
-invariants. Three of those tests also read the repository: `scale.test.ts`, `session-loop.test.ts`
-and `agent-contract.test.ts` check that the constants, JSON keys and error records their figures cite
-still read the same in the Rust source, the schemas and the goldens. So a rename in ee turns them red.
-The campaign, ledger and scale-ladder tests check their models only.
+invariants. Those tests also read the repository: `scale.test.ts`, `session-loop.test.ts`,
+`agent-contract.test.ts`, `campaign.test.ts`, `ledger.test.ts` and `scale-lanes.test.ts` (the scale
+ladder's) check that the constants, flags, JSON keys and error records their figures cite still read the
+same in the Rust source, the docs, the schemas and the goldens. The older figures have no separate
+models, so `pack-figures.test.ts` (the pipeline, the pack builder and the hash prefix) and
+`memory-rules.test.ts` (decay, trust, the loop and the incident card) read the Rust against the
+constants those figures export. So a rename in ee turns them red.
 
 Each figure's caption names the source files and constants it follows. Animations stop when off
 screen, and never run for a reader who asks for reduced motion.
@@ -102,8 +105,17 @@ screen, and never run for a reader who asks for reduced motion.
 
 Every page has its own Open Graph card (1200 × 630) and X card (1200 × 600): the home page's in
 `app/opengraph-image.tsx` and `app/twitter-image.tsx`, and each chapter's in `app/[chapter]/`. All of
-them come from `shareCard()` in `lib/og-card.tsx`. Each card has the chapter's colour, its headline,
-its line and a rail of the eight chapters, next to a drawing of what the chapter is about:
+them come from `shareCard()` in `lib/og-card.tsx`. `lib/share.ts` holds the rest without the renderer: the
+cards' paths, sizes and words, and `shareAlt()`, which writes each card's alt text.
+
+A file's `alt` export is one string for every chapter, and `generateImageMetadata`, which can vary it, cannot
+be used under a static export: its generated route produces the image id but never the `[chapter]` above it,
+so the build fails. So `app/[chapter]/page.tsx` names its two images itself (`chapterShareImages()`), each
+with the chapter's alt text and a `?v=` query that changes when the card's words or the release change.
+Naming them stops Next.js from adding the files' own tags; the files still draw the images.
+
+Each card has the chapter's colour, its headline, its line and a rail of the eight chapters, next to a
+drawing of what the chapter is about:
 - the notes file against the pack (amnesia);
 - the five half-lives (memory);
 - candidates beamed into a budgeted pack (the pack);

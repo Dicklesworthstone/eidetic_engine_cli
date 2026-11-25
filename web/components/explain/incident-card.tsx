@@ -16,10 +16,10 @@ import { cn } from "@/lib/utils";
 
 type Masked = { raw: string; out: string; rule: "id" | "path" | "hex" | "num" | "lower" };
 
-/** mask_token: path, then 0x hex, then number-like, else lower-cased. */
+/** mask_token: path, then 0x hex, then number-like, else lower-cased (ASCII only, as to_ascii_lowercase). */
 function maskToken(raw: string): Masked {
   if (raw.includes("/") || raw.includes("\\")) return { raw, out: "<path>", rule: "path" };
-  const lower = raw.toLowerCase();
+  const lower = raw.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
   if (lower.startsWith("0x") && lower.length > 2 && /^[0-9a-f]+$/.test(lower.slice(2))) return { raw, out: "<hex>", rule: "hex" };
   if (/\d/.test(raw) && /^[\d:.,\-_]+$/.test(raw)) return { raw, out: "<num>", rule: "num" };
   return { raw, out: lower, rule: "lower" };
@@ -29,7 +29,10 @@ function maskToken(raw: string): Masked {
  * canonical_message_template: backtick spans become <id> BEFORE the split, so a multi-word identifier is one
  * <id>; each token is then masked. Each token's original text is kept beside its mask so the page can show both.
  */
-function template(message: string): Masked[] {
+export function template(message: string): Masked[] {
+  // Each span is marked with a private-use character while the tokens are split, so a literal "<id>" typed into
+  // the message is not mistaken for one. The mask itself sees "<id>", as mask_backtick_spans writes it.
+  const SPAN = String.fromCharCode(0xe000);
   const spans: string[] = [];
   let masked = "";
   let inSpan = false;
@@ -38,7 +41,7 @@ function template(message: string): Masked[] {
     if (ch === "`") {
       if (inSpan) spans.push(current);
       else {
-        masked += "<id>";
+        masked += SPAN;
         current = "";
       }
       inSpan = !inSpan;
@@ -51,12 +54,18 @@ function template(message: string): Masked[] {
     .split(/\s+/)
     .filter(Boolean)
     .map((token) => {
-      const result = maskToken(token);
-      if (!token.includes("<id>")) return result;
-      const raw = token.replace(/<id>/g, () => `\`${spans[next++] ?? ""}\``);
+      const result = maskToken(token.replaceAll(SPAN, "<id>"));
+      if (!token.includes(SPAN)) return result;
+      const raw = token.replaceAll(SPAN, () => `\`${spans[next++] ?? ""}\``);
       return { raw, out: result.out, rule: result.rule === "lower" ? "id" : result.rule };
     });
 }
+
+/** The template as ee stores it: the masked tokens, joined by single spaces. */
+export const maskedTemplate = (message: string) =>
+  template(message)
+    .map((token) => token.out)
+    .join(" ");
 
 // ─── The examples ───────────────────────────────────────────────────────────
 
@@ -76,14 +85,18 @@ type Example = {
   compose: string;
   code: string | null;
   tool: "rustc" | "shell";
-  symptom: string;
+  /**
+   * The card's Symptom facet (cass_error_recall.rs · symptom_line). A cargo error keeps its line and `-->` location
+   * (cargo_text::symptom); a parsed go test, Vitest or Jest report shows its masked template, so this is null.
+   */
+  symptom: string | null;
   fix: string;
   recall: string;
 };
 
 const SESSION = "ses_01J…7Q";
 
-const EXAMPLES: Record<"rustc" | "go" | "vitest" | "jest", Example> = {
+export const EXAMPLES: Record<"rustc" | "go" | "vitest" | "jest", Example> = {
   rustc: {
     label: "rustc",
     family: "cargo test",
@@ -110,7 +123,8 @@ const EXAMPLES: Record<"rustc" | "go" | "vitest" | "jest", Example> = {
     tool: "rustc",
     symptom: "error[E0277]: the trait bound `Widget: Serialize` is not satisfied (src/widget.rs:41:9)",
     fix: "Widget needs to derive Serialize: add #[derive(Serialize)] to the struct.",
-    recall: 'ee diagnose-error --tool rustc "error[E0277]: the trait bound `Order: Serialize` is not satisfied" --json',
+    // Single quotes: inside double quotes a shell would run `Order: Serialize` as a command.
+    recall: "ee diagnose-error --tool rustc 'error[E0277]: the trait bound `Order: Serialize` is not satisfied' --json",
   },
   go: {
     label: "go test",
@@ -120,7 +134,7 @@ const EXAMPLES: Record<"rustc" | "go" | "vitest" | "jest", Example> = {
       {
         role: "tool_result",
         part: "failure",
-        text: "--- FAIL: TestInvoiceRounding (0.00s)\n    invoice_test.go:42: got 41.99, want 42.00\nFAIL\texample.com/shop/billing\t0.012s",
+        text: "=== RUN   TestInvoiceRounding\n    invoice_test.go:42: got 41.99, want 42.00\n--- FAIL: TestInvoiceRounding (0.00s)\nFAIL\nFAIL\texample.com/shop/billing\t0.012s\nFAIL",
       },
       { role: "assistant", part: "narration", text: "Checking how totals are formatted." },
       {
@@ -129,14 +143,19 @@ const EXAMPLES: Record<"rustc" | "go" | "vitest" | "jest", Example> = {
         text: "Round half-even in Money.Total before formatting, not after summing floats.",
       },
       { role: "tool_call", text: "go test -v ./billing/..." },
-      { role: "tool_result", part: "proof", text: "--- PASS: TestInvoiceRounding (0.00s)\nok  \texample.com/shop/billing\t0.011s" },
+      {
+        role: "tool_result",
+        part: "proof",
+        text: "=== RUN   TestInvoiceRounding\n--- PASS: TestInvoiceRounding (0.00s)\nPASS\nok  \texample.com/shop/billing\t0.011s",
+      },
     ],
     diagnostic: "--- FAIL: TestInvoiceRounding (0.00s) · FAIL example.com/shop/billing",
     templateInput: "go test failure: example.com/shop/billing test TestInvoiceRounding",
-    compose: "No error code, so the template names the package and the test: go test failure: <package> test <name>.",
+    compose:
+      "No error code, so ee writes a sentence from the package and the test: go test failure: <package> test <name>. A package path holds a slash, so it masks to <path>.",
     code: null,
     tool: "shell",
-    symptom: "--- FAIL: TestInvoiceRounding (0.00s)",
+    symptom: null,
     fix: "Round half-even in Money.Total before formatting, not after summing floats.",
     recall: "ee diagnose-error --tool shell --error-log go-test.log --json",
   },
@@ -148,7 +167,8 @@ const EXAMPLES: Record<"rustc" | "go" | "vitest" | "jest", Example> = {
       {
         role: "tool_result",
         part: "failure",
-        text: " × src/cart.test.ts > cart > applies the member discount\n   AssertionError: expected 41 to be 42",
+        text:
+          " × src/cart.test.ts > cart > applies the member discount 3ms\n   → expected 41 to be 42 // Object.is equality\n\n FAIL  src/cart.test.ts > cart > applies the member discount\nAssertionError: expected 41 to be 42 // Object.is equality",
       },
       { role: "assistant", part: "narration", text: "Let me read the cart module first." },
       {
@@ -157,14 +177,15 @@ const EXAMPLES: Record<"rustc" | "go" | "vitest" | "jest", Example> = {
         text: "The discount ran before tax; apply memberDiscount after computeTax in checkout.",
       },
       { role: "tool_call", text: "vitest run --reporter=verbose" },
-      { role: "tool_result", part: "proof", text: " ✓ src/cart.test.ts > cart > applies the member discount\n Tests  12 passed (12)" },
+      { role: "tool_result", part: "proof", text: " ✓ src/cart.test.ts > cart > applies the member discount 2ms\n      Tests  12 passed (12)" },
     ],
-    diagnostic: "AssertionError: expected 41 to be 42",
-    templateInput: "javascript-test: AssertionError: expected 41 to be 42",
-    compose: "No error code, so the template is the first diagnostic line, prefixed javascript-test:. The stack and code frame are left out.",
+    diagnostic: "AssertionError: expected 41 to be 42 // Object.is equality",
+    templateInput: "javascript-test: AssertionError: expected 41 to be 42 // Object.is equality",
+    compose:
+      "No error code, so the template is the first line under the test's FAIL header, prefixed javascript-test:. The diff, code frame and stack are left out.",
     code: null,
     tool: "shell",
-    symptom: "× src/cart.test.ts > cart > applies the member discount",
+    symptom: null,
     fix: "The discount ran before tax; apply memberDiscount after computeTax in checkout.",
     recall: "ee diagnose-error --tool shell --error-log vitest.log --json",
   },
@@ -176,7 +197,7 @@ const EXAMPLES: Record<"rustc" | "go" | "vitest" | "jest", Example> = {
       {
         role: "tool_result",
         part: "failure",
-        text: "  ● orders › totals an empty basket\n    TypeError: Cannot read properties of undefined (reading 'total')",
+        text: "  ● orders › totals an empty basket\n\n    TypeError: Cannot read properties of undefined (reading 'total')",
       },
       { role: "assistant", part: "narration", text: "Looking at the orders fixture." },
       {
@@ -189,10 +210,11 @@ const EXAMPLES: Record<"rustc" | "go" | "vitest" | "jest", Example> = {
     ],
     diagnostic: "TypeError: Cannot read properties of undefined (reading 'total')",
     templateInput: "javascript-test: TypeError: Cannot read properties of undefined (reading 'total')",
-    compose: "No error code, so the template is the first diagnostic line, prefixed javascript-test:. The stack and code frame are left out.",
+    compose:
+      "No error code, so the template is the first line under the test's ● header, prefixed javascript-test:. The code frame and stack are left out.",
     code: null,
     tool: "shell",
-    symptom: "● orders › totals an empty basket",
+    symptom: null,
     fix: "An empty basket has no summary; default summary to { total: 0 } in buildOrder.",
     recall: "ee diagnose-error --tool shell --error-log jest.log --json",
   },
@@ -247,11 +269,14 @@ export function IncidentCard() {
           docs/adr/0091-derived-incident-cards.md · extractive facets, ≤ 120 tokens (INCIDENT_CARD_TOKEN_BUDGET) ·
           src/core/incident_card.rs · header and facet format · src/core/error_recall.rs · canonical_message_template,
           layered_key · src/core/cass_error_recall_go.rs, cass_error_recall_js_tests.rs · go test and Vitest/Jest
-          diagnostics · transcripts here are illustrative
+          diagnostics · the transcripts are shortened, illustrative excerpts; ee parses a test report only when it is
+          complete and its counts agree
         </>
       }
     >
-      <div ref={frame} className="space-y-6">
+      {/* Focus inside the figure (the tool switch, the rail, the masking input) takes the controls: the walk-through
+          would otherwise unmount the input under a reader who is typing in it. */}
+      <div ref={frame} className="space-y-6" onFocus={() => setAuto(false)}>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <Segmented
             label="Test or compiler output"
@@ -320,7 +345,12 @@ export function IncidentCard() {
         </ol>
         <style>{`@keyframes incident-progress{from{transform:scaleX(0)}to{transform:scaleX(1)}}`}</style>
 
-        <div className="min-h-[22rem]" aria-live="polite">
+        {/* The panel is not a live region: it would read a whole panel every 6.5 s, and the token list on every
+            keystroke. Once the reader takes the controls, the step and the tool are announced instead. */}
+        <p className="sr-only" aria-live="polite">
+          {auto ? "" : `Step ${step + 1} of ${STEPS.length}: ${STEPS[step]?.label ?? ""}, ${example.label}`}
+        </p>
+        <div className="min-h-[22rem]">
           {step === 0 ? <SessionStep example={example} /> : null}
           {step === 1 ? <FingerprintStep example={example} /> : null}
           {step === 2 ? <CardStep example={example} /> : null}
@@ -377,8 +407,8 @@ function SessionStep({ example }: { example: Example }) {
       <div className="space-y-3 text-sm leading-relaxed text-slate-300 lg:col-span-4">
         <p>
           <span className="font-semibold text-white">ee import cass</span> reads the sessions your agents already
-          recorded. It pairs each failing tool result with the assistant turns that explained the fix and the later
-          run of the same command family that proved it.
+          recorded. It pairs each failing tool result with the assistant turns that explained the fix and a later
+          successful run of the identical command that proved it.
         </p>
         <p className="text-slate-400">
           Only admitted assistant sentences can become the fix. Narration is dropped, and a bare exit code is never an
@@ -391,7 +421,7 @@ function SessionStep({ example }: { example: Example }) {
 
 function FingerprintStep({ example }: { example: Example }) {
   const tokens = template(example.templateInput);
-  const masked = tokens.map((token) => token.out).join(" ");
+  const masked = maskedTemplate(example.templateInput);
   const key = example.code ? `${example.tool}:${example.code}` : `${example.tool}:tmpl:blake3(template)`;
   const [own, setOwn] = useState("error: failed to open /tmp/build-7f3a/cache.db at 0x7ffd5e8c in `CacheStore::open` after 3 attempts");
   const ownTokens = template(own);
@@ -511,9 +541,10 @@ function KeyLayer({ n, name, active, detail, value }: { n: number; name: string;
 function CardStep({ example }: { example: Example }) {
   const end = example.transcript.length;
   const header = `Incident card (derived by ee from lines 1-${end}): \`${example.family}\` failed, then passed after a fix.`;
+  const symptom = example.symptom ?? maskedTemplate(example.templateInput);
   const lines: { facet: string; text: string }[] = [
     { facet: "header", text: header },
-    { facet: "Symptom", text: `Symptom: ${example.symptom}` },
+    { facet: "Symptom", text: `Symptom: ${symptom}` },
     { facet: "Fix", text: `Fix: ${example.fix}` },
     { facet: "Verified", text: `Verified: \`${example.family}\` succeeded afterwards.` },
   ];
@@ -543,9 +574,9 @@ function CardStep({ example }: { example: Example }) {
           </ul>
         </div>
         <p className="mt-3 text-[13px] leading-relaxed text-slate-400">
-          The card is copied from the session rather than generated: fixed facet labels, the failing line, the admitted
-          fix sentences and the verifying command. It is stored as evidence with{" "}
-          <span className="font-mono text-[12px] text-slate-300">cass_evidence</span> trust, linked under the
+          The card is copied from the session rather than generated: fixed facet labels, the failing line (for a parsed
+          test report, its masked template), the admitted fix sentences and the verifying command. It is stored as
+          evidence with <span className="font-mono text-[12px] text-slate-300">cass_evidence</span> trust, linked under the
           error&apos;s fingerprint, and becomes a durable memory only through review and curation.
         </p>
       </div>

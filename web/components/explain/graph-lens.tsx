@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { DemoFrame, Segmented } from "@/components/explain/demo";
 import { useFigureWidth, useReducedMotion } from "@/lib/hooks";
@@ -311,7 +311,7 @@ const LENSES: Record<
     label: "HITS",
     question: "Which memories are hubs that lean on many others, and which are the authorities they lean on?",
     commands: ["ee graph hits --limit 10"],
-    note: "Size is authority; the outer ring is hub score. The grounding and orientation context profiles can boost authorities and hubs when graph profile scores are available.",
+    note: "Size is authority; the outer ring is hub score. With graph.feature.hits_profiles on and graph scores available, the grounding context profile boosts authorities, orientation boosts hubs, and balanced boosts both at half that weight.",
     metric: (i) => at(SCORES.authority, i),
     show: (i) => `auth ${fixed(at(SCORES.authority, i), 2)} · hub ${fixed(at(SCORES.hub, i), 2)}`,
   },
@@ -335,7 +335,7 @@ const LENSES: Record<
     label: "k-core",
     question: "Which memories form the densely linked core, and which sit on the periphery?",
     commands: ["ee graph k-core", "ee insights --section knowledgeSkyline --json"],
-    note: "Remove every memory with fewer than k links, raise k and repeat; the memories removed last form the core. The knowledge skyline uses onion layers like these.",
+    note: "Remove every memory with fewer than k links, raise k and repeat; the memories removed last form the core. ee's knowledge skyline and structural decay use onion layers, which number each round of this peeling.",
     metric: (i) => at(SCORES.core, i),
     show: (i) => `${at(SCORES.core, i)}-core`,
   },
@@ -353,6 +353,15 @@ const LEVEL_NAMES: Record<Level, string> = {
 export function GraphLens() {
   const [lens, setLens] = useState<Lens>("pagerank");
   const [selected, setSelected] = useState<number | null>(null);
+  // Opening a memory from the ranked list, or clearing it, swaps the side panel and removes the button that held
+  // the focus. Those two presses ask for the focus to land on the first button of whatever replaced it.
+  const side = useRef<HTMLDivElement>(null);
+  const refocus = useRef(false);
+  useEffect(() => {
+    if (!refocus.current) return;
+    refocus.current = false;
+    side.current?.querySelector<HTMLButtonElement>("button")?.focus();
+  }, [selected]);
   const reduced = useReducedMotion();
   const { ref, width } = useFigureWidth(760);
   const narrow = width < 560;
@@ -445,7 +454,8 @@ export function GraphLens() {
         <>
           README · Graph and Graph-derived insights command tables · docs/configuration/graph.md · every
           graph.feature.* flag defaults to false · src/db/mod.rs · MemoryLinkRelation · src/models/context_profile.rs ·
-          grounding / orientation HITS boosts · personalized PageRank: graph_ppr_upstream_unavailable
+          hits_boost_weights (grounding, orientation, balanced) · src/graph/decay.rs · compute_onion_layers · personalized
+          PageRank: graph_ppr_upstream_unavailable
         </>
       }
     >
@@ -601,7 +611,7 @@ export function GraphLens() {
           </div>
         </div>
 
-        <div className="min-w-0 space-y-4 lg:col-span-4">
+        <div ref={side} className="min-w-0 space-y-4 lg:col-span-4">
           <div className="rounded-2xl border border-[color:var(--chapter)]/30 bg-[color:var(--chapter)]/[0.05] p-4">
             <p className="text-[9px] font-black tracking-[0.2em] text-[color:var(--chapter)] uppercase">The question</p>
             <p className="mt-1.5 text-[15px] leading-snug font-semibold text-white">{config.question}</p>
@@ -616,7 +626,14 @@ export function GraphLens() {
           </div>
 
           {selected !== null ? (
-            <SelectedNode index={selected} lens={lens} onClose={() => setSelected(null)} />
+            <SelectedNode
+              index={selected}
+              lens={lens}
+              onClose={() => {
+                refocus.current = true;
+                setSelected(null);
+              }}
+            />
           ) : (
             <div>
               <p className="text-[9px] font-black tracking-[0.2em] text-slate-500 uppercase">Highest under this lens</p>
@@ -625,7 +642,10 @@ export function GraphLens() {
                   <li key={index}>
                     <button
                       type="button"
-                      onClick={() => setSelected(index)}
+                      onClick={() => {
+                        refocus.current = true;
+                        setSelected(index);
+                      }}
                       className="flex w-full items-center gap-2.5 rounded-lg border border-white/[0.06] bg-black/20 px-2.5 py-1.5 text-left text-[13px] text-slate-200 transition hover:border-[color:var(--chapter)]/40 hover:text-white focus-visible:ring-2 focus-visible:ring-violet-400 focus-visible:outline-none"
                     >
                       <span className="w-3 font-mono text-[10px] text-slate-500">{place + 1}</span>
@@ -644,8 +664,8 @@ export function GraphLens() {
 
       <p className="mt-6 rounded-xl border border-white/[0.07] bg-black/20 px-4 py-3 text-[13px] leading-relaxed text-slate-400">
         <span className="font-semibold text-slate-200">Current status.</span> Each lens is a command you run on demand
-        over your own store. The graph features that would change ranking or pack explanations (Pack DNA, proximity, HITS
-        profiles, the skyline, structural decay) are off by default under{" "}
+        over your own store. The graph features that would change ranking, retention or pack explanations (Pack DNA,
+        proximity, HITS profiles, structural decay), and the knowledge skyline, are off by default under{" "}
         <span className="font-mono text-[12px] text-slate-300">graph.feature.*</span>. Personalized PageRank is not
         available in production: a request for it reports{" "}
         <span className="font-mono text-[12px] text-slate-300">graph_ppr_upstream_unavailable</span> and falls back to

@@ -9,11 +9,11 @@ import { cn } from "@/lib/utils";
 
 /**
  * The spans ee records while it builds a pack (src/core/context.rs, `trace.record_elapsed`), in the order
- * they run. `count` is an illustrative candidate count after the stage, not a measurement.
+ * they start. `count` is an illustrative candidate count after the stage, not a measurement.
  */
 type Status = "always" | "optional" | "off" | "unavailable";
 
-interface Stage {
+export interface Stage {
   span: string;
   name: string;
   what: string;
@@ -25,7 +25,7 @@ interface Stage {
 
 const POOL = 64;
 
-const STAGES: readonly Stage[] = [
+export const STAGES: readonly Stage[] = [
   {
     span: "requestValidate",
     name: "Validate the request",
@@ -39,7 +39,7 @@ const STAGES: readonly Stage[] = [
     what: "With --use-daemon and a warm daemon, retrieval runs there instead. Its handoff is validated against the local snapshot; anything changed or unverifiable falls back to local execution, and the pack hash is the same either way.",
     status: "optional",
     statusNote: "only with --use-daemon",
-    code: "daemon_handoff_rejected",
+    code: "daemon_search_fallback",
     count: POOL,
   },
   {
@@ -52,7 +52,7 @@ const STAGES: readonly Stage[] = [
   {
     span: "search",
     name: "Hybrid search",
-    what: "Frankensearch retrieves lexical (BM25) and semantic (Model2Vec) hits and fuses the two rankings by reciprocal rank. A stale or missing index is reported as a degradation, with the command that repairs it.",
+    what: "Frankensearch retrieves lexical (BM25) and semantic (Model2Vec) hits and fuses the two rankings by reciprocal rank; ee then rescales each hit by the quality multipliers below. A stale or missing index is reported as a degradation, with the command that repairs it.",
     status: "always",
     code: "search_index_stale",
     count: 60,
@@ -68,7 +68,7 @@ const STAGES: readonly Stage[] = [
   {
     span: "candidateResolution",
     name: "Resolve candidates",
-    what: "Resolves hits to memories, removes duplicates, loads tags, applies filters, attaches freshness and provenance, then scores and orders them with the quality multipliers below.",
+    what: "Resolves hits to memories, removes duplicates, loads tags, applies the query's filters and any graph hints it names, and attaches freshness and provenance.",
     status: "always",
     count: 51,
   },
@@ -100,7 +100,7 @@ const STAGES: readonly Stage[] = [
   {
     span: "pprRerank",
     name: "Personalized PageRank",
-    what: "Would rerank candidates by graph proximity to the query. It is wired but unavailable in production: the pinned FrankenNetworkX revision has no deterministic personalized-PageRank API, so asking for it reports a degradation and ranking stays textual. At the default weight of 0 the stage passes candidates through untouched.",
+    what: "Would rerank candidates by graph proximity to the query. It is wired but unavailable in production: the pinned FrankenNetworkX revision has no deterministic personalized-PageRank API, so turning it on (graph.feature.ppr.enabled) reports a degradation and ranking stays textual. It is off by default, and then the stage passes candidates through untouched.",
     status: "unavailable",
     statusNote: "pass-through",
     code: "graph_ppr_upstream_unavailable",
@@ -132,8 +132,39 @@ const STATUS: Record<Status, { label: string; className: string }> = {
 
 const STEP_MS = 1800;
 
-/** The quality multipliers applied after retrieval (src/search/scoring.rs, SearchScoreComponents::from_signals). */
-const MULTIPLIERS: readonly { name: string; rule: string; low: number; high: number; marks?: number[] }[] = [
+/** One stage's heading, description and the degradation it can report. */
+function StageDetail({ stage, index }: { stage: Stage; index: number }) {
+  const status = STATUS[stage.status];
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <span className="font-mono text-[11px] text-[color:var(--chapter,#a78bfa)] tabular-nums">
+          {String(index + 1).padStart(2, "0")} / {STAGES.length}
+        </span>
+        <span className="text-lg font-extrabold tracking-[-0.02em] text-white">{stage.name}</span>
+        <code className="rounded-md bg-white/[0.05] px-1.5 py-0.5 font-mono text-[11px] text-slate-300">{stage.span}</code>
+        <span className={cn("rounded-full border px-2 py-0.5 text-[10px] font-black tracking-[0.12em] uppercase", status.className)}>
+          {status.label}
+          {stage.statusNote ? ` · ${stage.statusNote}` : ""}
+        </span>
+      </div>
+      <p className="mt-3 max-w-4xl text-[14.5px] leading-relaxed text-slate-300">{stage.what}</p>
+      {stage.code ? (
+        <p className="mt-3 font-mono text-[11px] text-slate-500">
+          reports, when it applies: <span className="text-amber-200/90">{stage.code}</span>
+          {/* Codes only, no repairs. ee pack has no --ppr-weight: it reads the weight from config
+              (graph.feature.ppr.enabled, off by default), which is the switch ee's repair for this code names. */}
+        </p>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * The quality multipliers search applies to each hit after fusion (src/search/scoring.rs,
+ * SearchScoreComponents::from_signals), at their defaults.
+ */
+export const MULTIPLIERS: readonly { name: string; rule: string; low: number; high: number; marks?: number[] }[] = [
   { name: "recency", rule: "exp(−age / 30 days), floor 0.5", low: 0.5, high: 1 },
   { name: "confidence", rule: "the memory's confidence, floor 0.1", low: 0.1, high: 1 },
   { name: "utility", rule: "0.5 + 0.5 × utility", low: 0.5, high: 1 },
@@ -163,7 +194,6 @@ export function PackPipeline() {
   }, [running]);
 
   const stage = STAGES[active] ?? STAGES[0]!;
-  const status = STATUS[stage.status];
 
   return (
     <DemoFrame
@@ -176,15 +206,18 @@ export function PackPipeline() {
           (CONTEXT_MEMORY_TIER_HOT_BOOST 0.025, WARM 0.010), filter_candidates_by_instruction_authority,
           apply_personalized_pagerank_rerank · src/core/search.rs · DEFAULT_SEARCH_LEXICAL_WEIGHT 0.45,
           DEFAULT_SEARCH_SEMANTIC_WEIGHT 0.45, RRF k = 60 · src/search/scoring.rs · SearchScoreComponents · README
-          · Limitations (personalized PageRank). Candidate counts on the stages are illustrative.
+          · Limitations (personalized PageRank). The trace also records embedderPrepare, the daemon handoff&apos;s
+          validation, sub-spans and the total, which the figure leaves out. Candidate counts on the stages are
+          illustrative.
         </>
       }
     >
       <div ref={ref}>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="max-w-2xl text-[15px] leading-relaxed text-slate-300">
-            <span className="font-mono text-violet-200">ee pack</span> runs the same spans every time and names
-            each one in its timing trace. Select a stage to read what it does; Play steps through them.
+            <span className="font-mono text-violet-200">ee pack</span> times each of these stages and names it in its
+            timing trace (<span className="font-mono text-slate-200">--explain-performance</span>). Select a stage to
+            read what it does; Play steps through them.
           </p>
           {/* The label says what a press does, so no aria-pressed as well: "Pause, pressed" contradicts itself. */}
           <DemoButton
@@ -275,32 +308,23 @@ export function PackPipeline() {
           </span>
         </p>
 
-        {/* The stage in focus. */}
+        {/* The stage in focus. Every stage's text sits invisibly in the same grid cell, so the box is always as
+            tall as the longest one and the page below it does not jump while the run plays. While it plays the
+            region is not live, so a screen reader is not read a new stage every 1.8 seconds. */}
         <div
           className={cn(
-            "mt-4 rounded-2xl border p-4 sm:p-5",
+            "mt-4 grid rounded-2xl border p-4 sm:p-5",
             stage.status === "unavailable" ? "border-amber-300/25 bg-amber-300/[0.04]" : "border-white/[0.08] bg-black/25",
           )}
-          aria-live="polite"
         >
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-            <span className="font-mono text-[11px] text-[color:var(--chapter,#a78bfa)] tabular-nums">
-              {String(active + 1).padStart(2, "0")} / {STAGES.length}
-            </span>
-            <span className="text-lg font-extrabold tracking-[-0.02em] text-white">{stage.name}</span>
-            <code className="rounded-md bg-white/[0.05] px-1.5 py-0.5 font-mono text-[11px] text-slate-300">{stage.span}</code>
-            <span className={cn("rounded-full border px-2 py-0.5 text-[10px] font-black tracking-[0.12em] uppercase", status.className)}>
-              {status.label}
-              {stage.statusNote ? ` · ${stage.statusNote}` : ""}
-            </span>
+          {STAGES.map((item, index) => (
+            <div key={item.span} className="invisible col-start-1 row-start-1 min-w-0" aria-hidden="true">
+              <StageDetail stage={item} index={index} />
+            </div>
+          ))}
+          <div className="col-start-1 row-start-1 min-w-0" aria-live={running ? "off" : "polite"}>
+            <StageDetail stage={stage} index={active} />
           </div>
-          <p className="mt-3 max-w-4xl text-[14.5px] leading-relaxed text-slate-300">{stage.what}</p>
-          {stage.code ? (
-            <p className="mt-3 font-mono text-[11px] text-slate-500">
-              reports, when it applies: <span className="text-amber-200/90">{stage.code}</span>
-              {stage.span === "pprRerank" ? <span> · repair: --ppr-weight 0</span> : null}
-            </p>
-          ) : null}
         </div>
 
         {/* What feeds the ranking: the two retrieval arms, then the multipliers. */}

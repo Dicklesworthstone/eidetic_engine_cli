@@ -16,8 +16,13 @@ const PULL = RECALL;
 type Direction = "push" | "pull";
 type Store = "db" | "index" | "graph";
 
-/** The operating loop's commands (README.md · Agent Operating Loop), each with the direction it moves memory. */
-const COMMANDS: readonly {
+/**
+ * The operating loop's commands (README.md · Agent Operating Loop), each with the direction it moves memory and the
+ * stores it reads or writes by default. remember publishes its own index document unless --defer-index; outcome and
+ * import cass only queue index jobs. recall reads the memory_anchor_index table, ask and preflight check score the
+ * database's own corpus, and why reads the latest graph snapshot (src/core/why.rs · build_graph_retrieval_explanation).
+ */
+export const COMMANDS: readonly {
   id: string;
   name: string;
   direction: Direction;
@@ -30,15 +35,15 @@ const COMMANDS: readonly {
     name: "remember",
     direction: "push",
     line: 'ee remember "<lesson>" --workspace . --level procedural --kind rule --json',
-    what: "Stores a lesson as a typed memory, with its level, kind and provenance.",
-    touches: ["db"],
+    what: "Stores a lesson as a typed memory, with its level, kind and provenance, and adds it to the search index.",
+    touches: ["db", "index"],
   },
   {
     id: "journal",
     name: "journal append",
     direction: "push",
     line: 'ee journal append "<observation>" --workspace . --source manual --json',
-    what: "Appends a raw observation. Later, ee journal distill --dry-run turns the journal into candidates for review.",
+    what: "Appends a raw observation. Later, ee journal distill previews curation candidates from the journal, and --apply saves them for review.",
     touches: ["db"],
   },
   {
@@ -70,8 +75,8 @@ const COMMANDS: readonly {
     name: "recall",
     direction: "pull",
     line: "ee recall --path <path> --workspace . --budget-tokens 400 --format markdown",
-    what: "Before an edit, returns the memories that bear on a file or a diff, within a 400-token budget.",
-    touches: ["db", "index"],
+    what: "Before an edit, returns the memories anchored to a file, a symbol or a diff, within a 400-token budget.",
+    touches: ["db"],
   },
   {
     id: "search",
@@ -87,7 +92,7 @@ const COMMANDS: readonly {
     direction: "pull",
     line: 'ee ask "<question>" --workspace . --json',
     what: "Answers a direct question and cites the memories the answer rests on.",
-    touches: ["db", "index"],
+    touches: ["db"],
   },
   {
     id: "why",
@@ -95,7 +100,7 @@ const COMMANDS: readonly {
     direction: "pull",
     line: "ee why <memory-id> --workspace . --json",
     what: "Explains one memory: why it ranks, what supports it, how fresh and how reliable it is.",
-    touches: ["db"],
+    touches: ["db", "graph"],
   },
   {
     id: "preflight",
@@ -103,7 +108,7 @@ const COMMANDS: readonly {
     direction: "pull",
     line: 'ee preflight check --cmd "<command>" --workspace . --json',
     what: "Before a risky shell command, looks up matching risk and failure memories. It only advises and never blocks the command.",
-    touches: ["db", "index"],
+    touches: ["db"],
   },
 ];
 
@@ -453,7 +458,8 @@ export function MemoryLoop() {
 
         {/* The commands */}
         <div className="mt-6 grid grid-cols-1 gap-5 md:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
-          <div className="space-y-4">
+          {/* A reader who tabs into the commands has taken the controls: the walk-through stops under the focus. */}
+          <div className="space-y-4" onFocus={() => setAuto(false)}>
             {(["push", "pull"] as const).map((direction) => (
               <div key={direction}>
                 <p
@@ -492,7 +498,8 @@ export function MemoryLoop() {
             ))}
           </div>
 
-          <div className="min-w-0 rounded-2xl border border-white/10 bg-black/30 p-4" aria-live="polite">
+          {/* Announced only once the reader picks: the walk-through would otherwise speak every 2.8 s. */}
+          <div className="min-w-0 rounded-2xl border border-white/10 bg-black/30 p-4" aria-live={auto ? "off" : "polite"}>
             <p className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <span
                 className="rounded-full px-2 py-0.5 font-mono text-[10px] font-medium tracking-[0.16em] text-black uppercase"

@@ -236,6 +236,24 @@ describe("the ee facts the figure states", () => {
     expect(source("src/core/context.rs")).toContain("estimated_tokens: estimate_tokens_default(&memory.content)");
   });
 
+  test("the markdown pack spends 248 characters on one item's id, why, trust and provenance", () => {
+    // RECEIPT_TOKENS rests on this count (scale-model.ts): the golden's one item, less the memory's own text.
+    const golden = source("tests/fixtures/golden/agent/context_pack.md.golden");
+    const start = golden.indexOf("### 1. ");
+    const end = golden.indexOf("## Degradations");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const item = golden.slice(start, end).trimEnd();
+    const content = "Run cargo fmt --check before release.";
+    expect(item).toContain(`\`\`\`\n${content}\n\`\`\``);
+    for (const line of ["**Why:**", "**Trust:**", "**Provenance:**"]) expect(item).toContain(line);
+    expect(item.length - content.length).toBe(248);
+    // ee's own estimate (DEFAULT_CHARS_PER_TOKEN 3.5) makes that 71 tokens; the figure assumes 80 because ids and
+    // digit runs tokenize poorly. The two must stay within 15 tokens of each other.
+    expect(source("src/pack/mod.rs")).toContain("pub const DEFAULT_CHARS_PER_TOKEN: f32 = 3.5;");
+    expect(Math.abs(RECEIPT_TOKENS - 248 / 3.5)).toBeLessThan(15);
+  });
+
   test("the built-in [pack] defaults", () => {
     const merge = source("src/config/merge.rs");
     expect(merge).toContain(`candidate_pool: Some(${EE_CANDIDATE_POOL}),`);

@@ -8,10 +8,12 @@ import { Cmd } from "@/components/instrument";
 import { cn } from "@/lib/utils";
 
 /**
- * What still works when a part is missing, and the `degraded` entry ee reports
- * for it. Each entry's code, severity, message and repair are the source's own
- * (the files are named per entry); each code has a fixture under
- * tests/fixtures/failure_modes/ that triggers it and checks the emission.
+ * What still works when a part is missing, and the entry ee reports for it.
+ * Each entry's code, severity, message and repair are the source's own (the
+ * files are named per entry), and `at` names the command that reports it and
+ * where in that command's JSON it sits: they are not all one command's
+ * `data.degraded`. Each code has a fixture under tests/fixtures/failure_modes/
+ * that triggers it and checks the emission.
  */
 
 type Part = "model" | "index" | "graph" | "cass" | "reranker" | "network";
@@ -25,9 +27,9 @@ const PARTS: readonly { id: Part; name: string; detail: string; off: string }[] 
   { id: "network", name: "Network", detail: "after the one-time pinned model download", off: "offline" },
 ];
 
-type Entry = { code: string; severity: string; message: string; repair: string | null; from: string };
+type Entry = { code: string; severity: string; message: string; repair: string | null; from: string; at: string };
 
-/** The `degraded` entry for each part, verbatim from the source except where `…` marks a cut or `<…>` a runtime value. */
+/** The entry for each part, verbatim from the source except where `…` marks a cut or `<…>` a runtime value. */
 const ENTRY: Partial<Record<Part, Entry>> = {
   model: {
     code: "embed_model_unavailable",
@@ -36,6 +38,7 @@ const ENTRY: Partial<Record<Part, Entry>> = {
       "Embedding model unavailable (<reason>); semantic similarity is disabled and lexical search remains available.",
     repair: "ee index reembed --workspace .",
     from: "src/core/search.rs",
+    at: "ee search … --json · data.degraded[]",
   },
   index: {
     code: "search_index_stale",
@@ -44,6 +47,7 @@ const ENTRY: Partial<Record<Part, Entry>> = {
       "Search index is stale; returning lexical fallback results from the current index. Database generation is <n>; index generation is <m>. Newer memories may be omitted until the index is rebuilt.",
     repair: "ee index rebuild --workspace .",
     from: "src/core/search.rs",
+    at: "ee search … --json · data.degraded[]",
   },
   graph: {
     code: "graph_snapshot_stale",
@@ -51,6 +55,7 @@ const ENTRY: Partial<Record<Part, Entry>> = {
     message: "Graph snapshot is marked stale; enrichment may lag source memory links.",
     repair: "ee graph centrality-refresh",
     from: "src/graph/mod.rs",
+    at: "ee graph feature-enrichment --json · data.degraded[]",
   },
   cass: {
     code: "cass_unavailable",
@@ -58,7 +63,10 @@ const ENTRY: Partial<Record<Part, Entry>> = {
     message: "cass unavailable: cass binary '/missing/cass' is not allowed: <reason>",
     repair: "set EE_CASS_BINARY to an absolute, trusted cass executable … or set [cass.binary] in config; …",
     from: "src/output/mod.rs · src/cass/error.rs",
+    at: "ee import cass … --json · the ee.error.v2 response's degraded[]",
   },
+  // Not a data.degraded entry: ee treats a missing reranker as a standing capability, so search reports it under
+  // data.rerank.advisory and leaves it out of data.degraded (tests/rerank_posture_contract.rs).
   reranker: {
     code: "rerank_model_unavailable",
     severity: "low",
@@ -66,6 +74,7 @@ const ENTRY: Partial<Record<Part, Entry>> = {
       "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.",
     repair: null,
     from: "src/core/search.rs",
+    at: "ee search … --json · data.rerank.advisory",
   },
 };
 
@@ -98,13 +107,10 @@ const CAPABILITIES: readonly { name: string; judge: (off: Off) => { state: State
       off.model || off.index ? { state: "degraded", note: "lexical arm only" } : { state: "ok", note: "lexical + semantic" },
   },
   {
+    // The cross-encoder is its own model: a hybrid search that fell back to lexical still consults it
+    // (resolve_search_rerank_runtime in src/core/search.rs), so a missing embedding model does not switch it off.
     name: "Reranking",
-    judge: (off) =>
-      off.model
-        ? { state: "off", note: "needs the semantic arm" }
-        : off.reranker
-          ? { state: "off", note: "fusion-only ranking" }
-          : { state: "ok", note: "optional, local" },
+    judge: (off) => (off.reranker ? { state: "off", note: "fusion-only ranking" } : { state: "ok", note: "optional, local" }),
   },
   {
     name: "Graph boosts and enrichment",
@@ -117,11 +123,13 @@ const CAPABILITIES: readonly { name: string; judge: (off: Off) => { state: State
       off.cass ? { state: "off", note: "ee remember still works" } : { state: "ok", note: "ee import cass" },
   },
   {
+    // A pack's data.degraded leaves out workspace-state codes (search_index_stale, graph_snapshot_stale) and the
+    // standing reranker advisory by default: category_for_code in src/pack/mod.rs.
     name: "Context packs · ee pack",
     judge: (off) =>
-      off.model || off.index || off.graph || off.reranker
-        ? { state: "degraded", note: "built from the parts left, with degraded entries" }
-        : { state: "ok", note: "every section, every arm" },
+      off.model || off.index
+        ? { state: "degraded", note: "built from the lexical arm" }
+        : { state: "ok", note: off.reranker ? "every section, fusion-only ranking" : "every section, both arms" },
   },
   {
     name: "Provenance and the JSON contract",
@@ -157,7 +165,8 @@ export function DegradationBoard() {
         <>
           tests/fixtures/failure_modes/*.json ({FAILURE_MODES} fixtures, one per degraded code: embed_model_unavailable,
           search_index_stale, graph_snapshot_stale, cass_unavailable, rerank_model_unavailable, …) · the messages from the
-          files named on each entry · README.md · Design Philosophy §7, Graceful Degradation
+          files named on each entry · the reranker under data.rerank.advisory: tests/rerank_posture_contract.rs · README.md
+          · Design Philosophy §7, Graceful Degradation
         </>
       }
     >
@@ -227,10 +236,10 @@ export function DegradationBoard() {
           <div className="grid grid-cols-3 gap-2">
             <Readout label="Still working" value={`${working}/${judged.length}`} tone="rule" note="capabilities not switched off" />
             <Readout
-              label="degraded[]"
+              label="Entries"
               value={entries.length}
               tone={entries.length > 0 ? "wrong" : "neutral"}
-              note="entries in the JSON"
+              note="what ee reports, below"
             />
             <Readout label="Failure modes" value={FAILURE_MODES} note="documented, one fixture each" />
           </div>
@@ -255,23 +264,23 @@ export function DegradationBoard() {
 
           {/* What ee says */}
           <div className="rounded-2xl border border-white/[0.08] bg-[#030209] p-4">
-            <p className="font-mono text-[10px] tracking-[0.2em] text-slate-500 uppercase">ee search … --json · data.degraded</p>
+            <p className="font-mono text-[10px] tracking-[0.2em] text-slate-500 uppercase">What ee reports, and where</p>
             <pre className="mt-3 overflow-x-auto font-mono text-[12px] leading-[1.7] whitespace-pre-wrap [overflow-wrap:anywhere] text-slate-300">
               <code>
-                <span className="text-slate-500">{'"degraded": ['}</span>
-                {entries.length === 0 ? <span className="text-slate-500">{"]"}</span> : null}
+                {entries.length === 0 ? <span className="text-slate-500">{"// nothing to report"}</span> : null}
                 {entries.map((entry, index) => (
                   <Fragment key={entry.code}>
-                    {"\n  {"}
+                    {index > 0 ? "\n\n" : null}
+                    <span className="text-slate-500">{`// ${entry.at}`}</span>
+                    <span className="text-slate-600">{`\n// ${entry.from}`}</span>
+                    {"\n{"}
                     <Field name="code" value={entry.code} className="text-[color:var(--chapter)]" />
                     <Field name="severity" value={entry.severity} className={entry.severity === "low" ? "text-sky-200" : "text-amber-200"} />
                     <Field name="message" value={entry.message} className="text-violet-100" />
                     <Field name="repair" value={entry.repair} className="text-emerald-200" last />
-                    {`\n  }${index < entries.length - 1 ? "," : ""}`}
-                    <span className="text-slate-600">{`  // ${entry.from}`}</span>
+                    {"\n}"}
                   </Fragment>
                 ))}
-                {entries.length > 0 ? <span className="text-slate-500">{"\n]"}</span> : null}
               </code>
             </pre>
           </div>
@@ -307,7 +316,7 @@ function Field({
 }) {
   return (
     <>
-      {"\n    "}
+      {"\n  "}
       <span className="text-slate-500">{`"${name}": `}</span>
       {value === null ? <span className="text-slate-400">null</span> : <span className={className}>{JSON.stringify(value)}</span>}
       {last ? "" : ","}

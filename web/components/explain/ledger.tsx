@@ -136,7 +136,8 @@ export function NegativeLedger() {
                 }
                 setPlaying((on) => !on);
               }}
-              pressed={reduced ? undefined : animating}
+              // The label says what a press does, so no aria-pressed as well.
+              className={cn(animating && "border-violet-400/60 text-violet-200")}
               disabled={reduced && done}
               label={animating ? "Pause the campaign" : reduced ? "Show all 24 sessions" : "Play the campaign"}
             >
@@ -201,8 +202,10 @@ export function NegativeLedger() {
           a family&rsquo;s third failure. Nothing here is a measurement. The loop is ee&rsquo;s: a failure carries its
           family as a typed field, a search on that field returns the family&rsquo;s failures together, a rule drawn
           from them exists only after <span className="font-mono text-[12px] text-slate-300">ee curate apply</span> has
-          accepted it, and the next pack puts what not to do first. The threshold of three is also ee&rsquo;s: both of
-          its proposers wait for three pieces of evidence. In this toy no family contains a win. A real family might, so
+          accepted it, and the next pack puts what not to do first. The threshold of three is also ee&rsquo;s:{" "}
+          <span className="font-mono text-[12px] text-slate-300">ee playbook extract</span> waits for three notes that
+          carry one lesson, and ee proposes an anti-pattern after three harmful outcomes. In this toy no family contains a
+          win. A real family might, so
           an anti-pattern remains an audited rule with its evidence attached.
         </p>
       </div>

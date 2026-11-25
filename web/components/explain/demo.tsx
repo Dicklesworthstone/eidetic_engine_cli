@@ -2,6 +2,7 @@
 
 import { Fragment, type KeyboardEvent, type ReactNode, useRef } from "react";
 
+import { Heading } from "@/components/heading-level";
 import { MicroLabel, Reticle } from "@/components/instrument";
 import { cn } from "@/lib/utils";
 
@@ -88,7 +89,9 @@ export function DemoFrame({
       <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
         <div className="min-w-0 space-y-2.5">
           <MicroLabel className="text-[color:var(--chapter,#a78bfa)]">{eyebrow}</MicroLabel>
-          <h4 className="text-xl font-extrabold tracking-[-0.025em] text-white sm:text-2xl">{title}</h4>
+          <Heading level={4} className="text-xl font-extrabold tracking-[-0.025em] text-white sm:text-2xl">
+            {title}
+          </Heading>
         </div>
         <BasisBadge basis={basis} />
       </div>
@@ -151,6 +154,8 @@ export function Segmented<T extends string>({
   const group = useRef<HTMLDivElement>(null);
   const checked = options.findIndex((option) => option.value === value);
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    // A modified arrow is the browser's or the system's (Alt+Left goes back a page), not the group's.
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
     const target = radioKeyTarget(event.key, index, options.length);
     const option = target === null ? undefined : options[target];
     if (target === null || !option) return;

@@ -146,6 +146,57 @@ describe("the recovery explorer's records", () => {
   }
 });
 
+describe("the reading the page makes of each record", () => {
+  const byId = (id: string) => {
+    const situation = SITUATIONS.find((entry) => entry.id === id);
+    if (!situation) throw new Error(`no situation ${id}`);
+    return situation;
+  };
+  const first = (id: string) => {
+    const action = firstAction(byId(id));
+    if (!action) throw new Error(`${id} has no recovery entry`);
+    return action.entry;
+  };
+
+  test("each command the agent runs is the record's own, or the invocation with the record's fix applied", () => {
+    expect(byId("index").reading.act.commands).toEqual([first("index").command as string]);
+    expect(byId("migration").reading.act.commands).toEqual([
+      first("migration").preflightCommand as string,
+      first("migration").command as string,
+    ]);
+    expect(byId("model").reading.act.commands).toEqual([first("model").command as string]);
+    expect(byId("store").reading.act.commands).toEqual([first("store").example as string]);
+
+    const budget = byId("budget");
+    const raise = first("budget");
+    expect(budget.reading.act.commands).toEqual([
+      (budget.invocation ?? "").replace(/--max-tokens \d+/, `${String(raise.flagName)} ${String(raise.valueHint)}`),
+    ]);
+    expect(budget.reading.act.commands[0]).not.toBe(budget.invocation);
+
+    const cursor = byId("cursor");
+    expect(String(at(cursor.record, ["degraded", 0, "repair"]))).toContain("without --cursor");
+    expect(cursor.reading.act.commands).toEqual([(cursor.invocation ?? "").replace(/ --cursor \S+/, "")]);
+    expect(cursor.reading.act.commands[0]).not.toContain("--cursor");
+  });
+
+  test("the gaps the prose counts are the records' own numbers", () => {
+    const WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5 };
+    const cases = [
+      { id: "index", record: /generation (\d+), database generation (\d+)/, prose: /(\w+) generations behind it \((\d+) against (\d+)\)/ },
+      { id: "migration", record: /version (\d+), current is (\d+)/, prose: /(\w+) versions behind this binary \((\d+) against (\d+)\)/ },
+    ];
+    for (const { id, record, prose } of cases) {
+      const situation = byId(id);
+      const [, behind, ahead] = record.exec(String(at(situation.record, ["error", "message"]))) ?? [];
+      const [, word, from, to] = prose.exec(situation.reading.broke) ?? [];
+      expect(behind).toBeDefined();
+      expect([from, to]).toEqual([behind, ahead]);
+      expect(WORDS[word ?? ""]).toBe(Number(ahead) - Number(behind));
+    }
+  });
+});
+
 describe("the contract the records follow", () => {
   const models = read("src/models/mod.rs");
 

@@ -1,7 +1,7 @@
 // The record behind components/explain/agent-contract.tsx: six situations, each with the JSON ee
 // prints for it and the reading an agent makes of it.
 //
-// Every record is verbatim from the file named in its `record` field:
+// Every record is verbatim from the file named in its `source` field:
 // - a pinned snapshot or golden (`kind: "pinned"`), checked field for field by
 //   tests/agent-contract.test.ts;
 // - or, where no snapshot pins the whole envelope, built from the source that emits it

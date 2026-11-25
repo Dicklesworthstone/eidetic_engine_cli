@@ -32,6 +32,7 @@ import {
 } from "react";
 
 import { DemoButton, DemoFrame } from "@/components/explain/demo";
+import { Heading } from "@/components/heading-level";
 import {
   arcPath,
   commandTokens,
@@ -235,7 +236,8 @@ export function SessionLoop() {
           README.md · Agent Operating Loop · src/cli/mod.rs · ResumeArgs, OrientArgs, PackArgs (--read-only), RecallArgs
           (--diff-staged), PreflightGuardArgs, RememberArgs (--idempotency-key), OutcomeArgs (--event-id),
           HandoffCreateArgs, handle_resume, handle_orient · src/core/effect.rs (which commands read and which write) ·
-          src/core/resume.rs · src/core/preflight_guard.rs · src/core/outcome.rs (DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR 5)
+          src/core/resume.rs · src/core/preflight_guard.rs · src/core/outcome.rs (DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR 5,
+          DEFAULT_HARMFUL_BURST_WINDOW_SECONDS 3600)
           · src/core/handoff.rs · src/output/mod.rs (build_pack_skipped_item, render_handoff_create_json) · docs/schemas
           · ee.response.v2, ee.resume.v1, ee.orient.v1, ee.pack.v2, ee.recall.v1, ee.preflight.guard.v1. Field names
           are spelled as those files spell them; each excerpt is a selection of fields, values are illustrative, and …
@@ -247,7 +249,8 @@ export function SessionLoop() {
       <div ref={ref} className="min-w-0" onFocus={onFocusIn} onBlur={onFocusOut}>
         <p className="max-w-3xl text-[15px] leading-relaxed text-slate-300">
           The session has nine stations: five only read from ee, three write to it, and one is the harness&apos;s own
-          work with no ee call. Every ee response is JSON with a versioned schema, so the agent can read fields by name.
+          work with no ee call. Every command here passes --json, so each response is JSON with a versioned schema and
+          the agent can read fields by name.
           Pick a station to see its command and response, or press Play to step through them.
         </p>
 
@@ -860,7 +863,9 @@ function StationDetail({
         <span className="font-mono text-[11px] text-[color:var(--chapter,#a3e635)] tabular-nums">
           {pad(index + 1)} / {pad(N)}
         </span>
-        <h5 className="text-lg font-extrabold tracking-[-0.02em] text-white">{station.title}</h5>
+        <Heading level={5} className="text-lg font-extrabold tracking-[-0.02em] text-white">
+          {station.title}
+        </Heading>
         <span
           className="rounded-full border px-2 py-0.5 text-[10px] font-black tracking-[0.12em] uppercase"
           style={{ color: tint, borderColor: `color-mix(in srgb, ${tint} 40%, transparent)` }}

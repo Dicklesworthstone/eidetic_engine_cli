@@ -183,8 +183,8 @@ export function CampaignTimeline() {
       basis="toy"
       source={
         <>
-          A toy: five invented campaigns simulated in your browser, nothing measured; the pack is ranked by trust and
-          recency here, not by ee&rsquo;s MMR. ee&rsquo;s own: src/policy/memory_decay.rs · MemoryDecayHalfLives::default
+          A toy: five invented campaigns simulated in your browser, nothing measured. The pack here puts an anti-pattern
+          first, as ee&rsquo;s does, then ranks by trust and recency, where ee&rsquo;s pack uses MMR. ee&rsquo;s own: src/policy/memory_decay.rs · MemoryDecayHalfLives::default
           (working 1 d, episodic event 30 d, failure 90 d, semantic 180 d, procedural 365 d) ·
           DEFAULT_DECAY_FORGET_THRESHOLD 0.01 · src/pack/mod.rs · DEFAULT_CONTEXT_MAX_TOKENS 4000 ·
           src/models/context_profile.rs · balanced mix 30/20/20/20/10 · src/models/trust.rs · TrustClass ·
@@ -205,10 +205,11 @@ export function CampaignTimeline() {
             options={DOMAINS.map((entry) => ({ value: entry.id, label: entry.label }))}
           />
           <div className="flex flex-wrap gap-2">
-            {/* Stepping is not a toggle, and a reduced-motion reader starts on the last week, with nowhere to step. */}
+            {/* The label says what a press does, so no aria-pressed as well: "Pause, pressed" would contradict itself.
+                A reduced-motion reader starts on the last week, with nowhere to step. */}
             <DemoButton
               onClick={toggle}
-              pressed={reduced ? undefined : animating}
+              className={cn(animating && "border-violet-400/60 text-violet-200")}
               disabled={reduced && atEnd}
               label={reduced ? "Step to next week" : animating ? "Pause the campaign" : "Play the campaign"}
             >

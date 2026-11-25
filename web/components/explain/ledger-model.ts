@@ -15,7 +15,11 @@ export const ROWS = 16;
 export const CELL_COUNT = COLS * ROWS;
 export const ATTEMPTS_PER_SESSION = 4;
 export const SESSIONS = 24;
-/** Recorded failures in one family before curation distills it: ee's own two proposers wait for three. */
+/**
+ * Recorded failures in one family before curation distills it. Three is ee's figure for `ee playbook extract`
+ * (PLAYBOOK_MIN_EVIDENCE) and for an anti-pattern from harmful outcomes (ANTI_PATTERN_PROPOSAL_THRESHOLD).
+ * `ee review session --propose` can propose a rule from two spans of one session; the toy does not model it.
+ */
 export const DISTILL_AT = 3;
 export const FAMILY_NAMES = ["A", "B", "C", "D", "E", "F"] as const;
 export const WIN_COUNT = 3;

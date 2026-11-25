@@ -779,8 +779,10 @@ function ProofChapter() {
         title="Commands still answer with parts [missing]."
         kicker={
           <>
-            Any optional part of ee can be missing. When one is, the command still answers, records what it lost in a
-            machine-readable <Cmd>degraded</Cmd> entry, and names the repair. Switch parts off below to see the effect.
+            Any optional part of ee can be missing. Search, packs and the graph still answer without one, and report what
+            they lost as a machine-readable entry: a code, a severity and, where ee has one, a repair. An import from
+            cass is the exception: without cass it fails, with the same entry inside its error. Switch parts off below
+            to see what each command reports.
           </>
         }
       >

@@ -18,13 +18,13 @@ import { cn, fixed } from "@/lib/utils";
 // outcome. The interval is found the way bayes.rs finds it: bisection on the
 // regularized incomplete beta function.
 
-const PRIOR = 0.5;
-const HARMFUL_WEIGHT = 2.5;
+export const PRIOR = 0.5;
+export const HARMFUL_WEIGHT = 2.5;
 const HELPFUL = "#38bdf8";
 const HARMFUL = "#fb7185";
 const HUMAN = LEVEL_COLOUR.working;
 
-type Klass =
+export type Klass =
   | "human_explicit"
   | "peer_human_attested"
   | "agent_validated"
@@ -33,7 +33,7 @@ type Klass =
   | "legacy_import";
 
 /** The six trust classes, top rung first, with src/models/trust.rs's initial confidences. */
-const LADDER: readonly { id: Klass; short: string; initial: number; meaning: string }[] = [
+export const LADDER: readonly { id: Klass; short: string; initial: number; meaning: string }[] = [
   { id: "human_explicit", short: "Human", initial: 0.85, meaning: "A person ran ee remember" },
   { id: "peer_human_attested", short: "Peer", initial: 0.75, meaning: "A teammate's signed human memory" },
   { id: "agent_validated", short: "Validated", initial: 0.65, meaning: "Agent claim backed by outcomes" },
@@ -42,7 +42,7 @@ const LADDER: readonly { id: Klass; short: string; initial: number; meaning: str
   { id: "legacy_import", short: "Legacy", initial: 0.3, meaning: "Imported from pre-v1 ee" },
 ];
 
-type Event = "helpful" | "harmful" | "human";
+export type Event = "helpful" | "harmful" | "human";
 
 // ─── Beta arithmetic ────────────────────────────────────────────────────────
 
@@ -99,7 +99,7 @@ function betaCdf(x: number, a: number, b: number): number {
 }
 
 /** The inverse CDF by bracketed bisection, as bayes.rs's beta_inv_cdf. */
-function betaQuantile(p: number, a: number, b: number): number {
+export function betaQuantile(p: number, a: number, b: number): number {
   let low = 0;
   let high = 1;
   for (let i = 0; i < 64; i++) {
@@ -117,9 +117,9 @@ function betaDensity(x: number, a: number, b: number): number {
 // ─── The ADR 0032 table (trust_class_transition) ─────────────────────────────
 
 type Direction = "promote" | "demote" | "stable";
-type Transition = { next: Klass; direction: Direction; reason: string };
+export type Transition = { next: Klass; direction: Direction; reason: string };
 
-function transition(
+export function transition(
   current: Klass,
   lo: number,
   hi: number,
@@ -190,7 +190,7 @@ function conditions(current: Klass, lo: number, hi: number, ess: number, validat
   return table[current];
 }
 
-type Step = {
+export type Step = {
   event: Event | null;
   alpha: number;
   beta: number;
@@ -201,7 +201,7 @@ type Step = {
 };
 
 /** Replays outcomes from the prior, one transition evaluation per outcome, as src/core/outcome.rs does. */
-function replay(start: Klass, events: readonly Event[]): Step[] {
+export function replay(start: Klass, events: readonly Event[]): Step[] {
   let alpha = PRIOR;
   let beta = PRIOR;
   let klass = start;
@@ -224,7 +224,7 @@ function replay(start: Klass, events: readonly Event[]): Step[] {
 }
 
 /** The story: six helpful outcomes earn a promotion; then harm arrives. */
-const STORY: readonly Event[] = [
+export const STORY: readonly Event[] = [
   "helpful",
   "helpful",
   "helpful",
@@ -267,18 +267,19 @@ export function TrustPosterior() {
       setPlaying(false);
       return;
     }
+    // Stops on the last outcome, not one tick later, and keeps setPlaying out of the events updater (an updater
+    // must be pure: React may call it twice).
+    if (events.length >= STORY.length) {
+      setPlaying(false);
+      return;
+    }
     if (!inView) return;
-    const timer = window.setInterval(() => {
-      setEvents((current) => {
-        if (current.length >= STORY.length) {
-          setPlaying(false);
-          return current;
-        }
-        return [...current, STORY[current.length] as Event];
-      });
-    }, STORY_MS);
-    return () => window.clearInterval(timer);
-  }, [playing, inView, reduced]);
+    const timer = window.setTimeout(
+      () => setEvents((current) => (current.length >= STORY.length ? current : [...current, STORY[current.length] as Event])),
+      STORY_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [playing, inView, reduced, events.length]);
 
   const add = (event: Event) => {
     setPlaying(false);
@@ -306,7 +307,9 @@ export function TrustPosterior() {
         <>
           src/core/bayes.rs · Jeffreys prior Beta(0.5, 0.5), helpful α + 1, harmful β + DEFAULT_HARMFUL_WEIGHT (2.5),
           equal-tailed 90% interval by bisection on I_x(α, β), trust_class_transition (ADR 0032) · src/core/outcome.rs ·
-          one transition evaluated per outcome · src/models/trust.rs · initial_confidence
+          one transition evaluated per outcome · src/models/trust.rs · initial_confidence. The figure applies every
+          outcome; ee holds a source&rsquo;s harmful outcomes for review once it passes 5 in an hour
+          (DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR) or a sequential test (SPRT) flags the source.
         </>
       }
     >
@@ -434,8 +437,10 @@ export function TrustPosterior() {
         A harmful outcome adds 2.5 to β and a helpful one adds 1 to α, so the mean falls faster than it rises. The
         class is decided by the 90% interval rather than the mean: promotion needs the <em>lower</em> bound above one
         threshold, demotion needs the <em>upper</em> bound below another, and between the two the class does not
-        change. Outcomes alone never promote a memory to <span className="font-mono text-[13px]">human_explicit</span>;
-        that step needs a named person and a reason.
+        change. No number of ordinary outcomes promotes a memory to{" "}
+        <span className="font-mono text-[13px]">human_explicit</span>; that step needs an outcome recorded with{" "}
+        <span className="font-mono text-[13px]">--source-type human_explicit</span>, a named{" "}
+        <span className="font-mono text-[13px]">--actor</span> and a <span className="font-mono text-[13px]">--reason</span>.
       </p>
     </DemoFrame>
   );
@@ -608,7 +613,12 @@ function Tape({ steps }: { steps: Step[] }) {
           </span>
         </p>
       </div>
-      <div className="mt-2.5 flex min-h-[2.4rem] flex-wrap items-end gap-x-[3px] gap-y-2" aria-label={`${outcomes.length} outcomes recorded`} role="list">
+      {/* A list only when there is something in it: its children must all be list items. */}
+      <div
+        className="mt-2.5 flex min-h-[2.4rem] flex-wrap items-end gap-x-[3px] gap-y-2"
+        aria-label={outcomes.length > 0 ? `${outcomes.length} outcome${outcomes.length === 1 ? "" : "s"} recorded` : undefined}
+        role={outcomes.length > 0 ? "list" : undefined}
+      >
         {outcomes.length === 0 ? (
           <span className="text-[12px] text-slate-500">No outcomes yet: the prior, Beta(0.5, 0.5).</span>
         ) : (

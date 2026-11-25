@@ -139,7 +139,7 @@ export function Amnesia() {
         </ul>
 
         <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_15rem]">
-          <ol className="ruled min-w-0" aria-live="polite">
+          <ol className="ruled min-w-0">
             {SESSIONS.map((session, index) => {
               const on = index < shown;
               return (
@@ -197,6 +197,13 @@ export function Amnesia() {
               {/* The label says what a press does, so no aria-pressed as well: "Pause, pressed" contradicts itself. */}
               <DemoButton
                 onClick={() => {
+                  // Nothing animates for a reader who asks for less motion, so Play shows every session at once
+                  // (restarting from session one would leave the figure stuck there).
+                  if (reduced) {
+                    setPlaying(false);
+                    setShown(SESSIONS.length);
+                    return;
+                  }
                   if (done) setShown(1);
                   setPlaying((on) => !on || done);
                 }}

@@ -176,6 +176,16 @@ export function MarkdownVsMemory() {
     () => ({ notes: series("notes", task), vector: series("vector", task), ee: series("ee", task) }),
     [task],
   );
+  // The year's last sessions, whose notes are the longest each lane shows: LaneRow lays them out unseen so that a
+  // note growing as the campaign plays never changes the figure's height.
+  const finals = useMemo(
+    () => ({
+      notes: LANE_SESSION.notes(WEEKS, task),
+      vector: LANE_SESSION.vector(WEEKS, task),
+      ee: LANE_SESSION.ee(WEEKS, task),
+    }),
+    [task],
+  );
   const status = useMemo(() => campaign(week, task), [week, task]);
   const trims = TRIM_WEEKS.filter((trim) => trim <= week).length;
   const taskLabel = (TASKS.find((entry) => entry.id === task) ?? TASKS[0]).label;
@@ -226,6 +236,7 @@ export function MarkdownVsMemory() {
             value={week}
             onChange={pick}
             display={`week ${week} of ${WEEKS}`}
+            valueText={`week ${week} of ${WEEKS}`}
           />
           <div className="flex flex-wrap items-center gap-2">
             <Segmented
@@ -290,6 +301,7 @@ export function MarkdownVsMemory() {
               key={lane.id}
               lane={lane}
               session={sessions[lane.id]}
+              final={finals[lane.id]}
               trims={trims}
               written={status.written}
             />
@@ -320,7 +332,8 @@ export function MarkdownVsMemory() {
                   {lane.name}
                 </li>
               ))}
-              <li className="hidden items-center gap-2 sm:flex">
+              {/* The trims are marked on the tokens chart, which is the only chart on a phone until another is picked. */}
+              <li className={cn("items-center gap-2", metric === "tokens" ? "flex" : "hidden lg:flex")}>
                 <span aria-hidden="true" className="h-2.5 w-px bg-rose-300/70" />
                 File trimmed
               </li>
@@ -424,11 +437,14 @@ function laneNote(lane: Lane, session: Session, trims: number): ReactNode {
 function LaneRow({
   lane,
   session,
+  final,
   trims,
   written,
 }: {
   lane: (typeof LANES)[number];
   session: Session;
+  /** The lane's session in the campaign's last week. */
+  final: Session;
   trims: number;
   written: number;
 }) {
@@ -461,12 +477,19 @@ function LaneRow({
           </span>
           <span className="font-mono text-[10.5px] text-slate-500">{lane.tag}</span>
         </p>
-        <p className="mt-1.5 text-[12px] leading-snug text-slate-400">{laneNote(lane.id, session, trims)}</p>
+        {/* The last week's note sits in the same grid cell, unseen, so the row keeps its final height throughout. */}
+        <p className="mt-1.5 grid text-[12px] leading-snug text-slate-400">
+          <span className="col-start-1 row-start-1">{laneNote(lane.id, session, trims)}</span>
+          <span aria-hidden="true" className="invisible col-start-1 row-start-1">
+            {laneNote(lane.id, final, TRIM_WEEKS.length)}
+          </span>
+        </p>
       </div>
       <div className="min-w-0 space-y-3">
         <Cells session={session} capacity={lane.capacity} name={lane.name} />
         <TokenGauge session={session} colour={lane.colour} />
-        <dl className="grid max-w-2xl grid-cols-5 gap-x-2 sm:gap-x-4">
+        {/* Three columns on a phone: at five, a 320 px screen leaves 43 px a column and cuts "Repeats" and "Deleted". */}
+        <dl className="grid max-w-2xl grid-cols-3 gap-x-2 gap-y-2.5 sm:grid-cols-5 sm:gap-x-4">
           {stats.map((stat) => (
             <div key={stat.label} className="min-w-0">
               <dt className="truncate text-[9px] font-black tracking-[0.14em] text-slate-500 uppercase">{stat.label}</dt>
@@ -573,7 +596,7 @@ function TokenGauge({ session, colour }: { session: Session; colour: string }) {
       </div>
       <p className="shrink-0 font-mono text-[11px] text-slate-300 tabular-nums">
         {grouped(session.tokens)} tokens
-        {receipts > 0 ? <span className="text-slate-500"> · {grouped(receipts)} in provenance lines</span> : null}
+        {receipts > 0 ? <span className="text-slate-500"> · {grouped(receipts)} of metadata</span> : null}
       </p>
     </div>
   );

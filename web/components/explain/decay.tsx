@@ -14,12 +14,12 @@ import { cn, fixed } from "@/lib/utils";
  *   lifecycle = freshness × confidence × utility                (evaluate_memory_decay_with_settings)
  *   lifecycle < 0.01 → tombstone; < 0.05 → demote; else preserve (DEFAULT_DECAY_*_THRESHOLD)
  */
-const DEMOTE = 0.05;
-const FORGET = 0.01;
+export const DEMOTE = 0.05;
+export const FORGET = 0.01;
 const MAX_DAYS = 730;
 
 /** MemoryDecayHalfLives::default(), in days. */
-const KINDS = [
+export const KINDS = [
   { id: "working", label: "Working", pair: "working · any kind", half: 1, colour: LEVEL_COLOUR.working, level: "working", dash: undefined },
   { id: "event", label: "Episodic event", pair: "episodic · event", half: 30, colour: LEVEL_COLOUR.episodic, level: "episodic", dash: undefined },
   { id: "failure", label: "Episodic failure", pair: "episodic · failure", half: 90, colour: "#fda4af", level: "episodic", dash: "5 4" },
@@ -28,7 +28,7 @@ const KINDS = [
 ] as const;
 
 /** demoted_memory_level: one step down, where there is a step. */
-const DEMOTED: Record<string, string | undefined> = { procedural: "semantic", semantic: "episodic" };
+export const DEMOTED: Record<string, string | undefined> = { procedural: "semantic", semantic: "episodic" };
 
 const freshness = (days: number, half: number) => Math.exp((-Math.LN2 * Math.max(0, days)) / half);
 
@@ -47,9 +47,9 @@ const TICKS = [
   { days: 730, label: "2y" },
 ] as const;
 
-type Action = "preserve" | "demote" | "tombstone";
+export type Action = "preserve" | "demote" | "tombstone";
 
-function classify(score: number): Action {
+export function classify(score: number): Action {
   if (score < FORGET) return "tombstone";
   if (score < DEMOTE) return "demote";
   return "preserve";
@@ -130,7 +130,8 @@ export function DecayCurves() {
         <>
           src/policy/memory_decay.rs · MemoryDecayHalfLives::default (working 1 d, episodic event 30 d, episodic failure 90 d,
           semantic fact 180 d, procedural rule 365 d) · memory_decay_freshness_score · DEFAULT_DECAY_DEMOTE_THRESHOLD 0.05 ·
-          DEFAULT_DECAY_FORGET_THRESHOLD 0.01 · demoted_memory_level · src/steward/mod.rs · memory_decay_reference_time
+          DEFAULT_DECAY_FORGET_THRESHOLD 0.01 · demoted_memory_level · src/steward/mod.rs · memory_decay_reference_time ·
+          src/core/curate.rs · run_curate_untombstone
         </>
       }
     >
@@ -233,7 +234,15 @@ export function DecayCurves() {
           </div>
 
           <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <Slider label="Time since last use" min={0} max={1000} value={cursor} onChange={setCursor} display={age(days)} />
+            <Slider
+              label="Time since last use"
+              min={0}
+              max={1000}
+              value={cursor}
+              onChange={setCursor}
+              display={age(days)}
+              valueText={age(days)}
+            />
             <Slider
               label="Confidence"
               min={0.05}
@@ -315,8 +324,7 @@ export function DecayCurves() {
         </p>
         <p>
           <span className="font-semibold text-slate-200">Tombstones.</span> A tombstoned memory leaves retrieval and gets an
-          audit entry; the record is kept. A lesson remembered with <Cmd>--revive-when</Cmd> is listed by{" "}
-          <Cmd>ee tripwire check --revivals</Cmd> once its condition clears.
+          audit entry. The row is kept, and <Cmd>ee curate untombstone &lt;id&gt;</Cmd> restores it.
         </p>
       </div>
     </DemoFrame>

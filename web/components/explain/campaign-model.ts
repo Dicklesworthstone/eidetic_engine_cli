@@ -10,8 +10,9 @@
 //     (DEFAULT_CONTEXT_MAX_TOKENS) and src/models/context_profile.rs (balanced);
 //   - the trust classes: src/models/trust.rs.
 // Everything else (how many notes a session writes, which memories get
-// recalled, the events, the pack's contents) is invented for the page, and the
-// pack here is ranked by trust and recency, not by ee's MMR selection.
+// recalled, the events, the pack's contents) is invented for the page. The pack
+// here puts the anti-pattern first, as ee's does, and then ranks by trust and
+// recency where ee uses MMR selection.
 
 import type { Level, PackSection } from "@/lib/palette";
 import { seeded } from "@/lib/utils";
@@ -154,7 +155,7 @@ const PERF: Domain = {
       day: w(4, 3),
       type: "antipattern",
       title: "Three prefetch regressions become an anti-pattern",
-      detail: "Three failures are recorded with family=aggressive-prefetch, each with its bench run and revert SHA. Curation clusters them, and a reviewer validates and applies the anti-pattern.",
+      detail: "Three bench runs report the prefetch harmful, each regression filed with family=aggressive-prefetch. ee proposes an anti-pattern; a reviewer validates and applies it.",
       command: "ee curate validate <candidate-id> && ee curate apply <candidate-id>",
       rules: 1,
     },
@@ -170,8 +171,8 @@ const PERF: Domain = {
       day: w(9, 1),
       type: "validated",
       title: "The bench-noise rule is validated",
-      detail: "Helpful outcomes from six runs lift its 90% interval above 0.70: agent_assertion becomes agent_validated, with an audit row.",
-      command: "ee outcome <memory-id> --signal helpful --source-id run-0912",
+      detail: "Six runs report it helpful and raise its confidence; the agent then promotes it from agent_assertion to agent_validated, with an audit row.",
+      command: "ee outcome <rule-id> --target-type rule --signal helpful --source-id run-0912 && ee rule update <rule-id> --trust-class agent_validated",
       rules: 0,
     },
     {
@@ -216,12 +217,12 @@ const PERF: Domain = {
     },
   ],
   items: [
-    { id: "p-r1", section: "rules", level: "procedural", kind: "anti-pattern", trust: "agent_validated", source: "bench-run://2026-09-12T14:23/oltp-mixed-small-n", text: "Don't prefetch B-tree leaves on a fixed stride: three regressions on small-N reads, all cache pollution.", tokens: 90, from: w(4, 3) },
+    { id: "p-r1", section: "rules", level: "procedural", kind: "anti-pattern", trust: "agent_assertion", source: "bench-run://2026-09-12T14:23/oltp-mixed-small-n", text: "Don't prefetch B-tree leaves on a fixed stride: three regressions on small-N reads, all cache pollution.", tokens: 90, from: w(4, 3) },
     { id: "p-r2", section: "rules", level: "procedural", kind: "rule", trust: "agent_assertion", upgrade: { day: w(9, 1), to: "agent_validated" }, source: "bench-run://oltp-mixed/variance-study", text: "Run oltp-mixed three times and report the median: one run's noise is ±4%.", tokens: 70, from: w(6, 4) },
     { id: "p-r3", section: "rules", level: "procedural", kind: "rule", trust: "agent_assertion", source: "flamegraph://runs/0412/cpu.svg", text: "Profile the release build with debug symbols; debug builds misrank the hot path.", tokens: 75, from: w(12, 2) },
     { id: "p-r4", section: "rules", level: "procedural", kind: "rule", trust: "agent_validated", source: "bench-run://alloc/arena-sweep", text: "Size the page arena at 64 KiB per worker.", tokens: 55, from: w(12, 2), until: w(21, 3) },
     { id: "p-r5", section: "rules", level: "procedural", kind: "rule", trust: "human_explicit", source: "git-sha://5d1e0a7", text: "Every optimisation lands with a median-of-3 bench diff and its revert SHA.", tokens: 70, from: w(23, 2) },
-    { id: "p-d1", section: "decisions", level: "semantic", kind: "decision", trust: "human_explicit", source: "charter://oltp-campaign/v1", text: "Optimise p99, not throughput, for the OLTP mix. Rejected: throughput +20%.", tokens: 80, from: 8, until: 101, revisitBy: 98 },
+    { id: "p-d1", section: "decisions", level: "semantic", kind: "decision", trust: "human_explicit", source: "charter://oltp-campaign/v1", text: "Optimise p99 latency for the OLTP mix. Rejected: throughput +20%.", tokens: 80, from: 8, until: 101, revisitBy: 98 },
     { id: "p-d2", section: "decisions", level: "semantic", kind: "decision", trust: "human_explicit", source: "design-review://w08/storage", text: "Keep the B-tree. An LSM rewrite was rejected as too much risk for one campaign.", tokens: 85, from: 51, revisitBy: 171 },
     { id: "p-d3", section: "decisions", level: "semantic", kind: "decision", trust: "human_explicit", source: "charter://oltp-campaign/v2", text: "p99 target reaffirmed at 2.0 ms after the revisit; supersedes the first.", tokens: 75, from: 101, revisitBy: 191 },
     { id: "p-f1", section: "failures", level: "episodic", kind: "failure", trust: "cass_evidence", source: "bench-run://prefetch/adaptive-w4", text: "Adaptive prefetch: −3% on small-N reads. Third in family aggressive-prefetch. Reverted at 9af3c21.", tokens: 95, from: w(4, 2) },
@@ -273,7 +274,7 @@ const EQUITIES: Domain = {
       day: w(5, 2),
       type: "antipattern",
       title: "Three failed screens become an anti-pattern",
-      detail: "Three EV/EBITDA screens surfaced 'cheap' carriers at peak volumes, and all three were value traps. Curation clusters them; a reviewer validates and applies the anti-pattern.",
+      detail: "Three EV/EBITDA screens surfaced 'cheap' carriers at peak volumes, all value traps. Three harmful outcomes from two analysts make ee propose an anti-pattern for review.",
       command: "ee curate validate <candidate-id> && ee curate apply <candidate-id>",
       rules: 1,
     },
@@ -327,7 +328,7 @@ const EQUITIES: Domain = {
     },
   ],
   items: [
-    { id: "q-r1", section: "rules", level: "procedural", kind: "anti-pattern", trust: "agent_validated", source: "analyst-note://screens/ev-ebitda-w5", text: "Don't buy freight on trailing EV/EBITDA at peak volumes: three cheap screens, three value traps.", tokens: 85, from: w(5, 2) },
+    { id: "q-r1", section: "rules", level: "procedural", kind: "anti-pattern", trust: "agent_assertion", source: "analyst-note://screens/ev-ebitda-w5", text: "Don't buy freight on trailing EV/EBITDA at peak volumes: three cheap screens, three value traps.", tokens: 85, from: w(5, 2) },
     { id: "q-r2", section: "rules", level: "procedural", kind: "rule", trust: "agent_assertion", upgrade: { day: w(19, 1), to: "agent_validated" }, source: "sec-filing://TDWL/10-Q/2026-Q2", text: "Read segment volumes in the 10-Q before the press release; the release leads with revenue per load.", tokens: 80, from: w(8, 1) },
     { id: "q-r3", section: "rules", level: "procedural", kind: "rule", trust: "agent_validated", source: "playbook://freight-2025/rule-07", text: "Spot rates lead contract rates by about two quarters.", tokens: 55, from: 0, until: w(16, 2) },
     { id: "q-r4", section: "rules", level: "procedural", kind: "rule", trust: "agent_validated", source: "playbook://freight-2025/rule-02", text: "Weight guidance by management's hit rate over the last eight quarters.", tokens: 65, from: 0 },
@@ -415,7 +416,7 @@ const SECURITY: Domain = {
       day: w(15, 2),
       type: "demote",
       title: "A detection rule is deprecated",
-      detail: "After an add-in update the rundll32-from-Office rule fired 400 times a day, and two analysts reported it harmful. Curation deprecates it, and a narrower rule replaces it.",
+      detail: "After an add-in update the rundll32-from-Office rule fired 400 times a day, and two analysts reported it harmful. Curation deprecates it; a narrower version is drafted.",
       command: "ee outcome <rule-id> --target-type rule --signal harmful --source-id triage-w15",
       rules: -1,
     },
@@ -431,16 +432,16 @@ const SECURITY: Domain = {
       day: w(20, 4),
       type: "promote",
       title: "Incident IR-031 closed: three rules",
-      detail: "IR-031 is contained in 38 minutes; IR-014 took six hours. Three more lessons are promoted.",
+      detail: "IR-031 is contained in 38 minutes; IR-014 took six hours. Three more lessons are promoted, among them the narrower rundll32 rule.",
       command: "ee curate candidates --json",
       rules: 3,
     },
   ],
   items: [
     { id: "s-r1", section: "rules", level: "procedural", kind: "playbook-step", trust: "agent_assertion", upgrade: { day: w(17, 1), to: "agent_validated" }, source: "incident://IR-2026-014/postmortem", text: "Capture volatile memory before isolating a host: isolation killed the loader's only copy.", tokens: 80, from: w(3, 2) },
-    { id: "s-r2", section: "rules", level: "procedural", kind: "anti-pattern", trust: "agent_validated", source: "incident://IR-2026-017/timeline", text: "Don't answer this actor with single-IP blocks: it rotated infrastructure within 40 minutes, three times.", tokens: 85, from: w(5, 4) },
+    { id: "s-r2", section: "rules", level: "procedural", kind: "anti-pattern", trust: "agent_assertion", source: "incident://IR-2026-017/timeline", text: "Don't answer this actor with single-IP blocks: it rotated infrastructure within 40 minutes, three times.", tokens: 85, from: w(5, 4) },
     { id: "s-r3", section: "rules", level: "procedural", kind: "rule", trust: "agent_validated", source: "sigma://rules/office-rundll32", text: "Alert on rundll32 spawned by an Office application.", tokens: 50, from: 0, until: w(15, 2) },
-    { id: "s-r4", section: "rules", level: "procedural", kind: "rule", trust: "agent_assertion", source: "sigma://rules/office-rundll32-v2", text: "Alert on rundll32 from Office only when the DLL is unsigned and user-writable.", tokens: 65, from: w(15, 2) },
+    { id: "s-r4", section: "rules", level: "procedural", kind: "rule", trust: "agent_assertion", source: "sigma://rules/office-rundll32-v2", text: "Alert on rundll32 from Office only when the DLL is unsigned and user-writable.", tokens: 65, from: w(20, 4) },
     { id: "s-r5", section: "rules", level: "procedural", kind: "rule", trust: "agent_validated", source: "runbook://identity/token-theft", text: "After a token-theft phish, revoke sessions as well as resetting passwords.", tokens: 60, from: 0 },
     { id: "s-d1", section: "decisions", level: "semantic", kind: "decision", trust: "human_explicit", source: "risk-register://R-031", text: "Accept the legacy-VPN risk until migration, with MFA enforced.", tokens: 70, from: 2, until: 50, revisitBy: 47 },
     { id: "s-d2", section: "decisions", level: "semantic", kind: "decision", trust: "human_explicit", source: "risk-register://R-031/v2", text: "Renewed 30 days with geo-fencing; migration owner named.", tokens: 65, from: 50, until: 88, revisitBy: 80 },
@@ -453,7 +454,7 @@ const SECURITY: Domain = {
     { id: "s-e2", section: "evidence", level: "episodic", kind: "fact", trust: "agent_assertion", source: "incident://IR-2026-022", text: "IR-022: same actor, new lure; memory capture recovered the loader.", tokens: 80, from: w(11, 2) },
     { id: "s-e3", section: "evidence", level: "episodic", kind: "fact", trust: "agent_assertion", source: "incident://IR-2026-031", text: "IR-031: contained in 38 minutes, against six hours for IR-014.", tokens: 75, from: w(20, 3) },
     { id: "s-a1", section: "artifacts", level: "semantic", kind: "artifact", trust: "human_explicit", source: "file://runbooks/phishing.md", text: "runbooks/phishing.md: the team's response runbook.", tokens: 45, from: 0 },
-    { id: "s-a2", section: "artifacts", level: "semantic", kind: "artifact", trust: "agent_assertion", source: "file://detections/office-rundll32-v2.yml", text: "detections/office-rundll32-v2.yml: the narrower rule.", tokens: 45, from: w(15, 2) },
+    { id: "s-a2", section: "artifacts", level: "semantic", kind: "artifact", trust: "agent_assertion", source: "file://detections/office-rundll32-v2.yml", text: "detections/office-rundll32-v2.yml: the narrower rule's draft.", tokens: 45, from: w(15, 2) },
   ],
 };
 
@@ -494,7 +495,7 @@ const GROWTH: Domain = {
       day: w(4, 2),
       type: "antipattern",
       title: "Three losing discount subject lines become an anti-pattern",
-      detail: "Discount-first subject lines lost three tests in a row on activation. Curation clusters them; a reviewer validates and applies the anti-pattern.",
+      detail: "Discount-first subject lines lost three tests in a row on activation. Three harmful outcomes from two marketers make ee propose an anti-pattern for review.",
       command: "ee curate validate <candidate-id> && ee curate apply <candidate-id>",
       rules: 1,
     },
@@ -548,7 +549,7 @@ const GROWTH: Domain = {
     },
   ],
   items: [
-    { id: "g-r1", section: "rules", level: "procedural", kind: "anti-pattern", trust: "agent_validated", source: "experiment://onboarding/subject-discount-3", text: "Don't lead onboarding subject lines with a discount: −9%, −4% and −6% activation in three tests.", tokens: 85, from: w(4, 2) },
+    { id: "g-r1", section: "rules", level: "procedural", kind: "anti-pattern", trust: "agent_assertion", source: "experiment://onboarding/subject-discount-3", text: "Don't lead onboarding subject lines with a discount: −9%, −4% and −6% activation in three tests.", tokens: 85, from: w(4, 2) },
     { id: "g-r2", section: "rules", level: "procedural", kind: "rule", trust: "agent_assertion", upgrade: { day: w(16, 2), to: "agent_validated" }, source: "ga4://property/onboarding/holdout-w6", text: "Keep a 5% holdout on every lifecycle flow; lift without one is guesswork.", tokens: 70, from: w(6, 3) },
     { id: "g-r3", section: "rules", level: "procedural", kind: "rule", trust: "agent_validated", source: "mixpanel://reports/send-time-2025", text: "Send at Tuesday 10:00 local: the highest open rate.", tokens: 50, from: 0, until: w(13, 4) },
     { id: "g-r4", section: "rules", level: "procedural", kind: "rule", trust: "agent_assertion", source: "experiment://playbook/power-calc", text: "One variable per test, and at least 20,000 recipients per arm.", tokens: 60, from: w(6, 3) },
@@ -607,7 +608,7 @@ const LEGAL: Domain = {
       day: w(6, 3),
       type: "antipattern",
       title: "Three discovery losses become an anti-pattern",
-      detail: "Two motions to compel and a letter brief failed for want of a dated meet-and-confer log. Curation clusters them; a reviewer validates and applies the anti-pattern.",
+      detail: "Two motions to compel and a letter brief failed without a dated meet-and-confer log. Three harmful outcomes from two associates make ee propose an anti-pattern for review.",
       command: "ee curate validate <candidate-id> && ee curate apply <candidate-id>",
       rules: 1,
     },
@@ -623,8 +624,8 @@ const LEGAL: Domain = {
       day: w(14, 1),
       type: "validated",
       title: "The calendaring rule is validated",
-      detail: "Helpful outcomes on six deadlines lift its 90% interval above 0.70: agent_assertion becomes agent_validated.",
-      command: "ee outcome <memory-id> --signal helpful --source-id dkt-58",
+      detail: "Six deadlines report it helpful and raise its confidence; the agent then promotes it from agent_assertion to agent_validated.",
+      command: "ee outcome <rule-id> --target-type rule --signal helpful --source-id dkt-58 && ee rule update <rule-id> --trust-class agent_validated",
       rules: 0,
     },
     {
@@ -661,7 +662,7 @@ const LEGAL: Domain = {
     },
   ],
   items: [
-    { id: "l-r1", section: "rules", level: "procedural", kind: "anti-pattern", trust: "agent_validated", source: "docket://harrow-v-kestrel/dkt-41", text: "Don't move to compel without a dated meet-and-confer log: two motions and a letter brief failed on it.", tokens: 85, from: w(6, 3) },
+    { id: "l-r1", section: "rules", level: "procedural", kind: "anti-pattern", trust: "agent_assertion", source: "docket://harrow-v-kestrel/dkt-41", text: "Don't move to compel without a dated meet-and-confer log: two motions and a letter brief failed on it.", tokens: 85, from: w(6, 3) },
     { id: "l-r2", section: "rules", level: "procedural", kind: "rule", trust: "agent_assertion", upgrade: { day: w(14, 1), to: "agent_validated" }, source: "docket://harrow-v-kestrel/dkt-12", text: "Calendar every deadline from the docket entry, never from the service email.", tokens: 65, from: w(9, 2) },
     { id: "l-r3", section: "rules", level: "procedural", kind: "rule", trust: "agent_validated", source: "playbook://contract-matters/rule-04", text: "This court grants stipulated extensions as a matter of course.", tokens: 55, from: 0, until: w(19, 1) },
     { id: "l-r4", section: "rules", level: "procedural", kind: "rule", trust: "agent_validated", source: "playbook://contract-matters/rule-01", text: "Log privilege calls the day they are made; reconstructing them costs a week.", tokens: 65, from: 0 },
@@ -945,7 +946,8 @@ function pool(campaign: Campaign, section: PackSection, day: number, named: numb
 
 /**
  * The pack `ee pack` would hand Monday's session, at toy scale: each section filled up to its balanced quota, named
- * items first (decisions coming due, then by trust, then newest), then unnamed ones of a toy size. The quotas are caps
+ * items first (decisions coming due, then the anti-pattern, which ee's include_anti_pattern_first selects before
+ * anything else, then by trust, then newest), then unnamed ones of a toy size. The quotas are caps
  * and are not redistributed, so early on, with no rules yet, the pack runs under its budget.
  */
 export function packAt(campaign: Campaign, day: number): Pack {
@@ -966,7 +968,12 @@ export function packAt(campaign: Campaign, day: number): Pack {
       })
       .sort((a, b) => {
         if (section === "rules" || section === "decisions") {
-          return Number(b.due) - Number(a.due) || TRUST_RANK[a.trust] - TRUST_RANK[b.trust] || b.item.from - a.item.from;
+          return (
+            Number(b.due) - Number(a.due) ||
+            Number(b.item.kind === "anti-pattern") - Number(a.item.kind === "anti-pattern") ||
+            TRUST_RANK[a.trust] - TRUST_RANK[b.trust] ||
+            b.item.from - a.item.from
+          );
         }
         return b.item.from - a.item.from;
       });

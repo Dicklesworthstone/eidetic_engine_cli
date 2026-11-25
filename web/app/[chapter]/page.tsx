@@ -13,6 +13,7 @@ import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
 import { SkipOffscreen } from "@/components/skip-offscreen";
 import { type Chapter, chapters, siteConfig } from "@/lib/content";
+import { chapterShareImages } from "@/lib/share";
 
 export const dynamicParams = false;
 
@@ -31,14 +32,15 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   if (!chapter) return {};
   const title = `${chapter.share.title} · ${siteConfig.name}`;
   const url = `/${chapter.slug}`;
-  // The images are this route's opengraph-image.tsx and twitter-image.tsx, which Next.js links
-  // itself; naming images here would override them.
+  // The images are this route's opengraph-image.tsx and twitter-image.tsx. They are named here, rather
+  // than left for Next.js to link, so each carries this chapter's alt text (see chapterShareImages).
+  const images = chapterShareImages(chapter);
   return {
     title,
     description: chapter.share.description,
     alternates: { canonical: url },
-    openGraph: { title, description: chapter.share.description, url, siteName: siteConfig.name, type: "article" },
-    twitter: { card: "summary_large_image", title, description: chapter.share.description },
+    openGraph: { title, description: chapter.share.description, url, siteName: siteConfig.name, type: "article", images: images.openGraph },
+    twitter: { card: "summary_large_image", title, description: chapter.share.description, images: images.twitter },
   };
 }
 

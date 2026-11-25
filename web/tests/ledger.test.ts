@@ -1,9 +1,12 @@
 // `bun test`: the negative evidence ledger toy (components/explain/ledger-model.ts). The figure is a toy,
 // but it claims a few things on its face: the two panels search the same landscape with the same heuristic,
 // the panel with the ledger never pays twice for a dead end, a pruned family stays pruned, and the opening
-// landscape is a typical one rather than the best one. These check each claim over many seeds.
+// landscape is a typical one rather than the best one. These check each claim over many seeds. The last block
+// reads the Rust source for the parts of the loop that are ee's.
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import {
   ATTEMPTS_PER_SESSION,
@@ -284,5 +287,59 @@ describe("what the caption says the toy shows", () => {
     const snap = snapshot(landscape, runCampaign(landscape, "ee"), SESSIONS);
     for (const values of [landscape.appeal, landscape.family, landscape.isWin, snap.cells]) expect(values).toHaveLength(COLS * ROWS);
     for (const family of landscape.families) for (const cell of family.cells) expect(cell).toBeLessThan(COLS * ROWS);
+  });
+});
+
+describe("the ee facts the figure states", () => {
+  const repo = join(import.meta.dir, "..", "..");
+  const source = (path: string) => readFileSync(join(repo, path), "utf8");
+  /** The text from `start` to the first `end` after it. */
+  const between = (text: string, start: string, end: string) => {
+    const from = text.indexOf(start);
+    expect(from).toBeGreaterThanOrEqual(0);
+    const to = text.indexOf(end, from);
+    expect(to).toBeGreaterThan(from);
+    return text.slice(from, to);
+  };
+  // Whitespace folded, so a reflowed caption still reads the same.
+  const figure = source("web/components/explain/ledger.tsx").replace(/\s+/g, " ");
+
+  test("a failure's typed fields are the four the caption lists, and family is indexed", () => {
+    const fields = between(source("src/models/memory.rs"), "const FAILURE_TYPED_MEMORY_FIELDS:", "\n];");
+    expect([...fields.matchAll(/name: "(\w+)",/g)].map(([, name]) => name)).toEqual([
+      "cause",
+      "regression_surface",
+      "reverted_at_sha",
+      "family",
+    ]);
+    expect(fields).toMatch(/name: "family",\s*shape: TypedMemoryFieldShape::Text,\s*indexed: true,/);
+    expect(figure).toContain("FAILURE_TYPED_MEMORY_FIELDS: cause, regression_surface, reverted_at_sha, family");
+  });
+
+  test("the loop's commands take the flags the figure gives them", () => {
+    const cli = source("src/cli/mod.rs");
+    const search = between(cli, "pub struct SearchArgs {", "\n}\n");
+    expect(search).toContain('#[arg(long = "field", value_name = "NAME=VALUE")]');
+    expect(search).toContain("pub kind: Option<String>,");
+    const remember = between(cli, "pub struct RememberArgs {", "\n}\n");
+    expect(remember).toContain("pub level: String,");
+    expect(remember).toContain("pub kind: String,");
+    // The attempt-family ledger the caption sets apart: ee remember --family --of-n --attempt --attempt-outcome.
+    for (const flag of ["family", "of-n", "attempt", "attempt-outcome"]) {
+      expect(remember).toMatch(new RegExp(`(#\\[arg\\(long = "${flag}"|pub ${flag.replaceAll("-", "_")}:)`));
+    }
+    expect(figure).toContain("--level episodic --kind failure");
+    expect(figure).toContain("--kind failure --field family=B");
+    expect(figure).toContain("ee remember --family --of-n --attempt --attempt-outcome");
+  });
+
+  test("three to distill, a protected rule once applied, and anti-patterns first in the pack", () => {
+    expect(DISTILL_AT).toBe(3);
+    expect(source("src/core/outcome.rs")).toContain(`const ANTI_PATTERN_PROPOSAL_THRESHOLD: usize = ${DISTILL_AT};`);
+    expect(source("src/core/rule.rs")).toContain(`const PLAYBOOK_MIN_EVIDENCE: usize = ${DISTILL_AT};`);
+    expect(source("src/core/curate.rs")).toContain("protected: candidate_type == CandidateType::AntiPatternProposal,");
+    const pack = source("src/pack/mod.rs");
+    expect(pack).toContain("include_anti_pattern_first: true,");
+    expect(pack).toContain('"What NOT to do"');
   });
 });

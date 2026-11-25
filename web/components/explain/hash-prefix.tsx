@@ -48,7 +48,7 @@ function compress(cv: number[], block: number[], length: number, flags: number):
 }
 
 /** BLAKE3-256 of at most 1,024 bytes, as lowercase hex. */
-function blake3(bytes: Uint8Array): string {
+export function blake3(bytes: Uint8Array): string {
   const input = bytes.length > 1024 ? bytes.subarray(0, 1024) : bytes;
   let cv = IV.slice();
   const blocks = Math.max(1, Math.ceil(input.length / 64));
@@ -79,14 +79,17 @@ function u64le(value: number): Uint8Array {
 
 type Segment = { kind: "length" | "label" | "uri" | "note"; bytes: Uint8Array; text: string };
 
-function flatFeed(uri: string, note: string): Segment[] {
+export function flatFeed(uri: string, note: string): Segment[] {
   return [
     { kind: "uri", bytes: encoder.encode(uri), text: uri },
     { kind: "note", bytes: encoder.encode(note), text: note },
   ];
 }
 
-function labeledFeed(uri: string, note: string): Segment[] {
+/** The labels ee gives a selected item's provenance fields (`hash_pack_hash_provenance(hasher, "item.provenance", ...)`). */
+export const PROVENANCE_LABELS = { uri: "item.provenance.uri", note: "item.provenance.note" } as const;
+
+export function labeledFeed(uri: string, note: string): Segment[] {
   const field = (label: string, kind: "uri" | "note", value: string): Segment[] => {
     const labelBytes = encoder.encode(label);
     const valueBytes = encoder.encode(value);
@@ -97,10 +100,10 @@ function labeledFeed(uri: string, note: string): Segment[] {
       { kind, bytes: valueBytes, text: value },
     ];
   };
-  return [...field("uri", "uri", uri), ...field("note", "note", note)];
+  return [...field(PROVENANCE_LABELS.uri, "uri", uri), ...field(PROVENANCE_LABELS.note, "note", note)];
 }
 
-function concat(segments: Segment[]): Uint8Array {
+export function concat(segments: Segment[]): Uint8Array {
   const total = segments.reduce((sum, segment) => sum + segment.bytes.length, 0);
   const out = new Uint8Array(total);
   let at = 0;
@@ -115,16 +118,21 @@ const hex = (bytes: Uint8Array) => Array.from(bytes, (byte) => byte.toString(16)
 
 // ─── Q20.12 ──────────────────────────────────────────────────────────────────
 
-/** `quantize_q20_12`: round(value × 4096), clamped to u32. */
-const quantize = (value: number) => {
-  const scaled = Math.round(value * 4096);
-  return Number.isFinite(scaled) ? Math.min(0xffffffff, Math.max(0, scaled)) : 0;
+/**
+ * `q20_12_le_bytes`: the scores ee hashes are f32, widened to f64 and passed to `quantize_q20_12`, which is
+ * round(value × 4096) clamped to u32. `Math.fround` gives the f32 the decimal would be stored as.
+ */
+const scaled = (value: number) => Math.fround(value) * 4096;
+export const quantize = (value: number) => {
+  const rounded = Math.round(scaled(value));
+  return Number.isFinite(rounded) ? Math.min(0xffffffff, Math.max(0, rounded)) : 0;
 };
 
-const PAIRS = {
-  noise: { label: "Float noise", a: 0.75, b: 0.7500000001 },
+/** One f32 step above 0.75 is 2^-24, about 0.00000006. */
+export const PAIRS = {
+  noise: { label: "Float noise", a: 0.75, b: 0.75000006 },
   quantum: { label: "Under a quantum", a: 0.75, b: 0.7501 },
-  real: { label: "A real change", a: 0.75, b: 0.7502 },
+  halfStep: { label: "Across a half-step", a: 0.75012, b: 0.75013 },
 } as const;
 type PairKey = keyof typeof PAIRS;
 
@@ -137,7 +145,10 @@ const SEGMENT_STYLE: Record<Segment["kind"], string> = {
   note: "border-amber-400/35 bg-amber-400/10 text-amber-200",
 };
 
-/** Two provenance fields side by side, and the exact bytes they feed the hash. */
+/**
+ * Two provenance fields side by side, and the exact bytes they feed the hash. ee also feeds the provenance
+ * count and the item's other fields around them; those are the same for both packs here, so they are not drawn.
+ */
 function PackColumn({
   name,
   uri,
@@ -192,7 +203,7 @@ function PackColumn({
       </div>
 
       <p className="mt-4 text-[9px] font-black tracking-[0.2em] text-slate-500 uppercase">Bytes fed to the hash</p>
-      <div className="mt-2 flex min-h-[3.25rem] flex-wrap items-center gap-y-1.5" aria-label={`${name}: bytes fed to the hash`}>
+      <div className="mt-2 flex min-h-[3.25rem] flex-wrap items-center gap-y-1.5" role="group" aria-label={`${name}: bytes fed to the hash`}>
         {segments.map((segment, index) => (
           <Fragment key={index}>
             <span
@@ -263,7 +274,8 @@ export function HashPrefix() {
       basis="rule"
       source={
         <>
-          src/core/context.rs · hash_labeled_bytes, compute_context_pack_hash_components (ten components: request,
+          src/core/context.rs · hash_labeled_bytes, hash_pack_hash_provenance (the labels item.provenance.uri and
+          item.provenance.note), compute_context_pack_hash_components (ten components: request,
           items, omitted, degraded, effective_config, quality_scoring, reference_time, rendered_text, store_scopes,
           coordination) · src/core/context_test_module.rs · pack_hash_v2_separates_flat_feed_provenance_collision ·
           src/pack/mod.rs · quantize_q20_12 · docs/adr/0087-canonical-deterministic-response-contract.md
@@ -271,9 +283,10 @@ export function HashPrefix() {
       }
     >
       <p className="max-w-3xl text-[15px] leading-relaxed text-slate-300">
-        A pack&apos;s hash is a BLAKE3 digest of ten component digests, each over labelled fields. The first version
-        fed a provenance&apos;s uri and note as raw adjacent bytes, so two different packs could get the same hash.
-        Edit the fields below; the digests are BLAKE3, computed in your browser.
+        A pack&apos;s hash is a BLAKE3 digest of ten component digests (nine when the pack leaves out its skipped
+        list), each over labelled fields. The first version fed a provenance&apos;s uri and note as raw adjacent
+        bytes, so two different packs could get the same hash. Edit the fields below; the digests are BLAKE3,
+        computed in your browser.
       </p>
 
       <div className="mt-6 flex flex-wrap items-center gap-3">
@@ -366,8 +379,8 @@ export function HashPrefix() {
           />
         </div>
         <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <Readout label="Score A (f64)" value={chosen.a.toString()} note={`× 4096 = ${(chosen.a * 4096).toFixed(4)}`} />
-          <Readout label="Score B (f64)" value={chosen.b.toString()} note={`× 4096 = ${(chosen.b * 4096).toFixed(4)}`} />
+          <Readout label="Score A (f32)" value={chosen.a.toString()} note={`× 4096 = ${scaled(chosen.a).toFixed(4)}`} />
+          <Readout label="Score B (f32)" value={chosen.b.toString()} note={`× 4096 = ${scaled(chosen.b).toFixed(4)}`} />
           <Readout label="Q20.12 A" value={qa} note={<span className="font-mono">{leBytes(qa)}</span>} />
           <Readout
             label="Q20.12 B"

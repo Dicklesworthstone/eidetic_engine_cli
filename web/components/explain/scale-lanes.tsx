@@ -121,7 +121,7 @@ export const RUNGS: readonly Rung[] = [
     lead: "Each person keeps their own store. Teammates' memories arrive over the mesh as local rows that name the sender, and they never overwrite your own rows.",
     facts: [
       {
-        text: "Built for trusted teams of 2 to 20 people. Twenty active members is a hard limit that the v1 protocol enforces.",
+        text: "Built for trusted teams of 2 to 20 people. The team plan sets twenty active members as a hard bound for the v1 protocol.",
         source: "README.md · Team confederation · docs/mesh/team_confederation_plan.md §1.2",
       },
       {
@@ -172,12 +172,12 @@ export const RUNGS: readonly Rung[] = [
         source: "src/core/global_promotion.rs · PROMOTABLE_TRUST_CLASSES",
       },
       {
-        text: "Global rows compete in every pack and are always labelled. They can take at most 15% of the pack's token budget.",
-        source: "src/core/global_store.rs · DEFAULT_GLOBAL_FAN_IN_BASIS_POINTS",
+        text: "Global rows compete in every pack and are always labelled. Those that do not overlap a workspace row take at most 15% of the pack's token budget.",
+        source: "src/core/global_store.rs · DEFAULT_GLOBAL_FAN_IN_BASIS_POINTS · src/core/context.rs",
       },
       {
-        text: "A privileged workspace sets `participate = false` to stop both reading from the lane and promoting into it; `include_global = false` stops only the reading.",
-        source: "README.md · Memory lanes · docs/adr/0083-user-global-memory-store.md §5",
+        text: "A privileged workspace sets `participate = false` (or `include_global = false`): its packs stop reading the lane, and `ee memory promote-global` refuses.",
+        source: "docs/adr/0083-user-global-memory-store.md §5 · src/core/global_promotion.rs",
       },
     ],
     commands: [
@@ -1223,7 +1223,7 @@ const STATIC_T = [0.62, 1.95, 4.3, 2.15] as const;
 
 const ARIA = [
   "One agent working in a repository. The repository's .ee directory holds ee.db, the FrankenSQLite database that is the source of truth, and a search index derived from it that can be rebuilt. The agent writes memories into the database with remember and outcome, and reads packs and search results from it.",
-  "A swarm of agents around one shared store. All the agents read at the same time. Writes move inward to a ring that stands for the store's single writer. Through the daemon it commits a whole batch in one transaction; with the one-shot CLI it lets one write in at a time.",
+  "A swarm of agents around one shared store. All the agents read at the same time. Writes move inward to a ring that stands for the store's single writer. Through the daemon it can commit a whole batch in one transaction; with the one-shot CLI it lets one write in at a time.",
   "Four teammates, each with their own store and agents, linked peer to peer with no server. Signed events pass between them, and each one that reaches you becomes a local row in your store with trust class peer_human_attested.",
   "Your workspaces around one user-global store on this machine. Promotions move up to the evidence gate around it: human_explicit and agent_validated memories pass, and others are refused with exit 7. House rules are read back into every workspace except payroll, which sets participate = false.",
 ] as const;
@@ -1534,8 +1534,8 @@ export function ScaleLadder() {
       <div ref={frame}>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="max-w-2xl text-[15px] leading-relaxed text-slate-300">
-            ee uses the same store, trust classes and rules for one agent on one repository and for every workspace you
-            use. No scale needs a server. Where lanes overlap, the precedence rules below apply.
+            ee uses the same kind of store, the same trust classes and the same rules for one agent on one repository as
+            for every workspace you use. No scale needs a server. Where lanes overlap, the precedence rules below apply.
           </p>
           {/* The label says what a press does, so no aria-pressed as well: "Play, pressed" would read as playing. */}
           <DemoButton

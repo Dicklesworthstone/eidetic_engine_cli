@@ -290,7 +290,8 @@ export function Hero({ words }: { words: ReactNode }) {
               <span>{grouped(BUDGETS.max)}</span>
             </span>
           </label>
-          <div className="min-w-0" aria-live="polite">
+          {/* Live only once the reader drives it: while the tasks play by themselves it would speak every 7.2 s. */}
+          <div className="min-w-0" aria-live={touched ? "polite" : "off"}>
             <p className="flex flex-wrap items-baseline gap-x-2.5">
               <span className="text-4xl font-extrabold tracking-[-0.04em] text-violet-300 tabular-nums sm:text-5xl">
                 {result.selected.length}
@@ -357,7 +358,9 @@ function Specimen({
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const card = useRef<HTMLDivElement>(null);
-  // The drawing reads the latest selection through a ref, so a new task never restarts the loop.
+  // The drawing reads the latest selection through a ref, so a new task never restarts a running loop. A still
+  // frame (reduced motion, or off screen) is drawn once, so it has to be drawn again when the selection changes.
+  const stillKey = animate && !reduced ? null : result;
   const state = useRef({ task, result, changedAt: 0, lit: new Float32Array(STORE_SIZE), sel: new Float32Array(STORE_SIZE), animate, reduced });
   state.current.animate = animate;
   state.current.reduced = reduced;
@@ -518,18 +521,15 @@ function Specimen({
       if (!still) frame = requestAnimationFrame(draw);
     };
 
-    if (animate && !reduced) {
-      frame = requestAnimationFrame(draw);
-    } else {
-      // A still frame: drawn once, and again whenever the selection changes (this effect re-runs).
-      frame = requestAnimationFrame(draw);
-    }
+    // Animated, draw() schedules itself; still, it draws once, and again whenever stillKey changes.
+    frame = requestAnimationFrame(draw);
     return () => {
       cancelAnimationFrame(frame);
       observer?.disconnect();
     };
-    // The loop restarts when animation turns on or off, and redraws a still frame when the selection changes.
-  }, [animate, reduced, boxRef, result]);
+    // The loop restarts when animation turns on or off. stillKey is the selection while still and null while
+    // animating, so a new selection redraws a still frame without restarting a running loop.
+  }, [animate, reduced, boxRef, stillKey]);
 
   return (
     <div ref={boxRef} className="relative">
@@ -617,9 +617,14 @@ function Specimen({
                           </li>
                         );
                       })}
-                      {items.length > 1 ? (
-                        <li className="pl-4 text-slate-500 lg:hidden">+ {items.length - 1} more</li>
-                      ) : null}
+                      {/* Phones keep this line even for a one-item section, blank, so the card does not change
+                          height (and move the page) each time the tasks play on. */}
+                      <li
+                        className={cn("pl-4 text-slate-500 lg:hidden", items.length <= 1 && "invisible")}
+                        aria-hidden={items.length <= 1 ? true : undefined}
+                      >
+                        + {items.length - 1} more
+                      </li>
                       {items.length > shown ? (
                         <li className="pl-4 text-slate-500 max-lg:hidden">+ {items.length - shown} more</li>
                       ) : null}

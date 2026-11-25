@@ -34,6 +34,34 @@ function read(file: string): string {
 /** Every response carries these: the envelope's own contract. */
 const ENVELOPE = "docs/schemas/ee.response.v2.json";
 
+/** A struct's body in src/cli/mod.rs, from its opening line to the first unindented closing brace. */
+function cliStruct(name: string): string {
+  const cli = read("src/cli/mod.rs");
+  const start = cli.indexOf(`pub struct ${name} {`);
+  if (start < 0) throw new Error(`src/cli/mod.rs has no struct ${name}`);
+  return cli.slice(start, cli.indexOf("\n}", start));
+}
+
+/** A Rust fn's body, from its signature to the first unindented closing brace. */
+function rustFn(file: string, signature: string): string {
+  const text = read(file);
+  const start = text.indexOf(signature);
+  if (start < 0) throw new Error(`${file} has no ${signature}`);
+  return text.slice(start, text.indexOf("\n}\n", start));
+}
+
+const stationById = (id: string) => {
+  const station = STATIONS.find((entry) => entry.id === id);
+  if (!station) throw new Error(`no station ${id}`);
+  return station;
+};
+
+/** Everything a station's panel says in prose. */
+const prose = (id: string) => {
+  const station = stationById(id);
+  return [station.returns, station.because, station.note ?? "", station.footnote ?? ""].join(" ");
+};
+
 /**
  * What a citation vouches for. A small file (a schema, a golden) is read whole. A large one, such as the
  * 3.9 MB src/cli/mod.rs, holds nearly every word somewhere, so only the lines around the cited mark count.
@@ -189,13 +217,7 @@ describe("the excerpts", () => {
   });
 
   test("the flags each command uses are declared in src/cli/mod.rs, on its own Args struct or as global flags", () => {
-    const cli = read("src/cli/mod.rs");
-    /** A struct's body, from its opening line to the first unindented closing brace. */
-    const struct = (name: string) => {
-      const start = cli.indexOf(`pub struct ${name} {`);
-      if (start < 0) throw new Error(`src/cli/mod.rs has no struct ${name}`);
-      return cli.slice(start, cli.indexOf("\n}", start));
-    };
+    const struct = cliStruct;
     /** `--name` as a clap long flag in `body`: `long = "name"`, or `#[arg(long …)]` on `pub name:`. */
     const declares = (body: string, name: string, global = false) =>
       (!global && body.includes(`long = "${name}"`)) ||
@@ -227,6 +249,61 @@ describe("the excerpts", () => {
     // Teeth: a real flag on the wrong command, and a local flag passed off as global, are both refused.
     expect(declares(struct("PackArgs"), "budget-tokens")).toBe(false);
     expect(declares(globals, "max-tokens", true)).toBe(false);
+  });
+
+  test("the preflight excerpt's memory severity is the one ee infers from that memory's kind", () => {
+    const body = rustFn("src/core/preflight_guard.rs", "fn inferred_trauma_guard_severity(");
+    const severityOf = new Map<string, string>();
+    let fallback: string | undefined;
+    for (const [, left, severity] of body.matchAll(/^\s*(_|"[^\n]*?")\s*=>\s*"([a-z]+)",/gm)) {
+      if (left === "_") fallback = severity;
+      else for (const [, kind] of (left ?? "").matchAll(/"([a-z-]+)"/g)) severityOf.set(kind ?? "", severity ?? "");
+    }
+    expect(severityOf.size).toBeGreaterThanOrEqual(2);
+    expect(fallback).toBeDefined();
+
+    const line = (stationById("preflight").json ?? []).find((entry) => entry.text.includes('"matchedMemories"'));
+    const kind = /"kind": "([a-z-]+)"/.exec(line?.text ?? "")?.[1];
+    const severity = /"severity": "([a-z]+)"/.exec(line?.text ?? "")?.[1];
+    expect(kind).toBeDefined();
+    // Only these kinds are matched at all (trauma_guard_memory_kind).
+    const matched = rustFn("src/core/preflight_guard.rs", "fn trauma_guard_memory_kind(");
+    expect(matched).toContain(`"${kind}"`);
+    expect(severity).toBe(severityOf.get(kind ?? "") ?? fallback);
+  });
+});
+
+describe("the numbers in the prose", () => {
+  test("resume's three sessions is ResumeArgs' default", () => {
+    expect(prose("resume")).toContain("The last three sessions'");
+    expect(cliStruct("ResumeArgs")).toMatch(/default_value_t = 3,[^\]]*\]\s*pub sessions: usize,/);
+  });
+
+  test("remember's 0.8 confidence is RememberArgs' default, and the excerpt shows it", () => {
+    expect(prose("remember")).toContain("(0.8 unless you give one)");
+    expect(stationById("remember").json?.some((line) => line.text.includes('"confidence": 0.8,'))).toBe(true);
+    expect(cliStruct("RememberArgs")).toMatch(/#\[arg\(long, default_value = "0\.8"\)\]\s*pub confidence: f32,/);
+  });
+
+  test("outcome's five harmful reports an hour are OutcomeArgs' defaults, and the sixth is the one held", () => {
+    expect(prose("outcome")).toContain("By default, after five harmful reports in an hour from one source, the next is quarantined");
+    const outcome = read("src/core/outcome.rs");
+    expect(outcome).toContain("pub const DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR: u32 = 5;");
+    expect(outcome).toContain("pub const DEFAULT_HARMFUL_BURST_WINDOW_SECONDS: u32 = 3600;");
+    const args = cliStruct("OutcomeArgs");
+    expect(args).toMatch(/default_value_t = DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR\)\]\s*pub harmful_per_source_per_hour: u32,/);
+    expect(args).toMatch(/default_value_t = DEFAULT_HARMFUL_BURST_WINDOW_SECONDS\)\]\s*pub harmful_burst_window_seconds: u32,/);
+    // Five already counted pass; the one after them is quarantined.
+    expect(rustFn("src/core/outcome.rs", "fn harmful_quarantine_preview(")).toContain("if existing_count < limit {");
+  });
+
+  test("pack's 50 listed omissions is MAX_PACK_SKIPPED_ITEMS, ranked by relevance plus utility", () => {
+    expect(prose("pack")).toContain("the 50 with the highest relevance plus utility are listed");
+    const pack = read("src/pack/mod.rs");
+    expect(pack).toContain("pub const MAX_PACK_SKIPPED_ITEMS: usize = 50;");
+    const order = rustFn("src/pack/mod.rs", "fn compare_omissions_for_output(");
+    expect(order).toContain("left.relevance.into_inner() + left.utility.into_inner()");
+    expect(order).toContain("right_score\n        .total_cmp(&left_score)");
   });
 });
 
