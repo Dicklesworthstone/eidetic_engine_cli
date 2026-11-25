@@ -36,8 +36,8 @@ type Klass =
 const LADDER: readonly { id: Klass; short: string; initial: number; meaning: string }[] = [
   { id: "human_explicit", short: "Human", initial: 0.85, meaning: "A person ran ee remember" },
   { id: "peer_human_attested", short: "Peer", initial: 0.75, meaning: "A teammate's signed human memory" },
-  { id: "agent_validated", short: "Validated", initial: 0.65, meaning: "Agent claim, outcomes back it" },
-  { id: "agent_assertion", short: "Agent", initial: 0.5, meaning: "Agent claim, no outcome yet" },
+  { id: "agent_validated", short: "Validated", initial: 0.65, meaning: "Agent claim backed by outcomes" },
+  { id: "agent_assertion", short: "Agent", initial: 0.5, meaning: "Agent claim with no outcome yet" },
   { id: "cass_evidence", short: "CASS", initial: 0.45, meaning: "An imported session span" },
   { id: "legacy_import", short: "Legacy", initial: 0.3, meaning: "Imported from pre-v1 ee" },
 ];
@@ -300,7 +300,7 @@ export function TrustPosterior() {
   return (
     <DemoFrame
       eyebrow="Outcome feedback · a Beta posterior per memory"
-      title="Trust is earned, one outcome at a time."
+      title="How outcomes move a memory's trust class."
       basis="rule"
       source={
         <>
@@ -339,9 +339,13 @@ export function TrustPosterior() {
               <UserCheck className="h-3.5 w-3.5" aria-hidden="true" style={{ color: HUMAN }} /> Human sign-off
             </DemoButton>
             <span aria-hidden="true" className="mx-1 hidden w-px self-stretch bg-white/10 sm:block" />
-            <DemoButton onClick={() => (playing ? setPlaying(false) : story())} pressed={playing}>
+            {/* The label already says the state, so no aria-pressed: "Pause, pressed" would announce the opposite. */}
+            <DemoButton
+              onClick={() => (playing ? setPlaying(false) : story())}
+              className={playing ? "border-violet-400/60 text-violet-200" : undefined}
+            >
               {playing ? <Pause className="h-3.5 w-3.5" aria-hidden="true" /> : <Play className="h-3.5 w-3.5" aria-hidden="true" />}
-              {playing ? "Pause" : "Play a story"}
+              {playing ? "Pause" : "Play an example"}
             </DemoButton>
             <DemoButton onClick={() => reset()} disabled={events.length === 0 && !playing}>
               <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" /> Reset
@@ -427,11 +431,11 @@ export function TrustPosterior() {
       </div>
 
       <p className="mt-7 max-w-3xl text-sm leading-relaxed text-slate-300">
-        One harmful outcome weighs as much as two and a half helpful ones, so the mean falls faster than it climbs. The
-        class itself moves on the interval, not the mean: promotion needs the <em>lower</em> bound high, demotion needs
-        the <em>upper</em> bound low, and the band between holds a memory steady while the evidence is still
-        ambiguous. Feedback alone never makes a memory <span className="font-mono text-[13px]">human_explicit</span>:
-        that takes a person, named, with a reason.
+        A harmful outcome adds 2.5 to β and a helpful one adds 1 to α, so the mean falls faster than it rises. The
+        class is decided by the 90% interval rather than the mean: promotion needs the <em>lower</em> bound above one
+        threshold, demotion needs the <em>upper</em> bound below another, and between the two the class does not
+        change. Outcomes alone never promote a memory to <span className="font-mono text-[13px]">human_explicit</span>;
+        that step needs a named person and a reason.
       </p>
     </DemoFrame>
   );
@@ -594,7 +598,7 @@ function Tape({ steps }: { steps: Step[] }) {
   return (
     <div className="rounded-2xl border border-white/[0.07] bg-black/20 px-3 py-3">
       <div className="flex items-center justify-between gap-3">
-        <p className="text-[9px] font-black tracking-[0.2em] text-slate-500 uppercase">Outcomes, as wide as their weight</p>
+        <p className="text-[9px] font-black tracking-[0.2em] text-slate-500 uppercase">Outcomes, sized by weight</p>
         <p className="flex items-center gap-3 font-mono text-[10px] text-slate-500">
           <span className="flex items-center gap-1">
             <span aria-hidden="true" className="inline-block h-2 w-2 rounded-sm" style={{ background: HELPFUL }} /> 1

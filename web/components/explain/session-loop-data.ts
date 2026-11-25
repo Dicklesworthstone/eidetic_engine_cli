@@ -63,7 +63,7 @@ export const STATIONS: readonly Station[] = [
   {
     id: "resume",
     name: "resume",
-    title: "Pick up the thread",
+    title: "Resume the last session",
     question: "Where was I?",
     hub: ["Where was I?"],
     effect: "read",
@@ -72,9 +72,9 @@ export const STATIONS: readonly Station[] = [
     command: "ee resume --workspace . --json",
     reads: ["data.report.sessions", "data.report.openLoops", "data.report.nearbyStores", "data.report.nextCommands"],
     returns:
-      "The last three sessions' episodic memories, decisions waiting on a revisit, items tagged next, todo or blocking, and anything a newer memory has since superseded.",
+      "The last three sessions' episodic memories, decisions waiting on a revisit, items tagged next, todo, blocking and the like, and a stale flag on any item a newer memory has superseded.",
     because:
-      "A missing or empty store is not an error. Resume returns a successful empty report that names populated stores nearby, with the exact command to retarget, and never creates a store. An agent started in the wrong directory is pointed at the right one instead of being nudged into ee init.",
+      "When the store is missing or empty, resume still succeeds. It returns an empty report that lists populated stores nearby with the exact command to retarget, and it never creates a store. An agent started in the wrong directory is given the command for the right store, and resume does not suggest ee init.",
     case: "a store with nothing to resume",
     json: excerpt(`
 {
@@ -89,7 +89,7 @@ export const STATIONS: readonly Station[] = [
         "stores": [{ "documents": …, "provenance": "child_scan", … }],
         "outcome": "complete"
       },
->     "nextCommands": ["ee resume --workspace … --database … --json"]
+>     "nextCommands": ["ee resume --workspace … --database … --json", …]
     }
   },
   "degraded": [{ "code": "resume_no_session_evidence", … }]
@@ -105,18 +105,18 @@ export const STATIONS: readonly Station[] = [
   {
     id: "orient",
     name: "orient",
-    title: "Read the room",
-    question: "What am I walking into?",
-    hub: ["What am I", "walking into?"],
+    title: "Check the workspace",
+    question: "What state is the workspace in?",
+    hub: ["What state is the", "workspace in?"],
     effect: "read",
     tag: "read-only",
     chip: "read-only",
     command: 'ee orient "<task>" --workspace . --json',
     reads: ["data.doctor.posture", "data.pack.pack.items", "data.nextCommands", "degraded[]"],
     returns:
-      "One bundle: the doctor's posture and its top repairs, workspace hygiene, the swarm brief, a pack for the task, open decisions, and the commands to run next.",
+      "In one response: the doctor's posture and top repairs, workspace hygiene, the swarm brief, a pack for the task, open decisions, and the commands to run next.",
     because:
-      "A thin pack can mean a cold store or a broken one. Orient puts the doctor's posture beside the pack so the agent can tell which, and says on its face that it changed nothing: sideEffectFree is true and configMutation is never.",
+      "A pack with few items can come from a new store or a broken one. Orient returns the doctor's posture with the pack so the agent can tell which. The response also states that it changed nothing: sideEffectFree is true and configMutation is never.",
     json: excerpt(`
 {
   "schema": "ee.response.v2",
@@ -148,7 +148,7 @@ export const STATIONS: readonly Station[] = [
   {
     id: "pack",
     name: "pack",
-    title: "The brief",
+    title: "Get a context pack",
     question: "What should I know before I start?",
     hub: ["What should I", "know first?"],
     effect: "read",
@@ -159,9 +159,9 @@ export const STATIONS: readonly Station[] = [
     reads: ["data.pack.items[]", "data.pack.skipped[]", "data.pack.skippedTotal", "degraded[]"],
     footnote: "ee pack --help calls the left-out list data.pack.omitted; the key in the JSON is skipped.",
     returns:
-      "The memories that fit the token budget, each with why it was chosen, its provenance and its trust class; then the ones left out, and why.",
+      "The memories that fit the token budget, each with why it was chosen, its provenance and its trust class, then the memories left out with the reason for each.",
     because:
-      "The budget is the agent's context window, so the pack is honest about its edge. Every memory left out is listed with a reason, such as token_budget_exceeded or redundant_candidate, and anything that weakened retrieval is in degraded[] with a repair command. An empty pack never reads as 'nothing is known'.",
+      "The token budget caps how much of the agent's context window the pack uses. Memories left out of the pack are listed with a reason such as token_budget_exceeded or redundant_candidate (the 50 most relevant are listed; skippedTotal counts all of them). Anything that weakened retrieval is in degraded[] with a repair command, so the agent can tell an empty pack caused by a fault from one where nothing matched.",
     json: excerpt(`
 {
   "schema": "ee.response.v2",
@@ -188,6 +188,7 @@ export const STATIONS: readonly Station[] = [
       { file: "src/cli/mod.rs", mark: "Assemble context without writing pack_records, audit rows, or L2 cache entries." },
       { file: "src/output/mod.rs", mark: "fn build_pack_skipped_item" },
       { file: "src/pack/mod.rs", mark: '"token_budget_exceeded"' },
+      { file: "src/pack/mod.rs", mark: "pub const MAX_PACK_SKIPPED_ITEMS: usize = 50;" },
       { file: "docs/schemas/ee.pack.v2.json", mark: '"skippedTotal"' },
       { file: "tests/fixtures/golden/agent/context_pack.json.golden", mark: '"embed_model_unavailable"' },
     ],
@@ -195,9 +196,9 @@ export const STATIONS: readonly Station[] = [
   {
     id: "recall",
     name: "recall",
-    title: "Before the edit",
-    question: "What is pinned to the code I am changing?",
-    hub: ["What is pinned", "to this code?"],
+    title: "Recall memories anchored to the diff",
+    question: "Which memories are anchored to the code I am changing?",
+    hub: ["What is anchored", "to this code?"],
     effect: "read",
     tag: "read-only",
     chip: "read-only",
@@ -211,7 +212,7 @@ export const STATIONS: readonly Station[] = [
     returns:
       "The memories anchored to the staged paths, ranked by freshness, confidence and level with warnings first, each marked current, suspect or stale.",
     because:
-      "The agent asks with its diff, not with a query it has to phrase. Recall reads git diff --cached and nothing else, and when the budget cuts the list short it hands back a cursor to continue from.",
+      "The staged diff is the query, so the agent does not have to write one. Recall takes its paths from git diff --cached, a read-only shell-out. When the budget cuts the list short, the response carries a cursor to continue from.",
     json: excerpt(`
 {
   "schema": "ee.response.v2",
@@ -243,18 +244,18 @@ export const STATIONS: readonly Station[] = [
   {
     id: "preflight",
     name: "preflight",
-    title: "Hazard history",
-    question: "Has this command hurt anyone before?",
-    hub: ["Has this command", "hurt anyone?"],
+    title: "Check a command before running it",
+    question: "Is this command known to be risky?",
+    hub: ["Is this command", "known to be risky?"],
     effect: "read",
     tag: "advisory",
     chip: "read-only · advisory",
     command: 'ee preflight check --cmd "git reset --hard origin/main" --workspace . --json',
-    note: "Not wrapped in ee.response.v2: the advisory report is the whole response.",
+    note: "The advisory report is the whole response, with no ee.response.v2 envelope.",
     reads: ["exitCode", "matches[]", "matches[].ruleId", "matches[].action", "matchedMemories[]"],
     returns: "The rules, and the risk, failure and anti-pattern memories, that match the command, each saying where it came from.",
     because:
-      "It is evidence, not a gate. A high_risk match still exits 0; ee never authorizes, denies or runs the command, and an old hook cannot turn a match into a block. --stdin and --cmd-base64 keep the command off argv, where an outer shell guard could misread it.",
+      "The report is advisory. A high_risk match still exits 0, ee never authorizes, denies or runs the command, and a previously installed hook cannot turn a match into a block. --stdin and --cmd-base64 keep the command off argv, where an outer shell guard could misread it.",
     json: excerpt(`
 {
   "schema": "ee.preflight.guard.v1",
@@ -290,34 +291,36 @@ export const STATIONS: readonly Station[] = [
     chip: "the harness",
     command: null,
     reads: [],
-    returns: "Nothing from ee. Edits, builds, tests and approvals belong to the harness.",
+    returns: "ee returns nothing at this step. The harness runs the edits, builds, tests and approvals.",
     because:
-      "ee is the memory layer the harness calls, not a second agent loop. The harness still owns tools, approvals and the prompt loop; ee comes back in when there is something worth keeping.",
+      "The harness keeps its own tools, approvals and prompt loop, and calls ee for memory. The next ee call comes when the agent has something worth recording.",
     json: null,
     sources: [{ file: "README.md", mark: "still owns tools, approvals, and the prompt loop" }],
   },
   {
     id: "remember",
     name: "remember",
-    title: "Write it down",
+    title: "Record a lesson",
     question: "What did I learn that will matter next time?",
     hub: ["What did I", "learn?"],
     effect: "write",
     tag: "writes",
     chip: "writes · memories",
     command: 'ee remember "<lesson>" --workspace . --level procedural --kind rule --idempotency-key <key> --json',
-    reads: ["data.memoryId", "data.memory_id", "data.persisted", "data.indexStatus"],
+    reads: ["data.memoryId", "data.persisted", "data.indexStatus"],
+    footnote:
+      "memory_id is a compatibility alias. An already_recorded replay has only memoryId, and persisted is false because nothing new was written.",
     returns:
       "The new memory's id, level, kind and confidence (0.8 unless you give one), and whether it was persisted and indexed.",
     because:
-      "The id comes back in the response, so the agent can grade the memory later without searching for it. With --idempotency-key, a retry after a lost reply returns the original id with status already_recorded instead of writing a duplicate.",
+      "The response carries the new memory's id, so the agent can grade the memory later without searching for it. With --idempotency-key, a retry after a lost reply returns the original id with status already_recorded and writes no duplicate.",
     json: excerpt(`
 {
   "schema": "ee.response.v2",
   "success": true,
   "data": {
     "command": "remember",
->   "memory_id": "mem_…",
+    "memory_id": "mem_…",
 >   "memoryId": "mem_…",
     "level": "procedural",
     "kind": "rule",
@@ -332,6 +335,7 @@ export const STATIONS: readonly Station[] = [
 `),
     sources: [
       { file: "src/cli/mod.rs", mark: "returns the original memory id with status=already_recorded" },
+      { file: "src/core/memory.rs", mark: '"mode": "idempotent_replay",' },
       { file: "src/cli/mod.rs", mark: '.field_str("memoryId", &memory_id)' },
       { file: "src/core/memory.rs", mark: '"completed" | "completed_no_documents" => "indexed".to_owned(),' },
       { file: "src/models/memory.rs", mark: 'Self::Procedural => "procedural",' },
@@ -343,7 +347,7 @@ export const STATIONS: readonly Station[] = [
     id: "outcome",
     name: "outcome",
     title: "Grade the memory",
-    question: "Did that memory help, or mislead?",
+    question: "Did that memory help or mislead?",
     hub: ["Did that", "memory help?"],
     effect: "write",
     tag: "writes",
@@ -352,7 +356,7 @@ export const STATIONS: readonly Station[] = [
     reads: ["data.status", "data.confidence", "data.quarantine"],
     returns: "Whether the feedback was recorded, and the memory's confidence just before and just after it.",
     because:
-      "The agent sees what its signal moved without a follow-up call. Past five harmful reports an hour from one source, the next is quarantined instead of applied, so one confused agent cannot sink a memory; --event-id makes a retry safe.",
+      "The response shows how far the signal moved the memory's confidence, so the agent needs no follow-up call. After five harmful reports in an hour from one source, the next is quarantined rather than applied, so one misbehaving source cannot keep lowering a memory's confidence. --event-id makes a retry safe.",
     json: excerpt(`
 {
   "schema": "ee.response.v2",
@@ -380,18 +384,18 @@ export const STATIONS: readonly Station[] = [
   {
     id: "handoff",
     name: "handoff",
-    title: "Pass the baton",
+    title: "Write a handoff capsule",
     question: "What does the next session need?",
     hub: ["What does the next", "session need?"],
     effect: "write",
     tag: "writes",
     chip: "writes · one file",
     command: "ee handoff create --out .ee/handoffs/<capsule>.json --workspace . --json",
-    note: "Flat and snake_case: this report has no data wrapper.",
+    note: "This report has no data wrapper, and its keys are snake_case.",
     reads: ["capsule_id", "output_path", "content_hash", "canonical_content_hash"],
     returns: "A redacted, signed continuity capsule, written to the path you give, with its id and two content hashes.",
     because:
-      "The next session, perhaps a different agent, loads it with ee handoff resume latest, which refuses an unsigned or tampered capsule unless told otherwise, and audits the override. canonical_content_hash leaves out ids and times, so two captures of the same state match.",
+      "The next session, which may be a different agent, loads it with ee handoff resume latest. That command refuses an unsigned or tampered capsule unless --insecure-skip-hmac is passed, and it audits the override. canonical_content_hash leaves out ids and times, so two captures of the same state match.",
     json: excerpt(`
 {
   "schema": "ee.handoff.create.v1",

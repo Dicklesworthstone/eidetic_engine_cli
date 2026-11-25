@@ -259,7 +259,7 @@ export function HashPrefix() {
   return (
     <DemoFrame
       eyebrow="Pack identity · ee.pack.hash_input.v7"
-      title="Same inputs, same bytes."
+      title="The bytes behind a pack's hash."
       basis="rule"
       source={
         <>
@@ -272,8 +272,8 @@ export function HashPrefix() {
     >
       <p className="max-w-3xl text-[15px] leading-relaxed text-slate-300">
         A pack&apos;s hash is a BLAKE3 digest of ten component digests, each over labelled fields. The first version
-        fed a provenance&apos;s uri and note as raw adjacent bytes, and two different packs could share one identity.
-        Edit the fields; the digests are real BLAKE3, computed in your browser.
+        fed a provenance&apos;s uri and note as raw adjacent bytes, so two different packs could get the same hash.
+        Edit the fields below; the digests are BLAKE3, computed in your browser.
       </p>
 
       <div className="mt-6 flex flex-wrap items-center gap-3">
@@ -335,12 +335,12 @@ export function HashPrefix() {
         </span>
         <span className="min-w-0 flex-1 text-sm text-slate-300">
           {verdict === "collision"
-            ? "Two different packs, one identity: replay, caching and audit would all treat them as the same pack."
+            ? "These packs differ but get the same hash, so replay, caching and audit would treat them as one pack."
             : verdict === "distinct"
               ? mode === "labeled"
-                ? "Every field carries its own length, so no split of the same characters can feed the same bytes."
-                : "These two happen to differ. Move a character from one field to the other to collide them."
-              : "Identical inputs: the same bytes, so the same hash. That is the point."}
+                ? "Each field is preceded by its length, so moving characters between fields changes the bytes."
+                : "These two feed different bytes. Move a character from one field to the other to make them collide."
+              : "The inputs are identical, so the bytes and the hash are identical too."}
         </span>
       </div>
 
@@ -353,9 +353,9 @@ export function HashPrefix() {
             </p>
             <p className="mt-2 text-sm leading-relaxed text-slate-400">
               Every score the hash consumes is first rounded to Q20.12 fixed point (round(x × 4096) as a u32), so
-              floating-point noise far below a quantum (1/4096 ≈ 0.000244) usually leaves the bytes, and the
-              identity, unchanged. Rounding still has edges: two scores that straddle a half-step land in different
-              quanta, however close they are.
+              floating-point noise far below a quantum (1/4096 ≈ 0.000244) usually leaves the bytes, and the hash,
+              unchanged. The exception is two scores on either side of a half-step: they round to different quanta
+              however close they are.
             </p>
           </div>
           <Segmented
@@ -383,11 +383,11 @@ export function HashPrefix() {
       </div>
 
       <p className="mt-6 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3 text-[13px] leading-relaxed text-slate-400">
-        <span className="font-semibold text-slate-200">What this buys, and what it does not.</span> Given the same
-        source and index snapshots, config, profile, budget, seed, query and decision inputs, ties resolve the same way
-        and the pack hash reproduces. Because the composite is built from tagged component digests, two packs that
-        differ can be traced to the component that does. Selection itself still compares raw f32 scores, and
-        cross-process and cross-host determinism gates are not yet established by v7 (ADR 0087).
+        <span className="font-semibold text-slate-200">Guarantees and limits.</span> Given the same source and index
+        snapshots, config, profile, budget, seed, query and decision inputs, ties resolve the same way and the pack
+        hash reproduces. The composite is built from tagged component digests, so when two packs differ, the
+        component that differs can be found. Selection itself still compares raw f32 scores, and v7 does not yet
+        establish cross-process or cross-host determinism gates (ADR 0087).
       </p>
     </DemoFrame>
   );

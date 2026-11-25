@@ -82,6 +82,36 @@ describe("the stations", () => {
   test("the effect matches src/core/effect.rs: reads before the work, writes after it", () => {
     const kinds = STATIONS.map((station) => station.effect);
     expect(kinds).toEqual(["read", "read", "read", "read", "read", "harness", "write", "write", "write"]);
+
+    // Each command's CommandEffect constructor, as the manifest declares it.
+    const manifest = read("src/core/effect.rs");
+    const READS = new Set(["read_only", "read_only_db"]);
+    const WRITES = new Set(["durable_write", "append_only_write", "workspace_file_write"]);
+    for (const station of STATIONS) {
+      if (station.command === null) continue;
+      const name = commandTokens(station.command)
+        .filter((token) => token.kind === "sub")
+        .map((token) => token.text)
+        .join(" ");
+      // `ee pack "<task>"` is the `pack build` shim (src/cli/mod.rs maps PackCommand::Build | None to it).
+      const key = name === "pack" ? "pack build" : name;
+      const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const constructors = [...manifest.matchAll(new RegExp(`CommandEffect::(\\w+)\\(\\s*"${escaped}"`, "g"))].map(
+        (match) => match[1] ?? "",
+      );
+      if (constructors.length === 0) throw new Error(`${station.id}: no CommandEffect for "${key}"`);
+      for (const constructor of constructors) {
+        if (station.effect === "write") {
+          if (!WRITES.has(constructor)) throw new Error(`${station.id}: "${key}" is ${constructor}, not a write`);
+        } else if (key === "pack build") {
+          // An append-only write that --read-only turns off: the station must pass the flag.
+          expect(constructor).toBe("append_only_write");
+          expect(station.command).toContain("--read-only");
+        } else if (!READS.has(constructor)) {
+          throw new Error(`${station.id}: "${key}" is ${constructor}, not read-only`);
+        }
+      }
+    }
   });
 
   test("every cited file exists and still holds the line it was cited for", () => {
@@ -158,19 +188,45 @@ describe("the excerpts", () => {
     expect(haystack.includes('"omittedTotal"')).toBe(false);
   });
 
-  test("the flags each command uses are declared in src/cli/mod.rs", () => {
+  test("the flags each command uses are declared in src/cli/mod.rs, on its own Args struct or as global flags", () => {
     const cli = read("src/cli/mod.rs");
+    /** A struct's body, from its opening line to the first unindented closing brace. */
+    const struct = (name: string) => {
+      const start = cli.indexOf(`pub struct ${name} {`);
+      if (start < 0) throw new Error(`src/cli/mod.rs has no struct ${name}`);
+      return cli.slice(start, cli.indexOf("\n}", start));
+    };
+    /** `--name` as a clap long flag in `body`: `long = "name"`, or `#[arg(long …)]` on `pub name:`. */
+    const declares = (body: string, name: string, global = false) =>
+      (!global && body.includes(`long = "${name}"`)) ||
+      new RegExp(`#\\[arg\\(long\\b[^\\]]*${global ? "global = true[^\\]]*" : ""}\\]\\s*pub ${name.replace(/-/g, "_")}:`).test(
+        body,
+      );
+    const ARGS: Record<string, string> = {
+      resume: "ResumeArgs",
+      orient: "OrientArgs",
+      pack: "PackArgs",
+      recall: "RecallArgs",
+      preflight: "PreflightGuardArgs",
+      remember: "RememberArgs",
+      outcome: "OutcomeArgs",
+      handoff: "HandoffCreateArgs",
+    };
+    const globals = struct("Cli");
     for (const station of STATIONS) {
-      for (const token of commandTokens(station.command ?? "")) {
+      if (station.command === null) continue;
+      const own = struct(ARGS[station.id] ?? `<no Args struct for ${station.id}>`);
+      for (const token of commandTokens(station.command)) {
         if (token.kind !== "flag") continue;
         const name = token.text.slice(2);
-        const declared =
-          cli.includes(`long = "${name}"`) ||
-          cli.includes(`pub ${name.replace(/-/g, "_")}:`) ||
-          (name === "json" && cli.includes("global = true"));
-        if (!declared) throw new Error(`${station.id}: --${name} is not declared`);
+        if (!declares(own, name) && !declares(globals, name, true)) {
+          throw new Error(`${station.id}: --${name} is neither on ${ARGS[station.id]} nor a global flag`);
+        }
       }
     }
+    // Teeth: a real flag on the wrong command, and a local flag passed off as global, are both refused.
+    expect(declares(struct("PackArgs"), "budget-tokens")).toBe(false);
+    expect(declares(globals, "max-tokens", true)).toBe(false);
   });
 });
 

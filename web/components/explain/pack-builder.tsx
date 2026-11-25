@@ -378,7 +378,7 @@ function explanation(memory: Memory, outcome: Outcome, mode: Mode): string[] {
     if (outcome.phase === "antiPatternFirst")
       lines.push("reserved first: the highest-relevance failure above the floor, rendered under “What NOT to do”");
     if (outcome.phase === "coverageFill")
-      lines.push("its gain had fallen to zero or below, so it waited; coverage fill admitted it with room to spare");
+      lines.push("its gain had fallen to zero or below, so it waited; coverage fill then admitted it because room was left");
     lines.push(
       outcome.tier === "full"
         ? `rendered in full: ${outcome.cost} tokens`
@@ -483,7 +483,7 @@ export function PackBuilder() {
   return (
     <DemoFrame
       eyebrow="Pack assembly · nineteen candidates"
-      title="Build a pack yourself."
+      title="Set a profile and a budget, and see what ee's rule packs."
       basis="rule"
       source={
         <>
@@ -491,8 +491,8 @@ export function PackBuilder() {
           strict_mmr_marginal_gain, candidate_signature_similarity, normalized_terms, quota_for_basis_points,
           pack_lod_candidate_plan, PackLodBudgetShares::default_70_20_10 · src/models/context_profile.rs ·
           built-in section mixes · src/core/context.rs · diversity_key_for_memory. Candidates, scores and token
-          sizes are toys; ee&apos;s submodular profile uses facility location instead of MMR. Try it on a real store
-          with <span className="text-slate-300">ee pack &quot;&lt;task&gt;&quot; --explain --json</span> and{" "}
+          sizes are invented for this page; ee&apos;s submodular profile uses facility location instead of MMR. On a
+          real store, run <span className="text-slate-300">ee pack &quot;&lt;task&gt;&quot; --explain --json</span> and{" "}
           <span className="text-slate-300">ee why-not &lt;memory-id&gt; --task &quot;&lt;task&gt;&quot;</span>.
         </>
       }
@@ -547,7 +547,7 @@ export function PackBuilder() {
             <p className="text-[9px] font-black tracking-[0.2em] text-slate-500 uppercase">
               Candidates · ranked by relevance
             </p>
-            <p className="text-right text-[11px] text-slate-500">tap one for its arithmetic</p>
+            <p className="text-right text-[11px] text-slate-500">select one to see its arithmetic</p>
           </div>
           <ol className="mt-2 space-y-1">
             {RANKED.map((memory) => {
@@ -710,7 +710,7 @@ export function PackBuilder() {
               label="Near-duplicates in"
               value={`${duplicatesIn} / 3`}
               tone={duplicatesIn > 0 && mode === "relevance" ? "wrong" : "neutral"}
-              note={mode === "mmr" ? "redundancy costs gain" : "nothing holds them back"}
+              note={mode === "mmr" ? "redundancy lowers gain" : "no redundancy penalty"}
             />
           </div>
 

@@ -133,7 +133,7 @@ const EXAMPLES: Record<"rustc" | "go" | "vitest" | "jest", Example> = {
     ],
     diagnostic: "--- FAIL: TestInvoiceRounding (0.00s) · FAIL example.com/shop/billing",
     templateInput: "go test failure: example.com/shop/billing test TestInvoiceRounding",
-    compose: "No code: the identity is bound to its package, as go test failure: <package> test <name>.",
+    compose: "No error code, so the template names the package and the test: go test failure: <package> test <name>.",
     code: null,
     tool: "shell",
     symptom: "--- FAIL: TestInvoiceRounding (0.00s)",
@@ -161,7 +161,7 @@ const EXAMPLES: Record<"rustc" | "go" | "vitest" | "jest", Example> = {
     ],
     diagnostic: "AssertionError: expected 41 to be 42",
     templateInput: "javascript-test: AssertionError: expected 41 to be 42",
-    compose: "No code: the first diagnostic line, prefixed javascript-test:, never the stack or code frame.",
+    compose: "No error code, so the template is the first diagnostic line, prefixed javascript-test:. The stack and code frame are left out.",
     code: null,
     tool: "shell",
     symptom: "× src/cart.test.ts > cart > applies the member discount",
@@ -189,7 +189,7 @@ const EXAMPLES: Record<"rustc" | "go" | "vitest" | "jest", Example> = {
     ],
     diagnostic: "TypeError: Cannot read properties of undefined (reading 'total')",
     templateInput: "javascript-test: TypeError: Cannot read properties of undefined (reading 'total')",
-    compose: "No code: the first diagnostic line, prefixed javascript-test:, never the stack or code frame.",
+    compose: "No error code, so the template is the first diagnostic line, prefixed javascript-test:. The stack and code frame are left out.",
     code: null,
     tool: "shell",
     symptom: "● orders › totals an empty basket",
@@ -240,7 +240,7 @@ export function IncidentCard() {
   return (
     <DemoFrame
       eyebrow="CASS import · failure-to-fix recall"
-      title="A fix, remembered by its fingerprint."
+      title="Fixes recalled by error fingerprint."
       basis="diagram"
       source={
         <>
@@ -334,7 +334,7 @@ const ROLE_LABEL: Record<Role, string> = { tool_call: "tool call", tool_result: 
 
 const PART_STYLE: Record<NonNullable<Line["part"]>, { row: string; note: string; text: string }> = {
   failure: { row: "border-rose-400/30 bg-rose-400/[0.05]", note: "the failure", text: "text-rose-200" },
-  narration: { row: "border-white/[0.06] bg-transparent opacity-60", note: "narration: not a fix", text: "text-slate-400 line-through decoration-slate-600" },
+  narration: { row: "border-white/[0.06] bg-transparent opacity-60", note: "narration: dropped", text: "text-slate-400 line-through decoration-slate-600" },
   fix: { row: "border-[color:var(--chapter)]/40 bg-[color:var(--chapter)]/[0.06]", note: "the fix", text: "text-white" },
   proof: { row: "border-emerald-400/30 bg-emerald-400/[0.05]", note: "the proof", text: "text-emerald-200" },
 };
@@ -416,7 +416,7 @@ function FingerprintStep({ example }: { example: Example }) {
         </div>
         <div className="rounded-xl border border-white/10 bg-black/30 p-3">
           <label className="block">
-            <span className="text-[9px] font-black tracking-[0.2em] text-slate-500 uppercase">Try any error line</span>
+            <span className="text-[9px] font-black tracking-[0.2em] text-slate-500 uppercase">Type an error line to mask it</span>
             <input
               value={own}
               onChange={(event) => setOwn(event.target.value.slice(0, 220))}
@@ -543,10 +543,10 @@ function CardStep({ example }: { example: Example }) {
           </ul>
         </div>
         <p className="mt-3 text-[13px] leading-relaxed text-slate-400">
-          Extractive, never generated: fixed facet labels, the failing line, the admitted fix sentences, the verifying
-          command. It is evidence with <span className="font-mono text-[12px] text-slate-300">cass_evidence</span>{" "}
-          trust, linked under the error&apos;s fingerprint, and it becomes a durable memory only through review and
-          curation.
+          The card is copied from the session rather than generated: fixed facet labels, the failing line, the admitted
+          fix sentences and the verifying command. It is stored as evidence with{" "}
+          <span className="font-mono text-[12px] text-slate-300">cass_evidence</span> trust, linked under the
+          error&apos;s fingerprint, and becomes a durable memory only through review and curation.
         </p>
       </div>
 
@@ -572,8 +572,8 @@ function CardStep({ example }: { example: Example }) {
 }`}
         </pre>
         <p className="mt-3 text-[13px] leading-relaxed text-slate-400">
-          The same error class, from a different file and line, recalls the card first, with the exact session lines
-          that prove it. <span className="font-mono text-[12px] text-slate-300">ee pack --error-log</span> folds the
+          A later error of the same class, from a different file and line, recalls the card first, along with the
+          session lines that prove the fix. <span className="font-mono text-[12px] text-slate-300">ee pack --error-log</span> folds the
           same recall into a context pack. Proof spans are tool output, so only their locator is shown.
         </p>
       </div>

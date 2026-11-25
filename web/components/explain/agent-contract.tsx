@@ -31,9 +31,9 @@ import { cn } from "@/lib/utils";
 const STEPS = [
   { id: "envelope", label: "Check the envelope", field: "schema" },
   { id: "exit", label: "Read the exit code", field: "exit" },
-  { id: "broke", label: "What broke, how badly", field: "code · severity" },
+  { id: "broke", label: "Read the code and severity", field: "code · severity" },
   { id: "plan", label: "Sort the recovery plan", field: "recovery[]" },
-  { id: "safety", label: "Is it safe to run?", field: "riskClass" },
+  { id: "safety", label: "Check the risk class", field: "riskClass" },
   { id: "act", label: "Act", field: "command" },
   { id: "recheck", label: "Re-check", field: "exit · degraded[]" },
 ] as const;
@@ -131,7 +131,7 @@ export function RecoveryExplorer() {
   return (
     <DemoFrame
       eyebrow="For agents · the error contract"
-      title="Errors an agent can act on."
+      title="How an agent reads an ee error or degraded result."
       basis="record"
       source={
         <>
@@ -180,10 +180,10 @@ export function RecoveryExplorer() {
                 <DemoButton onClick={() => go(step - 1)} disabled={step === 0} label="Previous read" className="px-2.5">
                   <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
                 </DemoButton>
+                {/* No aria-pressed: the label already names the state's opposite, and both would read "Pause, pressed". */}
                 <DemoButton
                   onClick={toggle}
                   disabled={reduced}
-                  pressed={playing}
                   label={playing ? "Pause the reading" : "Play the reading"}
                   className="px-2.5"
                 >
@@ -277,7 +277,8 @@ export function RecoveryExplorer() {
             </div>
             <style>{`@keyframes agent-read{from{transform:scaleX(0)}to{transform:scaleX(1)}}`}</style>
 
-            <div aria-live="polite" className="flex min-h-[2.5rem] flex-wrap items-center gap-2.5">
+            {/* Tall enough for the verdict to wrap under its label on a phone, so the page does not move when it lands. */}
+            <div aria-live="polite" className="flex min-h-[3.875rem] flex-wrap items-center gap-2.5 sm:min-h-[2.5rem]">
               {step === LAST ? (
                 <>
                   <span className="text-[10px] font-black tracking-[0.2em] text-slate-500 uppercase">Verdict</span>
@@ -688,8 +689,8 @@ function Finding({ situation, index }: { situation: Situation; index: number }) 
         <Prose>
           <span className="font-mono text-[11.5px] text-white">exit {situation.exit}</span> is {exit?.meaning}
           {situation.exit === 0
-            ? ". A success can still be degraded, and only degraded[] says so."
-            : `, ProcessExitCode::${exit?.variant}: the class is known before a byte of JSON is read.`}
+            ? ". A successful run can still be degraded, and degraded[] is the only place that says so."
+            : ` (ProcessExitCode::${exit?.variant}), so the agent knows the failure class before it parses any JSON.`}
         </Prose>
       </>
     );
@@ -749,7 +750,7 @@ function Finding({ situation, index }: { situation: Situation; index: number }) 
       return (
         <>
           <p className="font-mono text-[11px] text-slate-400">
-            riskClass <span className="text-slate-500">— not given</span>
+            riskClass <span className="text-slate-500">not given</span>
           </p>
           <Prose>{reading.safety}</Prose>
         </>
@@ -767,12 +768,13 @@ function Finding({ situation, index }: { situation: Situation; index: number }) 
             label="Human approval"
             value={String(approval)}
             tone={approval ? "wrong" : "neutral"}
-            note={<span className="font-mono">requiresHumanApproval</span>}
+            // 21 characters of mono outrun half a 390 px panel; let the name break rather than spill.
+            note={<span className="font-mono [overflow-wrap:anywhere]">requiresHumanApproval</span>}
           />
           <Readout
             label="Preflight"
             value={typeof first.entry.preflightCommand === "string" ? "given" : "none"}
-            note={<span className="font-mono">preflightCommand</span>}
+            note={<span className="font-mono [overflow-wrap:anywhere]">preflightCommand</span>}
           />
         </div>
         <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px]">
@@ -814,7 +816,7 @@ function RuleTable({ situation, lit }: { situation: Situation; lit: boolean }) {
   return (
     <div className="rounded-xl border border-white/[0.07] bg-black/20 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-[10px] font-black tracking-[0.2em] text-slate-500 uppercase">Every risk class, and where it leads</p>
+        <p className="text-[10px] font-black tracking-[0.2em] text-slate-500 uppercase">Each risk class and its next action</p>
         <BasisBadge basis="rule" />
       </div>
       <ul className="mt-2 grid gap-x-6 gap-y-0.5 lg:grid-flow-col lg:grid-rows-4">
@@ -834,8 +836,9 @@ function RuleTable({ situation, lit }: { situation: Situation; lit: boolean }) {
         ))}
       </ul>
       <p className="mt-2 text-[11px] leading-snug text-slate-500">
-        repair_command_preflight_policy, src/core/preflight_guard.rs. Two classes always end at a human and one at an
-        operator; three more do when <span className="font-mono">requiresHumanApproval</span> is true.
+        From repair_command_preflight_policy in src/core/preflight_guard.rs. Two classes always lead to ask_human and one
+        to manual_only; three more lead to ask_human when <span className="font-mono">requiresHumanApproval</span> is
+        true.
       </p>
     </div>
   );

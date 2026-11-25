@@ -20,12 +20,12 @@ const KIND: Record<Kind, { label: string; className: string; swatch: string }> =
   conventions: { label: "Re-discovering conventions", className: "bg-slate-500/70", swatch: "bg-slate-500/70" },
   rereading: { label: "Re-reading the same files", className: "bg-slate-400/35", swatch: "bg-slate-400/35" },
   trap: {
-    label: "Walking into a known trap",
+    label: "Hitting a trap",
     className: "bg-rose-400/85 bg-[repeating-linear-gradient(135deg,transparent_0_5px,rgba(0,0,0,0.25)_5px_8px)]",
     swatch: "bg-rose-400/85",
   },
   warned: { label: "Recalled · preflight warned", className: "bg-sky-300", swatch: "bg-sky-300" },
-  pack: { label: "ee pack · ~4k tokens", className: "bg-violet-200", swatch: "bg-violet-200" },
+  pack: { label: "ee pack · 4k-token budget", className: "bg-violet-200", swatch: "bg-violet-200" },
   useful: { label: "Useful work", className: "bg-violet-400", swatch: "bg-violet-400" },
 };
 
@@ -35,12 +35,12 @@ type Segment = { kind: Kind; share: number };
 
 /** What each session holds. A trap is either the recurring one (first met in session 1) or the new one (session 3). */
 const SESSIONS = [
-  { trap: "new", noMemory: "Hits: the migration test needs a fresh DB", withEe: "Hits it too, then remembers it as a rule", learned: 2 },
-  { trap: "known", noMemory: "Hits the migration trap again", withEe: "The pack carries the rule; trap avoided", learned: 0 },
-  { trap: "new", noMemory: "Hits: tagging before the changelog lands", withEe: "A new trap: memory cannot know it yet", learned: 1 },
+  { trap: "new", noMemory: "Hits a trap: the migration test needs a fresh DB", withEe: "Hits it too, then records it as a rule", learned: 2 },
+  { trap: "known", noMemory: "Hits the migration trap again", withEe: "The rule is in the pack, so it avoids the trap", learned: 0 },
+  { trap: "new", noMemory: "Hits a trap: tagging before the changelog lands", withEe: "Hits a new trap that no memory covers yet", learned: 1 },
   { trap: "known", noMemory: "Hits the migration trap again", withEe: "Preflight recalls the rule before the test", learned: 0 },
   { trap: "known", noMemory: "Hits the tagging trap again", withEe: "Preflight on git tag recalls the lesson", learned: 1 },
-  { trap: "known", noMemory: "Hits the migration trap again", withEe: "Recalled; the session is mostly the work", learned: 0 },
+  { trap: "known", noMemory: "Hits the migration trap again", withEe: "Rule recalled; most of the session goes to the task", learned: 0 },
 ] as const;
 
 const random = seeded(41);
@@ -122,8 +122,8 @@ export function Amnesia() {
       source={
         <>
           README.md · Why This Exists (&ldquo;Coding agents forget&rdquo;) · the operating loop: ee pack at the start, ee remember
-          and ee outcome as lessons land, ee preflight check before a risky command (advisory; it never blocks). The
-          proportions are illustrative, chosen for this page: not a measurement.
+          and ee outcome as lessons are learned, ee preflight check before a risky command (advisory; it never blocks).
+          The proportions are invented for this page and are not measured.
         </>
       }
     >
@@ -190,17 +190,18 @@ export function Amnesia() {
                 {lessons} lesson{lessons === 1 ? "" : "s"}
               </p>
               <p className="mt-1 text-[11px] leading-snug text-slate-500">
-                Each one written once with <Cmd>ee remember</Cmd>, then pulled into every later pack.
+                Each is written once with <Cmd>ee remember</Cmd> and can be packed in any later session.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
+              {/* The label says what a press does, so no aria-pressed as well: "Pause, pressed" contradicts itself. */}
               <DemoButton
                 onClick={() => {
                   if (done) setShown(1);
                   setPlaying((on) => !on || done);
                 }}
                 label={playing && !reduced ? "Pause the sessions" : "Play the sessions"}
-                pressed={playing && !reduced}
+                className={cn(playing && !reduced && "border-violet-400/60 text-violet-200")}
               >
                 {playing && !reduced ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
                 {playing && !reduced ? "Pause" : "Play"}

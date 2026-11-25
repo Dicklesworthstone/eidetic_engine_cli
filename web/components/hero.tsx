@@ -322,9 +322,10 @@ export function Hero({ words }: { words: ReactNode }) {
           </div>
         </div>
         <p className="mt-3 px-1 text-[13px] leading-relaxed text-slate-500">
-          Pick a task or drag the budget. The memories that match light up; ee&apos;s selection rule packs the most
-          relevant, least redundant ones that fit, under the balanced profile&apos;s section quotas. The 96 memories are
-          a toy; the rule is ee&apos;s (<span className="font-mono text-[12px]">src/pack/mod.rs</span>).
+          Pick a task or drag the budget slider. The memories that match the task light up, and ee&apos;s selection rule
+          packs the most relevant, least redundant ones that fit the budget and the balanced profile&apos;s section
+          quotas. The 96 memories are made up for this page. The selection rule and its weights come from{" "}
+          <span className="font-mono text-[12px]">src/pack/mod.rs</span>.
         </p>
       </div>
     </>
@@ -628,7 +629,7 @@ function Specimen({
               })}
           </ol>
           <p className={cn("mt-3 border-t border-white/[0.06] pt-2.5 font-mono text-[10px] text-slate-500 lg:mt-auto")}>
-            every item: provenance · score · why
+            every item: provenance · scores · why
           </p>
         </div>
       </div>

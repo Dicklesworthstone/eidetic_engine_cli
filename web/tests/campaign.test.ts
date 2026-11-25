@@ -78,6 +78,8 @@ for (const domain of DOMAINS) {
         expect((campaign.failures[day] ?? 0) + (campaign.episodes[day] ?? 0)).toBe(campaign.levels.episodic[day] ?? -1);
         expect(campaign.retired[day] ?? 0).toBeLessThanOrEqual(campaign.written[day] ?? 0);
         expect(totalAt(campaign, day)).toBeLessThanOrEqual(campaign.maxTotal);
+        // The readout prints all three side by side, so they must reconcile: no memory counted twice or lost.
+        expect(totalAt(campaign, day)).toBe((campaign.written[day] ?? 0) - (campaign.retired[day] ?? 0));
       }
     });
 
@@ -117,14 +119,38 @@ for (const domain of DOMAINS) {
       expect(campaign.timeline.some((event) => event.type === "revisit")).toBe(true);
     });
 
-    test("the decay sweep tombstones exactly what falls under the forget threshold", () => {
-      // Re-derive one sweep's verdicts from the rule itself: lifecycle = freshness × confidence × utility.
-      const episode = { born: 0, failure: false, cu: 0.2, every: 0 };
-      const cutoff = HALF_LIFE.event * Math.log2(episode.cu / FORGET_THRESHOLD);
-      expect(lifecycleAt(episode, Math.floor(cutoff))).toBeGreaterThanOrEqual(FORGET_THRESHOLD);
-      expect(lifecycleAt(episode, Math.ceil(cutoff))).toBeLessThan(FORGET_THRESHOLD);
+    test("the decay rule crosses the forget threshold where each half-life says, and the sweep runs weekly", () => {
+      // Re-derive the verdicts from the rule itself: lifecycle = freshness × confidence × utility, with the event
+      // half-life for an episodic event and the failure half-life for a failure.
+      for (const [failure, halfLife] of [
+        [false, HALF_LIFE.event],
+        [true, HALF_LIFE.failure],
+      ] as const) {
+        const episode = { born: 0, failure, cu: 0.2, every: 0 };
+        const cutoff = halfLife * Math.log2(episode.cu / FORGET_THRESHOLD);
+        expect(lifecycleAt(episode, Math.floor(cutoff))).toBeGreaterThanOrEqual(FORGET_THRESHOLD);
+        expect(lifecycleAt(episode, Math.ceil(cutoff))).toBeLessThan(FORGET_THRESHOLD);
+      }
       // A memory recalled every week never ages past seven days.
-      expect(lifecycleAt({ ...episode, every: 7 }, 170)).toBeGreaterThan(0.2 * freshness(7, HALF_LIFE.event) - 1e-12);
+      const recalled = { born: 0, failure: false, cu: 0.2, every: 7 };
+      expect(lifecycleAt(recalled, 170)).toBeGreaterThan(0.2 * freshness(7, HALF_LIFE.event) - 1e-12);
+      // The simulation's sweep: Sundays only, and it does take something over the campaign.
+      for (let day = 0; day < DAYS; day++) {
+        if (day % 7 !== 6) expect(campaign.swept[day] ?? 0).toBe(0);
+      }
+      expect(campaign.swept.reduce((sum, count) => sum + count, 0)).toBeGreaterThan(0);
+    });
+
+    test("an outcome names the kind of target its step needs", () => {
+      // Trust classes move on memories (apply_memory_trust_class_transition_in_transaction in src/core/outcome.rs);
+      // deprecation by harmful quorum is a native rule's lifecycle, which `ee outcome` reaches only with
+      // --target-type rule (it defaults to memory, and a rule id is not a memory id).
+      for (const event of campaign.timeline) {
+        if (!event.command.startsWith("ee outcome ")) continue;
+        if (event.command.includes("<rule-id>")) expect(event.command).toContain("--target-type rule");
+        if (event.type === "validated") expect(event.command).toContain("<memory-id>");
+        if (event.type === "demote") expect(event.command).toContain("--target-type rule");
+      }
     });
 
     test("every Monday's pack keeps the budget and every quota, and shows only what the store holds", () => {

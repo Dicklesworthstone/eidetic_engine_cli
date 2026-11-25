@@ -67,9 +67,17 @@ const LEGEND: readonly Category[] = ["useful", "offtask", "repeat", "stale"];
 /** The task selector's short names, so the three fit one row on a phone. */
 const TASK_SHORT: Record<TaskId, string> = { flaky: "Flaky test", migrate: "Migration", release: "Release" };
 
-const LANES: readonly { id: Lane; name: string; tag: string; colour: string; capacity: number }[] = [
+/** `dash` sets the vector store's line apart from ee's in the charts by more than hue: sky and violet are close. */
+const LANES: readonly { id: Lane; name: string; tag: string; colour: string; capacity: number; dash?: string }[] = [
   { id: "notes", name: "Notes file", tag: "CLAUDE.md · AGENTS.md", colour: "#fbbf24", capacity: NOTES_TRIM_AT },
-  { id: "vector", name: "Vector store", tag: `top ${VECTOR_K} by similarity`, colour: "#38bdf8", capacity: VECTOR_K },
+  {
+    id: "vector",
+    name: "Vector store",
+    tag: `top ${VECTOR_K} by similarity`,
+    colour: "#38bdf8",
+    capacity: VECTOR_K,
+    dash: "6 4",
+  },
   { id: "ee", name: "ee pack", tag: "--max-tokens 4000", colour: "#a78bfa", capacity: EE_LINES },
 ];
 
@@ -181,8 +189,8 @@ export function MarkdownVsMemory() {
 
   return (
     <DemoFrame
-      eyebrow="A year of lessons, three memories"
-      title="The same lessons, handed back three ways."
+      eyebrow={`${WEEKS} weeks of lessons · three memory setups`}
+      title="What a session gets from a notes file, a vector store and ee."
       basis="derived"
       source={
         <>
@@ -194,9 +202,9 @@ export function MarkdownVsMemory() {
           of lessons ee&apos;s budget buys · both rank by one similarity: on-task lessons 0.3 to 1, others 0 to 0.58 · ee
           notices a stale lesson with chance {fixed(EE_CATCH_PER_WEEK * 100, 2)}% a week (a revision, a harmful outcome, the
           contradiction guard, decay) · MMR similarity {SIMILARITY.sameFact} for two copies of a lesson,{" "}
-          {SIMILARITY.sameTopic} within a topic, {SIMILARITY.other} otherwise · receipts about {RECEIPT_TOKENS} tokens an
-          ee item · not modelled: section quotas, the preview and link-only tiers, the memory-tier boost, and the
-          helpful/harmful outcome bias (at most ±0.05, AGENT_PROFILE_BIAS_CAP in
+          {SIMILARITY.sameTopic} within a topic, {SIMILARITY.other} otherwise · an ee item&apos;s id, why, trust and
+          provenance lines about {RECEIPT_TOKENS} tokens · not modelled: section quotas, the preview and link-only tiers,
+          the query-relative relevance cutoff, the memory-tier boost, and the helpful/harmful outcome bias (at most ±0.05, AGENT_PROFILE_BIAS_CAP in
           src/models/context_profile.rs). ee&apos;s side: src/pack/mod.rs ·
           DEFAULT_CONTEXT_MAX_TOKENS 4,000 (counted on each memory&apos;s own text) · DEFAULT_MMR_RELEVANCE_WEIGHT 0.75 ·
           DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR 0.05 · PackOmissionReason · apply_contradiction_guard · the markdown
@@ -228,13 +236,14 @@ export function MarkdownVsMemory() {
             />
             {reduced ? null : (
               <>
+                {/* The label says what a press does, so no aria-pressed as well: "Pause, pressed" contradicts itself. */}
                 <DemoButton
                   onClick={() => {
                     if (done) setWeek(1);
                     setPlaying((on) => !on || done);
                   }}
                   label={animating ? "Pause the campaign" : "Play the campaign"}
-                  pressed={animating}
+                  className={cn(animating && "border-violet-400/60 text-violet-200")}
                 >
                   {animating ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
                   {animating ? "Pause" : "Play"}
@@ -256,8 +265,8 @@ export function MarkdownVsMemory() {
         {/* Where the campaign stands */}
         <p className="mt-5 font-mono text-[11.5px] leading-relaxed text-slate-400 tabular-nums">
           <span className="text-[color:var(--chapter,#fb7185)]">Week {week}</span> · {grouped(status.written)} lessons
-          written · {status.stale} since overtaken · <span className="text-slate-200">{status.onTaskTrue}</span> true
-          lessons bear on &ldquo;{taskLabel.toLowerCase()}&rdquo;
+          written · {status.stale} now stale · <span className="text-slate-200">{status.onTaskTrue}</span> true lessons
+          apply to &ldquo;{taskLabel.toLowerCase()}&rdquo;
         </p>
 
         {/* Legend */}
@@ -270,7 +279,7 @@ export function MarkdownVsMemory() {
           ))}
           <li className="flex items-center gap-2">
             <span aria-hidden="true" className="h-2.5 w-2.5 rounded-[2px] border border-white/15" />
-            Room
+            Empty slot
           </li>
         </ul>
 
@@ -287,10 +296,10 @@ export function MarkdownVsMemory() {
           ))}
         </ol>
         <p className="mt-1 text-[11.5px] leading-relaxed text-slate-500">
-          <span className="text-slate-400">Useful</span>: on-task, true and said once.{" "}
+          <span className="text-slate-400">Useful</span>: on-task, true and not a repeat.{" "}
           <span className="text-slate-400">Missed</span>: true lessons about this task that the session does not have.{" "}
           <span className="text-slate-400">Deleted</span>: true lessons the file&apos;s trims have removed so far.{" "}
-          <span className="text-slate-400">Listed</span>: what the lane names as left out.
+          <span className="text-slate-400">Listed</span>: candidates the lane reports as left out.
         </p>
 
         {/* The year, week by week */}
@@ -299,7 +308,15 @@ export function MarkdownVsMemory() {
             <ul className="flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] text-slate-400">
               {LANES.map((lane) => (
                 <li key={lane.id} className="flex items-center gap-2">
-                  <span aria-hidden="true" className="h-[3px] w-4 rounded-full" style={{ background: lane.colour }} />
+                  <span
+                    aria-hidden="true"
+                    className="h-[3px] w-4 rounded-full"
+                    style={{
+                      background: lane.dash
+                        ? `repeating-linear-gradient(90deg, ${lane.colour} 0 6px, transparent 6px 9px)`
+                        : lane.colour,
+                    }}
+                  />
                   {lane.name}
                 </li>
               ))}
@@ -333,19 +350,19 @@ export function MarkdownVsMemory() {
         {/* What to take from it */}
         <div className="mt-7 grid grid-cols-1 gap-x-6 gap-y-3 text-[13px] leading-relaxed text-slate-400 md:grid-cols-3">
           <p>
-            <span className="font-semibold text-slate-200">Same similarity, same misses.</span> The vector store and
-            ee&apos;s search rank by one similarity here, so both miss the on-task lessons it scores weakly. What differs
-            is what gets through: top-k cannot see that a lesson went stale or repeats one already in the session.
+            <span className="font-semibold text-slate-200">Ranking.</span> The vector store and ee&apos;s search use the
+            same similarity score here, so both miss the on-task lessons it scores low. Top-k has no record of which
+            lessons went stale or repeat one already in the session, so it passes them through.
           </p>
           <p>
-            <span className="font-semibold text-slate-200">Receipts cost tokens.</span> ee&apos;s budget counts the
-            memories&apos; own text. In markdown, each item also carries its id, why it was chosen, its trust class and its
-            provenance, about {RECEIPT_TOKENS} tokens here. A smaller <Cmd>--max-tokens</Cmd> buys a smaller pack.
+            <span className="font-semibold text-slate-200">Token cost.</span> ee&apos;s budget counts only the
+            memories&apos; own text. In markdown, each item also lists its id, why it was chosen, its trust class and its
+            provenance, about {RECEIPT_TOKENS} tokens here. A smaller <Cmd>--max-tokens</Cmd> gives a smaller pack.
           </p>
           <p>
-            <span className="font-semibold text-slate-200">Keep the file.</span> <Cmd>ee export agentsmd</Cmd> writes the
-            primer&apos;s rules and warnings into a marker-delimited block of AGENTS.md, 600 tokens by default, and never
-            edits outside its markers. <Cmd>ee diag agentsmd-drift</Cmd> reports where the file and the memory disagree.
+            <span className="font-semibold text-slate-200">Keeping AGENTS.md.</span> <Cmd>ee export agentsmd</Cmd> writes
+            the primer&apos;s rules and warnings into a marker-delimited block of AGENTS.md, 600 tokens by default. It
+            never edits outside its markers. <Cmd>ee diag agentsmd-drift</Cmd> reports where the file and the memory disagree.
           </p>
         </div>
       </div>
@@ -368,13 +385,13 @@ function laneNote(lane: Lane, session: Session, trims: number): ReactNode {
   if (lane === "notes") {
     return trims === 0 ? (
       <>
-        Every line goes into every session, on-task or not. Stale lines stay until someone trims the file; past{" "}
-        {NOTES_TRIM_AT} lines, someone will.
+        Every line goes into every session, on-task or off. Stale lines stay until the file is trimmed, which here
+        happens once it passes {NOTES_TRIM_AT} lines.
       </>
     ) : (
       <>
-        Every line goes into every session, on-task or not. Trimmed {trims === 1 ? "once" : `${trims} times`}: even a
-        careful trim, stale and repeated lines first, has deleted{" "}
+        Every line goes into every session, on-task or off. The file has been trimmed{" "}
+        {trims === 1 ? "once" : `${trims} times`}, stale and repeated lines first, and the trims have deleted{" "}
         <span className="text-rose-300">{grouped(session.lost)}</span> lessons that were still true.
       </>
     );
@@ -382,22 +399,23 @@ function laneNote(lane: Lane, session: Session, trims: number): ReactNode {
   if (lane === "vector") {
     return (
       <>
-        The {VECTOR_K} chunks most similar to the task. Similarity cannot tell a stale chunk or a repeat from a good one,
-        and nothing records what was left out.
+        Returns up to {VECTOR_K} chunks, the ones most similar to the task. The score does not mark a chunk as stale
+        or as a repeat, and the store keeps no record of what it left out.
       </>
     );
   }
   const left = Object.values(session.skipped).reduce<number>((sum, count) => sum + (count ?? 0), 0);
   return (
     <>
-      Strict MMR spends {grouped(EE_BUDGET_TOKENS)} tokens on memories and demotes repeats; lessons ee has caught going
-      stale stay out.{" "}
+      Strict MMR fills at most {grouped(EE_BUDGET_TOKENS)} tokens of memory text and demotes repeats. Lessons ee has
+      detected as stale are excluded.{" "}
       {left > 0 ? (
         <>
-          The {left} candidates it left out are listed, each with a reason, in <Cmd>data.pack.skipped[]</Cmd>.
+          {left === 1 ? "The 1 candidate it left out is" : `The ${left} candidates it left out are`} listed, each with a
+          reason, in <Cmd>data.pack.skipped[]</Cmd>.
         </>
       ) : (
-        <>Nothing has had to be left out yet.</>
+        <>No candidate has been left out yet.</>
       )}
     </>
   );
@@ -479,7 +497,7 @@ function Cells({ session, capacity, name }: { session: Session; capacity: number
   const rows = Math.ceil(slots / columns);
   const H = rows * (size + gap) - gap;
   const { counts } = session;
-  const label = `${name}, week ${session.week}: ${session.ids.length} lines of room for ${capacity}. ${counts.useful} on-task and true, ${counts.offtask} off-task, ${counts.repeat} repeats, ${counts.stale} stale or contradicted.`;
+  const label = `${name}, week ${session.week}: ${session.ids.length} lines, with space for ${capacity}. ${counts.useful} on-task and true, ${counts.offtask} off-task, ${counts.repeat} repeats, ${counts.stale} stale or contradicted.`;
 
   return (
     <div ref={ref} className="w-full">
@@ -528,7 +546,7 @@ function Cells({ session, capacity, name }: { session: Session; capacity: number
   );
 }
 
-/** The session's size on one scale for all three lanes; ee's receipts hatched beside its lessons. */
+/** The session's size on one scale for all three lanes; ee's id, why, trust and provenance lines hatched beside its lessons. */
 function TokenGauge({ session, colour }: { session: Session; colour: string }) {
   const receipts = session.tokens - session.lessonTokens;
   const at = (tokens: number) => `${(Math.min(tokens, TOKEN_SCALE) / TOKEN_SCALE) * 100}%`;
@@ -536,7 +554,7 @@ function TokenGauge({ session, colour }: { session: Session; colour: string }) {
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
       <div
         role="img"
-        aria-label={`${grouped(session.tokens)} tokens a session${receipts > 0 ? `: ${grouped(session.lessonTokens)} of lessons and ${grouped(receipts)} of receipts` : ""}.`}
+        aria-label={`${grouped(session.tokens)} tokens a session${receipts > 0 ? `: ${grouped(session.lessonTokens)} of lesson text and ${grouped(receipts)} of id, why, trust and provenance lines` : ""}.`}
         className="relative h-2 min-w-[9rem] flex-1 overflow-hidden rounded-full bg-white/[0.05] ring-1 ring-white/[0.05]"
       >
         <span className="absolute inset-y-0 left-0" style={{ width: at(session.lessonTokens), background: colour, opacity: 0.85 }} />
@@ -555,7 +573,7 @@ function TokenGauge({ session, colour }: { session: Session; colour: string }) {
       </div>
       <p className="shrink-0 font-mono text-[11px] text-slate-300 tabular-nums">
         {grouped(session.tokens)} tokens
-        {receipts > 0 ? <span className="text-slate-500"> · {grouped(receipts)} of receipts</span> : null}
+        {receipts > 0 ? <span className="text-slate-500"> · {grouped(receipts)} in provenance lines</span> : null}
       </p>
     </div>
   );
@@ -671,6 +689,7 @@ function Chart({
               fill="none"
               stroke={lane.colour}
               strokeWidth="1.75"
+              strokeDasharray={lane.dash}
               strokeLinejoin="round"
               strokeLinecap="round"
             />

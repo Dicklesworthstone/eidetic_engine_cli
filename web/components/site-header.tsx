@@ -81,10 +81,11 @@ export function SiteHeader({ current }: { current?: string } = {}) {
     const outside = [...document.querySelectorAll("[data-hero], [data-outside]")];
     const watched = [...document.querySelectorAll("[data-chapter]")];
     for (const element of watched) observer.observe(element);
-    // Above the first chapter and below the last (the hero, the footer), no chapter is in view.
+    // Above the first chapter and below the last (the hero, the figures, the short version, the footer), no
+    // chapter is in view. One batch can carry several of them, so every entry is read, not only the first.
     const heroObserver = new IntersectionObserver(
-      ([entry]) => {
-        if (entry?.isIntersecting) setActive(null);
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) setActive(null);
       },
       { rootMargin: "-45% 0px -54% 0px" },
     );

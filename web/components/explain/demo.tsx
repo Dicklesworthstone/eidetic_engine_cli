@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, type ReactNode } from "react";
+import { Fragment, type KeyboardEvent, type ReactNode, useRef } from "react";
 
 import { MicroLabel, Reticle } from "@/components/instrument";
 import { cn } from "@/lib/utils";
@@ -111,7 +111,30 @@ const TONE_ON: Record<Tone, string> = {
   neutral: "bg-white/15 text-white",
 };
 
-/** A small radio group of buttons: one choice of a few. */
+/** Where each key moves the selection in a radio group of `count` options, or null for a key the group ignores. */
+export function radioKeyTarget(key: string, current: number, count: number): number | null {
+  if (count === 0) return null;
+  switch (key) {
+    case "ArrowRight":
+    case "ArrowDown":
+      return (current + 1) % count;
+    case "ArrowLeft":
+    case "ArrowUp":
+      return (current - 1 + count) % count;
+    case "Home":
+      return 0;
+    case "End":
+      return count - 1;
+    default:
+      return null;
+  }
+}
+
+/**
+ * A small radio group of buttons: one choice of a few. It follows the ARIA radio-group keyboard pattern: only the
+ * checked option is in the tab order (the first, if none is checked), and the arrow keys, Home and End move the focus
+ * and the selection together.
+ */
 export function Segmented<T extends string>({
   label,
   options,
@@ -125,13 +148,24 @@ export function Segmented<T extends string>({
   onChange: (value: T) => void;
   className?: string;
 }) {
+  const group = useRef<HTMLDivElement>(null);
+  const checked = options.findIndex((option) => option.value === value);
+  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const target = radioKeyTarget(event.key, index, options.length);
+    const option = target === null ? undefined : options[target];
+    if (target === null || !option) return;
+    event.preventDefault();
+    group.current?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[target]?.focus();
+    if (option.value !== value) onChange(option.value);
+  };
   return (
     <div
+      ref={group}
       role="radiogroup"
       aria-label={label}
       className={cn("inline-flex max-w-full flex-wrap gap-1 rounded-xl border border-white/10 bg-black/30 p-1", className)}
     >
-      {options.map((option) => {
+      {options.map((option, index) => {
         const on = option.value === value;
         return (
           <button
@@ -139,7 +173,9 @@ export function Segmented<T extends string>({
             type="button"
             role="radio"
             aria-checked={on}
+            tabIndex={on || (checked < 0 && index === 0) ? 0 : -1}
             onClick={() => onChange(option.value)}
+            onKeyDown={(event) => onKeyDown(event, index)}
             className={cn(
               "rounded-lg px-3 py-1.5 text-xs font-bold transition focus-visible:ring-2 focus-visible:ring-violet-400 focus-visible:outline-none",
               on ? TONE_ON[option.tone ?? "neutral"] : "text-slate-300 hover:bg-white/5 hover:text-white",
@@ -162,6 +198,7 @@ export function Slider({
   step = 1,
   onChange,
   display,
+  valueText,
   className,
 }: {
   label: ReactNode;
@@ -171,6 +208,8 @@ export function Slider({
   step?: number;
   onChange: (value: number) => void;
   display?: ReactNode;
+  /** What a screen reader announces for the value (aria-valuetext), when the bare number would mean nothing. */
+  valueText?: string;
   className?: string;
 }) {
   return (
@@ -186,6 +225,7 @@ export function Slider({
         max={max}
         step={step}
         value={value}
+        aria-valuetext={valueText}
         onChange={(event) => onChange(Number(event.target.value))}
       />
     </label>

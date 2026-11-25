@@ -113,8 +113,11 @@ describe("the notes file", () => {
       const session = notesSession(week, "flaky");
       expect(session.ids.length).toBeLessThanOrEqual(NOTES_TRIM_AT);
       expect(session.tokens).toBe(session.ids.length * LESSON_TOKENS);
-      if (TRIM_WEEKS.includes(week)) expect(session.ids.length).toBeLessThanOrEqual(NOTES_TRIM_TO);
-      else expect(session.ids.length).toBe(Math.min(NOTES_TRIM_AT, previous + LESSONS_PER_WEEK));
+      // A trim week is exactly a week whose new lessons pushed the file past the line.
+      if (TRIM_WEEKS.includes(week)) {
+        expect(previous + LESSONS_PER_WEEK).toBeGreaterThan(NOTES_TRIM_AT);
+        expect(session.ids.length).toBeLessThanOrEqual(NOTES_TRIM_TO);
+      } else expect(session.ids.length).toBe(previous + LESSONS_PER_WEEK);
       // File order: oldest first.
       expect([...session.ids].sort((a, b) => a - b)).toEqual(session.ids);
       previous = session.ids.length;
@@ -148,6 +151,10 @@ describe("the vector store", () => {
         for (let index = 1; index < scores.length; index++) {
           expect(scores[index - 1] ?? -1).toBeGreaterThanOrEqual(scores[index] ?? -1);
         }
+        // And they are the top k: nothing written by now and left out scores above the last one returned.
+        const returned = new Set(session.ids);
+        const passedOver = LESSONS.filter((lesson) => lesson.week <= week && !returned.has(lesson.id));
+        for (const lesson of passedOver) expect(lesson.score[task.id]).toBeLessThanOrEqual(scores[scores.length - 1] ?? -1);
       }
     }
   });
@@ -203,6 +210,12 @@ test("categorize: stale beats repeat beats topic", () => {
   expect(stale).toBeDefined();
   if (!stale) return;
   expect(categorize([stale.id, stale.id], 10, "flaky")).toEqual(["stale", "stale"]);
+  // An on-task restatement of a true lesson, read after the original: the original is useful, the copy a repeat.
+  const copy = LESSONS.find((lesson) => lesson.fact !== lesson.id && lesson.topic === "tests" && lesson.staleWeek > lesson.week);
+  expect(copy).toBeDefined();
+  if (!copy) return;
+  expect(categorize([copy.fact, copy.id], copy.week, "flaky")).toEqual(["useful", "repeat"]);
+  expect(categorize([copy.id, copy.fact], copy.week, "flaky")).toEqual(["useful", "repeat"]);
 });
 
 describe("the ee facts the figure states", () => {
@@ -229,10 +242,26 @@ describe("the ee facts the figure states", () => {
     expect(merge).toContain('default_profile: Some("balanced".to_string()),');
   });
 
-  test("omissions are reported at data.pack.skipped[]", () => {
+  test("omissions are reported at data.pack.skipped[], and every one the figure counts fits in it", () => {
     const output = source("src/output/mod.rs");
     expect(output).toContain('pack.field_array_of_objects("skipped"');
     expect(output).toContain('"skippedTotal"');
+    const pack = source("src/pack/mod.rs");
+    // The reasons the model files its omissions under.
+    for (const reason of ["token_budget_exceeded", "redundant_candidate", "below_relevance_floor"]) {
+      expect(pack).toContain(`=> "${reason}"`);
+    }
+    // skipped[] is cut at 50 (skippedTotal keeps the full count). The figure says every candidate ee left out is
+    // listed there, which holds only while the model never leaves out more.
+    const cap = Number(pack.match(/pub const MAX_PACK_SKIPPED_ITEMS: usize = (\d+);/)?.[1]);
+    expect(cap).toBe(50);
+    for (const task of TASKS) {
+      for (const week of everyWeek) expect(total(eeSession(week, task.id).skipped)).toBeLessThanOrEqual(cap);
+    }
+  });
+
+  test("the outcome bias the caption leaves out is at most ±0.05", () => {
+    expect(source("src/models/context_profile.rs")).toContain("pub const AGENT_PROFILE_BIAS_CAP: f64 = 0.05;");
   });
 
   test("the AGENTS.md bridge", () => {

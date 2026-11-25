@@ -62,6 +62,14 @@ export function NegativeLedger() {
   const logs = useMemo(() => ({ none: runCampaign(landscape, "none"), ee: runCampaign(landscape, "ee") }), [landscape]);
   const none = useMemo(() => snapshot(landscape, logs.none, shown), [landscape, logs, shown]);
   const ee = useMemo(() => snapshot(landscape, logs.ee, shown), [landscape, logs, shown]);
+  // The longest of the campaign's descriptions holds the paragraph's height, so the page below it stays put as it plays.
+  const longest = useMemo(
+    () =>
+      Array.from({ length: SESSIONS + 1 }, (_, count) => describe(count, logs.none, logs.ee)).reduce((a, b) =>
+        b.length > a.length ? b : a,
+      ),
+    [logs],
+  );
 
   useEffect(() => {
     if (!inView || reduced || started.current) return;
@@ -90,13 +98,13 @@ export function NegativeLedger() {
   return (
     <DemoFrame
       eyebrow="One campaign, two agents"
-      title="What didn't work, kept."
+      title="The same search, with and without a failure ledger."
       basis="toy"
       source={
         <>
           README.md · Negative Evidence Ledger · src/models/memory.rs · FAILURE_TYPED_MEMORY_FIELDS: cause,
           regression_surface, reverted_at_sha, family (from &ldquo;Family:&rdquo; in the body, or --field family=…) ·
-          src/cli/mod.rs · ee search --kind failure --field family=…; attempt families are a separate ledger (ee remember
+          src/cli/mod.rs · ee search &lt;query&gt; --kind failure --field family=…; attempt families are a separate ledger (ee remember
           --family --of-n --attempt --attempt-outcome, ee search --family) · src/core/rule.rs · PLAYBOOK_MIN_EVIDENCE = 3 ·
           src/core/outcome.rs · ANTI_PATTERN_PROPOSAL_THRESHOLD = 3, from at least two sources · src/core/curate.rs · an
           applied anti_pattern_proposal becomes a protected procedural rule · src/pack/mod.rs · include_anti_pattern_first
@@ -128,7 +136,7 @@ export function NegativeLedger() {
                 }
                 setPlaying((on) => !on);
               }}
-              pressed={animating}
+              pressed={reduced ? undefined : animating}
               disabled={reduced && done}
               label={animating ? "Pause the campaign" : reduced ? "Show all 24 sessions" : "Play the campaign"}
             >
@@ -172,9 +180,15 @@ export function NegativeLedger() {
           <Timeline log={logs.ee} shown={shown} seed={seed} reduced={reduced} />
         </div>
 
-        <p aria-live="polite" className="mt-3 min-h-[2.5rem] text-[13px] leading-relaxed text-slate-400">
-          {describe(shown, logs.none, logs.ee)}
-        </p>
+        {/* Quiet while it plays: a session every 900 ms would queue sentences faster than a screen reader speaks them. */}
+        <div className="mt-3 grid min-h-[2.5rem] text-[13px] leading-relaxed text-slate-400">
+          <p aria-hidden="true" className="invisible [grid-area:1/1]">
+            {longest}
+          </p>
+          <p aria-live={animating ? "off" : "polite"} className="[grid-area:1/1]">
+            {describe(shown, logs.none, logs.ee)}
+          </p>
+        </div>
 
         <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-2 lg:items-start">
           <FamilyLedger landscape={landscape} none={none} ee={ee} />
@@ -183,13 +197,13 @@ export function NegativeLedger() {
 
         <p className="mt-6 rounded-xl border border-white/[0.07] bg-black/20 px-4 py-3 text-[13px] leading-relaxed text-slate-400">
           <span className="font-semibold text-slate-200">What is invented, and what is ee&rsquo;s.</span> The landscape,
-          the agent and its taste for promising ideas are made up, and so is curation firing by itself at a
-          family&rsquo;s third failure; nothing here is a measurement. The loop is ee&rsquo;s: a failure carries its
-          family as a typed field, a family&rsquo;s failures come back together, a rule drawn from them exists only once{" "}
-          <span className="font-mono text-[12px] text-slate-300">ee curate apply</span> has passed it, and the next pack
-          leads with what not to do. Three is ee&rsquo;s own number: both of its proposers wait for three pieces of
-          evidence. No family here hides a win; a real one might, which is why an anti-pattern stays an audited rule with
-          its evidence attached.
+          the agent and its preference for promising-looking ideas are made up, and so is curation running by itself at
+          a family&rsquo;s third failure. Nothing here is a measurement. The loop is ee&rsquo;s: a failure carries its
+          family as a typed field, a search on that field returns the family&rsquo;s failures together, a rule drawn
+          from them exists only after <span className="font-mono text-[12px] text-slate-300">ee curate apply</span> has
+          accepted it, and the next pack puts what not to do first. The threshold of three is also ee&rsquo;s: both of
+          its proposers wait for three pieces of evidence. In this toy no family contains a win. A real family might, so
+          an anti-pattern remains an audited rule with its evidence attached.
         </p>
       </div>
     </DemoFrame>
@@ -199,32 +213,34 @@ export function NegativeLedger() {
 /** What the latest session did, in words, for the live region and for a reader who skims. */
 function describe(shown: number, none: readonly Session[], ee: readonly Session[]): string {
   if (shown === 0) {
-    return `Session 0 of ${SESSIONS}. The same hidden landscape on both sides, and the same agent: ${ATTEMPTS_PER_SESSION} attempts a session, drawn to whatever looks most promising.`;
+    return `Session 0 of ${SESSIONS}. Both sides search the same hidden landscape with the same agent, which makes ${ATTEMPTS_PER_SESSION} attempts a session and favours whatever looks most promising.`;
   }
   const left = none[shown - 1];
   const right = ee[shown - 1];
   if (!left || !right) return "";
   const repeats = left.attempts.filter((a) => a.repeat).length;
-  const leftWin = left.attempts.some((a) => a.win);
-  const rightWin = right.attempts.some((a) => a.win);
+  const leftWins = left.attempts.filter((a) => a.win).length;
+  const rightWins = right.attempts.filter((a) => a.win).length;
+  // A session can land on two of the wins (rare, but a new landscape can draw one).
+  const hit = (wins: number) => (wins === 0 ? "." : wins === 1 ? ", and one hit a win." : `, and ${wins} hit wins.`);
   const names = right.distilled.map((f) => FAMILY_NAMES[f] ?? "?");
   const distilled =
     names.length === 0
       ? ""
-      : `${names.length === 1 ? `Family ${names[0]} has` : `Families ${names.join(" and ")} have`} ${DISTILL_AT} recorded failures, and curation turns ${
+      : `${names.length === 1 ? `Family ${names[0]} has` : `Families ${names.join(" and ")} have`} reached ${DISTILL_AT} recorded failures, and curation turns ${
           names.length === 1 ? "it into an anti-pattern" : "them into anti-patterns"
         } for the next pack.`;
   if (shown === 1) {
-    const win = leftWin ? " One of them is a win." : "";
+    const win = leftWins === 0 ? "" : leftWins === 1 ? " One of them is a win." : ` ${leftWins} of them are wins.`;
     return `Session 1 of ${SESSIONS}. Nothing is remembered yet, so both agents make the same ${ATTEMPTS_PER_SESSION} attempts.${win} ${distilled}`.trim();
   }
   const parts = [`Session ${shown} of ${SESSIONS}.`];
   const spent =
     repeats === 0
-      ? "No memory: no dead end paid for twice this time"
-      : `No memory: ${repeats} of ${ATTEMPTS_PER_SESSION} attempts went to dead ends already paid for`;
-  parts.push(`${spent}${leftWin ? ", and one hit a win." : "."}`);
-  parts.push(`With ee: ${ATTEMPTS_PER_SESSION} attempts, none on a recorded failure or a pruned family${rightWin ? ", and one hit a win." : "."}`);
+      ? "No memory: no attempt repeated a known dead end"
+      : `No memory: ${repeats} of ${ATTEMPTS_PER_SESSION} attempts repeated a known dead end`;
+  parts.push(`${spent}${hit(leftWins)}`);
+  parts.push(`With ee: ${ATTEMPTS_PER_SESSION} attempts, none on a recorded failure or a pruned family${hit(rightWins)}`);
   if (distilled) parts.push(distilled);
   return parts.join(" ");
 }
@@ -254,7 +270,7 @@ function Legend() {
     },
     {
       key: "repeat",
-      label: "A dead end paid for again",
+      label: "A known dead end, tried again",
       swatch: <rect x={2} y={2} width={10} height={10} rx={2} fill={REPEAT} />,
     },
     {
@@ -323,7 +339,7 @@ function Panel({
           {withEe ? "With ee" : "No memory"}
         </p>
         <p className="text-[11px] text-slate-500">
-          {withEe ? "Each session opens on the ledger's pack" : "Each session knows only itself"}
+          {withEe ? "Each session starts from the ledger's pack" : "Each session starts with no record of the others"}
         </p>
       </div>
       <div
@@ -751,9 +767,17 @@ function FamilyLedger({ landscape, none, ee }: { landscape: Landscape; none: Sna
                     <span className="mt-0.5 block text-[11px] text-slate-500">{plural(ruledOut, "cell")} never tried</span>
                   ) : null}
                 </td>
-                <td className="py-2 text-right font-mono whitespace-nowrap tabular-nums">
-                  <span className={tries > 0 ? "text-slate-300" : "text-slate-600"}>{plural(tries, "try", "tries")}</span>
-                  {repeats > 0 ? <span className="text-rose-300"> · {repeats} again</span> : null}
+                {/* Two unbreakable halves, so on a narrow phone the cell wraps rather than pushing the table out of its box. */}
+                <td className="py-2 text-right font-mono tabular-nums">
+                  <span className={cn("whitespace-nowrap", tries > 0 ? "text-slate-300" : "text-slate-600")}>
+                    {plural(tries, "try", "tries")}
+                  </span>
+                  {repeats > 0 ? (
+                    <>
+                      {" "}
+                      <span className="whitespace-nowrap text-rose-300">· {repeats} again</span>
+                    </>
+                  ) : null}
                 </td>
               </tr>
             );
@@ -769,13 +793,13 @@ const STEPS = [
     id: "capture",
     title: "Capture",
     command: 'ee remember "Tried … Family: B. Cause: …" --level episodic --kind failure',
-    note: "Every failed attempt, before the revert, with its family as a typed field.",
+    note: "Each failed attempt is recorded before the revert, with its family as a typed field.",
   },
   {
     id: "group",
     title: "Group",
-    command: "ee search --kind failure --field family=B",
-    note: "A family's failures, pulled up together by that field.",
+    command: 'ee search "<the idea>" --kind failure --field family=B',
+    note: "A filter on that field returns the family's failures together.",
   },
   {
     id: "distill",
@@ -787,7 +811,7 @@ const STEPS = [
     id: "pack",
     title: "Pack",
     command: 'ee pack "<the next idea>"',
-    note: "The next pack's first pick is reserved for what not to do, when any of it is relevant.",
+    note: "When an anti-pattern clears the relevance floor, the next pack selects it first.",
   },
 ] as const;
 
@@ -796,7 +820,7 @@ function Loop({ latest }: { latest: Session | undefined }) {
   const distilled = latest?.distilled.map((f) => FAMILY_NAMES[f] ?? "?") ?? [];
   return (
     <div className="min-w-0 rounded-2xl border border-[color:var(--chapter)]/30 bg-[color:var(--chapter)]/[0.05] p-4">
-      <p className="text-[9px] font-black tracking-[0.2em] text-[color:var(--chapter)] uppercase">The loop that is ee&rsquo;s</p>
+      <p className="text-[9px] font-black tracking-[0.2em] text-[color:var(--chapter)] uppercase">The ee commands in this loop</p>
       <ol className="mt-2 space-y-1">
         {STEPS.map((step, index) => {
           const lit = step.id === "distill" && distilled.length > 0;

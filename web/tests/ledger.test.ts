@@ -96,6 +96,39 @@ describe("the landscape", () => {
     }
   });
 
+  test("every landscape the New landscape button can reach keeps the same shape", () => {
+    // The button steps the seed through 1..999 ((seed % 999) + 1), well past the 120 seeds checked in detail above.
+    // Cheaper checks here, one expect per seed: six families of five or more connected cells, none touching another
+    // (8-neighbours), and three distinct wins, none touching a family.
+    for (let seed = 1; seed <= 999; seed++) {
+      const landscape = makeLandscape(seed);
+      const problems: string[] = [];
+      const touches = (cell: number, allowed: number) => {
+        const x = cellX(cell);
+        const y = cellY(cell);
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) continue;
+            const f = landscape.family[ny * COLS + nx] as number;
+            if (f >= 0 && f !== allowed) return true;
+          }
+        }
+        return false;
+      };
+      if (landscape.families.length !== FAMILY_NAMES.length) problems.push("family count");
+      for (const family of landscape.families) {
+        if (family.cells.length < 5) problems.push(`family ${family.name}: ${family.cells.length} cells`);
+        if (!connected(family.cells)) problems.push(`family ${family.name}: not contiguous`);
+        if (family.cells.some((cell) => touches(cell, family.id))) problems.push(`family ${family.name}: touches another`);
+      }
+      if (new Set(landscape.wins).size !== WIN_COUNT) problems.push("wins");
+      if (landscape.wins.some((win) => touches(win, -1))) problems.push("a win touches a family");
+      expect(`${seed}: ${problems.join(", ")}`).toBe(`${seed}: `);
+    }
+  });
+
   test("the families look more promising than the rest: that is what makes them traps", () => {
     for (const seed of SEEDS) {
       const landscape = makeLandscape(seed);
@@ -245,7 +278,11 @@ describe("what the caption says the toy shows", () => {
     expect(ee.pruned.size).toBe(FAMILY_NAMES.length);
   });
 
-  test("the grid is the size the figure draws", () => {
-    expect(CELL_COUNT).toBe(COLS * ROWS);
+  test("every per-cell array the figure indexes covers the whole grid", () => {
+    // Field draws COLS × ROWS cells and reads each one's appeal, family, win and snapshot state by index.
+    const landscape = makeLandscape(DEFAULT_SEED);
+    const snap = snapshot(landscape, runCampaign(landscape, "ee"), SESSIONS);
+    for (const values of [landscape.appeal, landscape.family, landscape.isWin, snap.cells]) expect(values).toHaveLength(COLS * ROWS);
+    for (const family of landscape.families) for (const cell of family.cells) expect(cell).toBeLessThan(COLS * ROWS);
   });
 });

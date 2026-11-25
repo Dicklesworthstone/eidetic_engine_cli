@@ -124,7 +124,7 @@ export function DecayCurves() {
   return (
     <DemoFrame
       eyebrow="Half-lives by kind"
-      title="Forgetting is a feature, on a schedule."
+      title="Age, confidence and utility decide when a memory is demoted or tombstoned."
       basis="rule"
       source={
         <>
@@ -258,7 +258,7 @@ export function DecayCurves() {
             value={fixed(product, 3)}
             note={
               product <= DEMOTE
-                ? "Already under the demote line at full freshness: evidence, not age, is what is missing."
+                ? "Confidence × utility is at most 0.05, so the memory sits on or under the demote line even when fresh."
                 : `Demote once freshness drops below ${fixed(demoteAt, 3)}; tombstone below ${fixed(Math.min(1, forgetAt), 3)}.`
             }
             tone="rule"
@@ -306,17 +306,17 @@ export function DecayCurves() {
 
       <div className="mt-5 grid grid-cols-1 gap-3 text-[13px] leading-relaxed text-slate-400 md:grid-cols-3">
         <p>
-          <span className="font-semibold text-slate-200">Use resets the clock.</span> Age runs from the latest of a memory&rsquo;s
-          creation, update and last access, so a memory that keeps being recalled does not fade.
+          <span className="font-semibold text-slate-200">Age.</span> Age runs from the latest of a memory&rsquo;s creation,
+          update and last access, so a memory that keeps being recalled stays fresh.
         </p>
         <p>
-          <span className="font-semibold text-slate-200">Demotion is a step, not a cliff.</span> A procedural memory steps down to
-          semantic and a semantic one to episodic, and its importance halves.
+          <span className="font-semibold text-slate-200">Demotion.</span> A demoted procedural memory moves down to semantic and
+          a semantic one to episodic, and its importance halves.
         </p>
         <p>
-          <span className="font-semibold text-slate-200">A tombstone is not a deletion.</span> The memory leaves retrieval with an
-          audit entry. A lesson remembered with <Cmd>--revive-when</Cmd> is listed by <Cmd>ee tripwire check --revivals</Cmd>{" "}
-          once its condition clears.
+          <span className="font-semibold text-slate-200">Tombstones.</span> A tombstoned memory leaves retrieval and gets an
+          audit entry; the record is kept. A lesson remembered with <Cmd>--revive-when</Cmd> is listed by{" "}
+          <Cmd>ee tripwire check --revivals</Cmd> once its condition clears.
         </p>
       </div>
     </DemoFrame>

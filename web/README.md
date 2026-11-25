@@ -40,7 +40,7 @@ the reader-driven hero strip from FrankenRobotics.
 campaigns, for agents, the graph and proof. Four things come from that list:
 - the header's chapter links (a bottom dock below 1024 px);
 - each chapter's index, and every section's number ("03.2");
-- each chapter's own page, `/<slug>/`, built by `app/[chapter]/page.tsx`;
+- each chapter's own page, `/<slug>`, built by `app/[chapter]/page.tsx`;
 - each chapter's share card words (`share`).
 
 So adding a section there is enough to number and link it. `components/chapters.tsx` holds every
@@ -115,11 +115,15 @@ its line and a rail of the eight chapters, next to a drawing of what the chapter
 
 next/og draws with Satori, not a browser. So the drawings in `lib/og-art.ts` are SVG strings embedded
 as images, which resvg draws in full, and their words are laid over them as text, because resvg has
-no fonts there. Two Satori rules bit here: a fragment held in a variable is dropped without an error,
-and a span's trailing space is trimmed.
+no fonts there. Three Satori rules bit here: a fragment held in a variable is dropped without an error,
+a span's trailing space is trimmed, and text clipped to a gradient (`backgroundClip: "text"`) is cut off
+at its box, which at line height 1 ends above a descender.
 
 To look at the cards without a full build, render them with a throwaway Bun script that calls
-`shareCard(1200, 630, id)` and writes the response's bytes to a PNG.
+`shareCard(1200, 630, id)` and writes the response's bytes to a PNG. Look at the 1200 × 600 cards too:
+a drawing laid out from the foot loses 30 pixels there. A script kept outside `web/` must import
+`shareCard` (or `next/og`) by its path under `web/`: a bare `next/og` there does not resolve to
+`web/node_modules`, and the render hung.
 
 ## The stylesheet and the fleet guard
 

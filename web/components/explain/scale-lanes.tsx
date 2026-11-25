@@ -43,23 +43,23 @@ export const RUNGS: readonly Rung[] = [
   {
     id: "one",
     short: "One agent",
-    title: "One agent, one workspace",
-    lead: "The store sits beside the work, in the repository's own .ee directory. One database holds the truth; everything else is derived from it.",
+    title: "One agent in one workspace",
+    lead: "The store lives in the repository's own .ee directory. It holds one database, and everything else in it is derived from that database.",
     facts: [
       {
-        text: "`.ee/ee.db` is a FrankenSQLite database, the source of truth. Its search index sits beside it in `.ee/index/`.",
+        text: "`.ee/ee.db` is a FrankenSQLite database and the source of truth. Its search index is stored next to it in `.ee/index/`.",
         source: "src/core/status.rs · src/config/workspace.rs",
       },
       {
-        text: "Indexes, embeddings, graph snapshots and caches are derived. Lose the index and `ee index rebuild` regenerates it from the database.",
+        text: "Indexes, embeddings, graph snapshots and caches are derived data. If the index is lost, `ee index rebuild` regenerates it from the database.",
         source: "README.md · Design Philosophy §6",
       },
       {
-        text: "Every core workflow is a one-shot command: no daemon, no network, no cloud.",
+        text: "Every core workflow runs as a one-shot command and needs no daemon, network or cloud.",
         source: "README.md · Design Philosophy §1, §3",
       },
       {
-        text: "Nothing changes silently. Every promotion, consolidation, replacement and tombstone writes an audit entry.",
+        text: "Every promotion, consolidation, replacement and tombstone writes an audit entry.",
         source: "README.md · Design Philosophy §9",
       },
     ],
@@ -72,8 +72,8 @@ export const RUNGS: readonly Rung[] = [
     readouts: [
       { label: "Agents", value: "1", note: "a one-shot CLI" },
       { label: "Writers at once", value: "1", note: "one write lock per store" },
-      { label: "Stores", value: "1", note: ".ee/ee.db, beside the work" },
-      { label: "Incoming trust class", value: "human_explicit", note: "a direct ee remember · 0.85", long: true },
+      { label: "Stores", value: "1", note: ".ee/ee.db, in the repository" },
+      { label: "Incoming trust class", value: "human_explicit", note: "a direct ee remember · the highest class", long: true },
     ],
     lanes: 1,
   },
@@ -81,10 +81,10 @@ export const RUNGS: readonly Rung[] = [
     id: "swarm",
     short: "A swarm",
     title: "A swarm on one repository",
-    lead: "Many agents share one store. Reads run side by side; writes still take turns, so a busy swarm routes them through a single owner.",
+    lead: "Many agents share one store. They can all read at once, but writes go one at a time, so a busy swarm sends them through a single write owner.",
     facts: [
       {
-        text: "FrankenSQLite is single-process MVCC in WAL mode. Any number of agents can read at once; each durable write takes the store's one write lock in turn.",
+        text: "FrankenSQLite is single-process MVCC in WAL mode. Many agents can read at once; each durable write takes the store's one write lock in turn.",
         source: "README.md · Limitations · docs/adr/0077-group-commit-write-intake.md",
       },
       {
@@ -92,7 +92,7 @@ export const RUNGS: readonly Rung[] = [
         source: "src/daemon/server.rs · src/core/write_owner.rs",
       },
       {
-        text: "`ee swarm brief` is the read-only coordination preflight for a crowded checkout; `ee swarm work-packet --claim-gate` must report safeToClaim before an agent takes work.",
+        text: "`ee swarm brief` is the read-only coordination preflight for a checkout shared by several agents; `ee swarm work-packet --claim-gate` must report safeToClaim before an agent takes work.",
         source: "README.md · Swarm brief workflow",
       },
       {
@@ -107,10 +107,10 @@ export const RUNGS: readonly Rung[] = [
       "ee diag contention --use-daemon --json",
     ],
     readouts: [
-      { label: "Agents", value: "many", note: "reading side by side" },
-      { label: "Writers at once", value: "1", note: "the write owner, or the lock in turn" },
+      { label: "Agents", value: "many", note: "all reading at once" },
+      { label: "Writers at once", value: "1", note: "the write owner, or the lock holder" },
       { label: "Stores", value: "1", note: "shared by the swarm" },
-      { label: "Incoming trust class", value: "unchanged", note: "the same rules as one agent" },
+      { label: "Incoming trust class", value: "unchanged", note: "the same rules as for one agent" },
     ],
     lanes: 1,
   },
@@ -118,22 +118,22 @@ export const RUNGS: readonly Rung[] = [
     id: "team",
     short: "A team",
     title: "A team",
-    lead: "Each person keeps their own store. Teammates' memories arrive over the mesh, become local rows that say who sent them, and rank below your own on overlap.",
+    lead: "Each person keeps their own store. Teammates' memories arrive over the mesh as local rows that name the sender, and they never overwrite your own rows.",
     facts: [
       {
-        text: "Built for trusted teams of 2 to 20 people. Twenty active members is a hard v1 bound, not a benchmark size.",
+        text: "Built for trusted teams of 2 to 20 people. Twenty active members is a hard limit that the v1 protocol enforces.",
         source: "README.md · Team confederation · docs/mesh/team_confederation_plan.md §1.2",
       },
       {
-        text: "There is no server. Members' ee nodes exchange Ed25519-signed events with each other over one TCP port on the tailnet.",
+        text: "Members' ee nodes exchange Ed25519-signed events directly over one TCP port on the tailnet. There is no server.",
         source: "docs/adr/0086-team-memory-confederation.md · TC-D1 · docs/team/trusted_vs_contractor.md",
       },
       {
-        text: "When a teammate's store marked a memory `human_explicit`, it lands here as `peer_human_attested` (confidence 0.75), with teamProvenance naming the member, project and time. `human_explicit` itself never crosses.",
+        text: "A memory marked `human_explicit` in a teammate's store arrives here as `peer_human_attested`, one class lower, with teamProvenance naming the member, project and time. The `human_explicit` class is never sent.",
         source: "src/mesh/team.rs · src/models/trust.rs · docs/trust-model.md",
       },
       {
-        text: "Metadata moves first. A body moves only after its owner confirms a share and the reader's fetch is granted.",
+        text: "Metadata is sent first. A memory's body is sent only after its owner confirms a share and the reader's fetch is granted.",
         source: "docs/team/quickstart.md · docs/team/trusted_vs_contractor.md",
       },
     ],
@@ -147,31 +147,36 @@ export const RUNGS: readonly Rung[] = [
     readouts: [
       { label: "Agents", value: "per person", note: "2–20 people, each with their own" },
       { label: "Writers at once", value: "1 per store", note: "teammates never write into yours" },
-      { label: "Stores", value: "1 per person", note: "nothing shared in the middle" },
-      { label: "Incoming trust class", value: "peer_human_attested", note: "0.75 · never human_explicit", long: true },
+      { label: "Stores", value: "1 per person", note: "no central store" },
+      {
+        label: "Incoming trust class",
+        value: "peer_human_attested",
+        note: "one below human_explicit, which is never sent",
+        long: true,
+      },
     ],
     lanes: 2,
   },
   {
     id: "everywhere",
     short: "Everywhere",
-    title: "Everywhere you work",
-    lead: "House rules follow you into every repository from one user-global store on your machine. Only evidence gets in, and a workspace can refuse the lane.",
+    title: "Across all your workspaces",
+    lead: "One user-global store on your machine supplies your house rules to every repository. Only human_explicit and agent_validated memories can be promoted into it, and a workspace can opt out.",
     facts: [
       {
-        text: "The user-global lane is its own store under your user data root, `~/.local/share/ee/global/`, with a workspace store's schema. It stays on this machine and never crosses the mesh.",
+        text: "The user-global lane is a separate store under your user data root, `~/.local/share/ee/global/`, with the same schema as a workspace store. It stays on this machine and is never sent over the mesh.",
         source: "docs/adr/0083-user-global-memory-store.md §1–2 · docs/trust-model.md",
       },
       {
-        text: "`ee memory promote-global` copies a memory in, with a link back to its origin. Only `human_explicit` and `agent_validated` memories qualify; anything else gets a typed exit-7 refusal.",
+        text: "`ee memory promote-global` copies a memory into the global store with a link back to its origin. Only `human_explicit` and `agent_validated` memories qualify; any other class gets a typed refusal with exit code 7.",
         source: "src/core/global_promotion.rs · PROMOTABLE_TRUST_CLASSES",
       },
       {
-        text: "Global rows compete in every pack, always labelled, inside a bounded share: 15% of the pack's token budget. House rules never crowd out the project.",
+        text: "Global rows compete in every pack and are always labelled. They can take at most 15% of the pack's token budget.",
         source: "src/core/global_store.rs · DEFAULT_GLOBAL_FAN_IN_BASIS_POINTS",
       },
       {
-        text: "A privileged workspace sets `participate = false` and neither reads nor feeds the lane; `include_global = false` only stops reading.",
+        text: "A privileged workspace sets `participate = false` to stop both reading from the lane and promoting into it; `include_global = false` stops only the reading.",
         source: "README.md · Memory lanes · docs/adr/0083-user-global-memory-store.md §5",
       },
     ],
@@ -187,7 +192,7 @@ export const RUNGS: readonly Rung[] = [
       {
         label: "Incoming trust class",
         value: "human_explicit · agent_validated",
-        note: "nothing else is promoted",
+        note: "the only classes promoted",
         long: true,
       },
     ],
@@ -603,7 +608,7 @@ function OneAgent({ W, H, wide, time, id }: SceneProps) {
         </text>
       </g>
       <text x={ee.x + 14} y={ee.y + ee.h - 14} fontSize={10.5} fill={SLATE}>
-        the store, beside the work
+        the store, in the repo
       </text>
 
       <Store x={db.x} y={db.y} w={db.w} h={db.h} colour={READ} glow={dbGlow} />
@@ -995,9 +1000,6 @@ function Team({ W, H, wide, time }: SceneProps) {
               </tspan>
             </text>
             <Tag x={panel.x + 12} y={31} text="peer_human_attested" colour={MESH} anchor="start" size={9} />
-            <text x={panel.x + 12 + 19 * 9 * 0.62 + 12 + 8} y={34.5} className="mono" fontSize={9.5} fill={SLATE}>
-              0.75
-            </text>
           </g>
         );
       })}
@@ -1007,15 +1009,15 @@ function Team({ W, H, wide, time }: SceneProps) {
             a local row, with teamProvenance
           </text>
           <text x={panel.x} y={panel.y + 12 + 3 * (chipH + 8) + 30} fontSize={11} fill={SLATE}>
-            ranks below your own on overlap
+            never overwrites yours
           </text>
           <text x={panel.x} y={panel.y + 12 + 3 * (chipH + 8) + 46} fontSize={11} fill={SLATE}>
-            human_explicit never crosses
+            human_explicit is never sent
           </text>
         </g>
       ) : (
         <text x={W / 2} y={H - 10} textAnchor="middle" fontSize={10.5} fill={SLATE}>
-          a local row · human_explicit never crosses
+          a local row · human_explicit is never sent
         </text>
       )}
     </g>
@@ -1027,6 +1029,10 @@ function Team({ W, H, wide, time }: SceneProps) {
 function Everywhere({ W, H, wide, time, animate }: SceneProps) {
   const global: Pt = wide ? { x: W / 2, y: 80 } : { x: W / 2, y: 74 };
   const ring = wide ? 48 : 40;
+  // The label columns either side of the gate. Wide, they stand off far enough that a refused candidate's pill,
+  // waiting at the gate below and to the left, clears "others are refused" even at the narrowest wide layout.
+  const leftX = global.x - ring - (wide ? 20 : 14);
+  const rightX = global.x + ring + (wide ? 20 : 14);
   const wsY = wide ? H - 78 : 296;
   const spots = WORKSPACES.map((workspace, i) => ({
     ...workspace,
@@ -1068,6 +1074,9 @@ function Everywhere({ W, H, wide, time, animate }: SceneProps) {
         spark,
         opacity,
         refused: !candidate.admitted && local >= 0.95 && local < 1.55,
+        // An admitted candidate drops its pill as the gate lights: carried into the store, the pill would lie over
+        // the gate's own labels on either side.
+        labelled: local < 0.9 || !candidate.admitted,
         right: (spark ?? gate).x <= W / 2 + 4,
         gateFlash: candidate.admitted ? pulse(local, 0.85, 1.25) : 0,
         globalGlow: candidate.admitted ? pulse(local, 1.25, 1.6) : 0,
@@ -1103,29 +1112,29 @@ function Everywhere({ W, H, wide, time, animate }: SceneProps) {
       <Store x={global.x} y={global.y} w={wide ? 50 : 42} h={wide ? 48 : 42} colour={GLOBAL_LANE} glow={globalGlow} />
 
       <g>
-        <text x={global.x - ring - 14} y={global.y - 12} textAnchor="end" className="mono" fontSize={wide ? 12 : 11} fontWeight={700} fill="#fff">
+        <text x={leftX} y={global.y - 12} textAnchor="end" className="mono" fontSize={wide ? 12 : 11} fontWeight={700} fill="#fff">
           global/
         </text>
-        <text x={global.x - ring - 14} y={global.y + 3} textAnchor="end" className={wide ? "mono" : undefined} fontSize={wide ? 10 : 10.5} fill={SLATE}>
+        <text x={leftX} y={global.y + 3} textAnchor="end" className={wide ? "mono" : undefined} fontSize={wide ? 10 : 10.5} fill={SLATE}>
           {wide ? "~/.local/share/ee/global" : "house rules"}
         </text>
-        <text x={global.x - ring - 14} y={global.y + 18} textAnchor="end" fontSize={10.5} fill={SLATE}>
-          {wide ? "this machine only · never the mesh" : "this machine"}
+        <text x={leftX} y={global.y + 18} textAnchor="end" fontSize={10.5} fill={SLATE}>
+          {wide ? "this machine only · off the mesh" : "this machine"}
         </text>
       </g>
       <g>
-        <text x={global.x + ring + 14} y={global.y - 14} className="mono" fontSize={wide ? 9.5 : 9} letterSpacing={1.4} style={{ fill: ACCENT }}>
+        <text x={rightX} y={global.y - 14} className="mono" fontSize={wide ? 9.5 : 9} letterSpacing={1.4} style={{ fill: ACCENT }}>
           EVIDENCE GATE
         </text>
-        <text x={global.x + ring + 14} y={global.y + 2} className="mono" fontSize={wide ? 10.5 : 9.5} fill="#fff">
+        <text x={rightX} y={global.y + 2} className="mono" fontSize={wide ? 10.5 : 9.5} fill="#fff">
           human_explicit
         </text>
-        <text x={global.x + ring + 14} y={global.y + 17} className="mono" fontSize={wide ? 10.5 : 9.5} fill="#fff">
+        <text x={rightX} y={global.y + 17} className="mono" fontSize={wide ? 10.5 : 9.5} fill="#fff">
           agent_validated
         </text>
         {wide ? (
-          <text x={global.x + ring + 14} y={global.y + 33} fontSize={10.5} fill={SLATE}>
-            nothing else gets in
+          <text x={rightX} y={global.y + 33} fontSize={10.5} fill={SLATE}>
+            others are refused
           </text>
         ) : null}
       </g>
@@ -1167,15 +1176,17 @@ function Everywhere({ W, H, wide, time, animate }: SceneProps) {
         promotion.spark ? (
           <g key={`promotion-${promotion.m}`}>
             <Spark at={promotion.spark} colour={promotion.candidate.admitted ? GLOBAL_LANE : SLATE} opacity={promotion.opacity} />
-            <Tag
-              x={promotion.spark.x + (promotion.right ? 10 : -10)}
-              y={promotion.spark.y}
-              text={promotion.candidate.trust}
-              colour={promotion.candidate.admitted ? GLOBAL_LANE : SLATE}
-              anchor={promotion.right ? "start" : "end"}
-              size={9}
-              opacity={promotion.opacity}
-            />
+            {promotion.labelled ? (
+              <Tag
+                x={promotion.spark.x + (promotion.right ? 10 : -10)}
+                y={promotion.spark.y}
+                text={promotion.candidate.trust}
+                colour={promotion.candidate.admitted ? GLOBAL_LANE : SLATE}
+                anchor={promotion.right ? "start" : "end"}
+                size={9}
+                opacity={promotion.opacity}
+              />
+            ) : null}
             {promotion.refused ? (
               <Tag
                 x={promotion.gate.x + (promotion.right ? 10 : -10)}
@@ -1211,10 +1222,10 @@ function Everywhere({ W, H, wide, time, animate }: SceneProps) {
 const STATIC_T = [0.62, 1.95, 4.3, 2.15] as const;
 
 const ARIA = [
-  "One agent beside a repository. In the repository's .ee directory sits ee.db, the FrankenSQLite source of truth, and a derived, rebuildable search index. The agent writes memories into the database with remember and outcome, and reads packs and search results back out.",
-  "A swarm of agents around one shared store. Every agent reads at once. Writes travel inward to a ring, the store's single writer, which either commits a whole batch in one transaction (through the daemon) or lets one write in at a time (one-shot CLI).",
-  "Four teammates, each with their own store and agents, linked peer to peer with no server in the middle. Signed events travel between them, and each arrival becomes a local row in your store with trust class peer_human_attested.",
-  "Your workspaces around one user-global store on this machine. Promotions travel up to an evidence gate around it: human_explicit and agent_validated memories pass, others are refused with exit 7. House rules flow back down into every workspace except payroll, which sets participate = false.",
+  "One agent working in a repository. The repository's .ee directory holds ee.db, the FrankenSQLite database that is the source of truth, and a search index derived from it that can be rebuilt. The agent writes memories into the database with remember and outcome, and reads packs and search results from it.",
+  "A swarm of agents around one shared store. All the agents read at the same time. Writes move inward to a ring that stands for the store's single writer. Through the daemon it commits a whole batch in one transaction; with the one-shot CLI it lets one write in at a time.",
+  "Four teammates, each with their own store and agents, linked peer to peer with no server. Signed events pass between them, and each one that reaches you becomes a local row in your store with trust class peer_human_attested.",
+  "Your workspaces around one user-global store on this machine. Promotions move up to the evidence gate around it: human_explicit and agent_validated memories pass, and others are refused with exit 7. House rules are read back into every workspace except payroll, which sets participate = false.",
 ] as const;
 
 /** A clock in seconds that advances only while `running`, at no more than 40 frames a second. */
@@ -1384,8 +1395,8 @@ function Lanes({ inPlay }: { inPlay: number }) {
         ) : null}
         {different ? (
           <li>
-            <span className="text-white">Same subject, different text:</span> both stay in the pack, flagged; rank never
-            settles it (<span className="font-mono text-[11px] text-amber-200/90">team_lane_conflict_deferred</span>,{" "}
+            <span className="text-white">Same subject, different text:</span> both stay in the pack, flagged, and ranking
+            does not choose between them (<span className="font-mono text-[11px] text-amber-200/90">team_lane_conflict_deferred</span>,{" "}
             <span className="font-mono text-[11px] text-amber-200/90">global_lane_conflict_deferred</span>).
           </li>
         ) : null}
@@ -1393,6 +1404,63 @@ function Lanes({ inPlay }: { inPlay: number }) {
     </div>
   );
 }
+
+/** One scale's card: what it adds, the sourced facts, and the commands that drive it. */
+function RungCard({ rung, at }: { rung: Rung; at: number }) {
+  return (
+    <>
+      <p className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <span className="font-mono text-[11px] text-[color:var(--chapter,#fb923c)] tabular-nums">
+          {String(at + 1).padStart(2, "0")} / {String(RUNGS.length).padStart(2, "0")}
+        </span>
+        <span className="text-lg font-extrabold tracking-[-0.02em] text-white">{rung.title}</span>
+      </p>
+      <p className="mt-2 text-[14.5px] leading-relaxed text-slate-300">{rung.lead}</p>
+      <ul className="mt-4 space-y-2.5">
+        {rung.facts.map((fact) => (
+          <li key={fact.text} className="flex gap-3 text-[13.5px] leading-relaxed text-slate-300">
+            <span aria-hidden="true" className="mt-[0.6em] h-1.5 w-1.5 shrink-0 rounded-full bg-[color:var(--chapter,#fb923c)]" />
+            <span className="min-w-0">
+              {rich(fact.text)}{" "}
+              <span className="font-mono text-[10.5px] [overflow-wrap:anywhere] text-slate-500">{fact.source}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+      <div className="mt-4 rounded-xl border border-white/[0.06] bg-black/30 px-3 py-2.5">
+        <p className="text-[9px] font-black tracking-[0.2em] text-slate-500 uppercase">Commands</p>
+        {/* One command per line, scrolling sideways on a phone rather than breaking inside a flag. */}
+        <pre className="mt-1.5 overflow-x-auto font-mono text-[11px] leading-relaxed whitespace-pre text-violet-100 sm:text-[12px]">
+          <code>{rung.commands.join("\n")}</code>
+        </pre>
+      </div>
+    </>
+  );
+}
+
+/** The line under the drawing: one per scale, and one for each of the swarm's two ways of writing. */
+const CAPTIONS: readonly { key: string; text: string }[] = [
+  {
+    key: "one",
+    text: "A write goes into the database, the index is derived from it, and a pack reads from both.",
+  },
+  {
+    key: "swarm-daemon",
+    text: "A real batch closes within a millisecond, or at 64 writes; the drawing runs far slower. Reads do not go through the ring.",
+  },
+  {
+    key: "swarm-oneshot",
+    text: "Without the daemon, each one-shot write takes the store's write lock and commits on its own.",
+  },
+  {
+    key: "team",
+    text: "Signed events pass from member to member. Each one that reaches you becomes a row in your own store, labelled with its sender.",
+  },
+  {
+    key: "everywhere",
+    text: "Promotions are checked at the evidence gate around the global store. House rules are read back into every workspace that joins the lane.",
+  },
+];
 
 const STEP_MS = 7000;
 const MODES = [
@@ -1445,21 +1513,14 @@ export function ScaleLadder() {
     return () => animation.cancel();
   }, [running, auto, rungId]);
 
-  const caption =
-    rung.id === "one"
-      ? "Slowed down. A write lands in the database, the index is derived from it, and a pack reads them back."
-      : rung.id === "swarm"
-        ? mode === "daemon"
-          ? "Slowed down: a real batch closes within a millisecond, or at 64 writes. Reads don't pass through the ring."
-          : "Slowed down. Without the daemon each one-shot write takes the store's write lock and commits on its own."
-        : rung.id === "team"
-          ? "Slowed down. Signed events travel member to member; each arrival becomes a row in your own store, labelled with who sent it."
-          : "Slowed down. Promotions meet the evidence gate around the global store; house rules flow back into every workspace that joins the lane.";
+  const caption = rung.id === "swarm" ? `swarm-${mode}` : rung.id;
+  // While the tour moves on by itself, a screen reader is not read each new scale; once the reader drives, it is.
+  const touring = running && auto;
 
   return (
     <DemoFrame
       eyebrow="Zoom out · four scales"
-      title="Same memory, every scale."
+      title="How ee's memory works at four scales."
       basis="diagram"
       source={
         <>
@@ -1473,14 +1534,15 @@ export function ScaleLadder() {
       <div ref={frame}>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="max-w-2xl text-[15px] leading-relaxed text-slate-300">
-            The same store, trust classes and rules, from one agent on one repository to every workspace you use. No
-            server at any scale, and no scope silently overrides another.
+            ee uses the same store, trust classes and rules for one agent on one repository and for every workspace you
+            use. No scale needs a server. Where lanes overlap, the precedence rules below apply.
           </p>
+          {/* The label says what a press does, so no aria-pressed as well: "Play, pressed" would read as playing. */}
           <DemoButton
             onClick={() => setAuto((on) => !on)}
-            pressed={!auto}
+            className={cn(!auto && "border-violet-400/60 text-violet-200")}
             disabled={reduced}
-            label={auto ? "Pause the zoom" : "Play the zoom"}
+            label={auto && !reduced ? "Pause the zoom" : "Play the zoom"}
           >
             {auto && !reduced ? <Pause className="h-3.5 w-3.5" aria-hidden="true" /> : <Play className="h-3.5 w-3.5" aria-hidden="true" />}
             {auto && !reduced ? "Pause" : "Play"}
@@ -1507,65 +1569,72 @@ export function ScaleLadder() {
           <Scene rung={index} width={width} running={running} reduced={reduced} mode={mode} />
         </div>
 
+        {/* Below the drawing, every scale's caption, readouts and card are laid out in one cell each and only the
+            current one shows, so each block is as tall as its tallest and the page never moves as the tour zooms out.
+            The swarm's write-mode switch keeps its place, unseen, on the other scales for the same reason. */}
         <div className="mt-3 flex min-h-9 flex-wrap items-center justify-between gap-x-4 gap-y-2">
-          <p className="max-w-2xl text-[12.5px] leading-relaxed text-slate-500">{caption}</p>
-          {rung.id === "swarm" ? (
-            <Segmented
-              label="How writes reach the store"
-              value={mode}
-              onChange={(next) => {
-                setAuto(false);
-                setMode(next);
-              }}
-              options={MODES}
-            />
-          ) : null}
+          <div className="grid max-w-2xl">
+            {CAPTIONS.map((entry) => (
+              <p
+                key={entry.key}
+                aria-hidden={entry.key === caption ? undefined : true}
+                className={cn("min-w-0 text-[12.5px] leading-relaxed text-slate-500 [grid-area:1/1]", entry.key !== caption && "invisible")}
+              >
+                {entry.text}
+              </p>
+            ))}
+          </div>
+          <Segmented
+            className={cn(rung.id !== "swarm" && "invisible")}
+            label="How writes reach the store"
+            value={mode}
+            onChange={(next) => {
+              setAuto(false);
+              setMode(next);
+            }}
+            options={MODES}
+          />
         </div>
 
-        <div className="mt-4 grid grid-cols-2 gap-2 lg:grid-cols-4">
-          {rung.readouts.map((item) => (
-            <Readout
-              key={item.label}
-              label={item.label}
-              value={
-                item.long ? (
-                  <span className="block text-[13px] leading-snug [overflow-wrap:anywhere] sm:text-[14px]">{item.value}</span>
-                ) : (
-                  item.value
-                )
-              }
-              note={item.note}
-            />
+        <div className="mt-4 grid">
+          {RUNGS.map((entry, at) => (
+            <div
+              key={entry.id}
+              aria-hidden={at === index ? undefined : true}
+              className={cn("grid min-w-0 grid-cols-2 gap-2 [grid-area:1/1] lg:grid-cols-4", at !== index && "invisible")}
+            >
+              {entry.readouts.map((item) => (
+                <Readout
+                  key={item.label}
+                  label={item.label}
+                  value={
+                    item.long ? (
+                      <span className="block text-[13px] leading-snug [overflow-wrap:anywhere] sm:text-[14px]">{item.value}</span>
+                    ) : (
+                      item.value
+                    )
+                  }
+                  note={item.note}
+                />
+              ))}
+            </div>
           ))}
         </div>
 
         <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)]">
-          <div className="min-w-0 rounded-2xl border border-white/[0.08] bg-black/25 p-4 sm:p-5" aria-live="polite">
-            <p className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-              <span className="font-mono text-[11px] text-[color:var(--chapter,#fb923c)] tabular-nums">
-                {String(index + 1).padStart(2, "0")} / {String(RUNGS.length).padStart(2, "0")}
-              </span>
-              <span className="text-lg font-extrabold tracking-[-0.02em] text-white">{rung.title}</span>
-            </p>
-            <p className="mt-2 text-[14.5px] leading-relaxed text-slate-300">{rung.lead}</p>
-            <ul className="mt-4 space-y-2.5">
-              {rung.facts.map((fact) => (
-                <li key={fact.text} className="flex gap-3 text-[13.5px] leading-relaxed text-slate-300">
-                  <span aria-hidden="true" className="mt-[0.6em] h-1.5 w-1.5 shrink-0 rounded-full bg-[color:var(--chapter,#fb923c)]" />
-                  <span className="min-w-0">
-                    {rich(fact.text)}{" "}
-                    <span className="font-mono text-[10.5px] [overflow-wrap:anywhere] text-slate-500">{fact.source}</span>
-                  </span>
-                </li>
-              ))}
-            </ul>
-            <div className="mt-4 rounded-xl border border-white/[0.06] bg-black/30 px-3 py-2.5">
-              <p className="text-[9px] font-black tracking-[0.2em] text-slate-500 uppercase">Commands</p>
-              {/* One command per line, scrolling sideways on a phone rather than breaking inside a flag. */}
-              <pre className="mt-1.5 overflow-x-auto font-mono text-[11px] leading-relaxed whitespace-pre text-violet-100 sm:text-[12px]">
-                <code>{rung.commands.join("\n")}</code>
-              </pre>
-            </div>
+          <div
+            className="grid min-w-0 rounded-2xl border border-white/[0.08] bg-black/25 p-4 sm:p-5"
+            aria-live={touring ? "off" : "polite"}
+          >
+            {RUNGS.map((entry, at) => (
+              <div
+                key={entry.id}
+                aria-hidden={at === index ? undefined : true}
+                className={cn("min-w-0 [grid-area:1/1]", at !== index && "invisible")}
+              >
+                <RungCard rung={entry} at={at} />
+              </div>
+            ))}
           </div>
           <Lanes inPlay={rung.lanes} />
         </div>

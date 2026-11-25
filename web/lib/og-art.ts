@@ -55,7 +55,9 @@ export function homeArt(w: number, h: number): Art {
     [0.3, 0.52],
     [0.68, 0.44],
   ];
-  const card = { x: w - 360, y: h - 268 };
+  // The pack card's top-left corner, where lib/og-card.tsx's PackCorner puts it (312 wide, 52 from the right,
+  // its top 312 above the foot), so every beam ends under the card rather than below it.
+  const card = { x: w - 364, y: h - 312 };
   let haze = "";
   let beams = "";
   let dots = "";
@@ -164,7 +166,8 @@ export function amnesiaArt(w: number, h: number): Art {
     `<linearGradient id="fileFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fb7185" stop-opacity="0.3"/><stop offset="1" stop-color="#fb7185" stop-opacity="0.02"/></linearGradient>` +
     `<linearGradient id="storeFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#67e8f9" stop-opacity="0.16"/><stop offset="1" stop-color="#67e8f9" stop-opacity="0"/></linearGradient>`;
   labels.push(
-    { x: x(trimAt) - 12, y: y(160) - 9, text: "80 lessons deleted", colour: "#fda4af", size: 13, mono: true, anchor: "end" },
+    // Above the store line, beside the cut's top: at the cut's middle the rising line runs through the words.
+    { x: x(trimAt) - 12, y: y(212) - 8, text: "80 lessons deleted", colour: "#fda4af", size: 13, mono: true, anchor: "end" },
     { x: left, y: bottom + 20, text: "week 1", colour: "#64748b", size: 13, mono: true },
     { x: right, y: bottom + 20, text: "week 26 · lessons", colour: "#64748b", size: 13, mono: true, anchor: "end" },
   );
@@ -408,7 +411,9 @@ export function campaignsArt(w: number, h: number): Art {
   const left = ox;
   const right = ox + cols * (cell + gap) - gap;
   const base = h - 104;
-  const height = 92;
+  // As tall as fits under the grid's caption: on the 600-high X card a full 92 puts "procedural rules" on it.
+  const caption = oy + rows * (cell + gap) + 4;
+  const height = Math.min(92, base - caption - 18 - 26 - 8);
   const steps = [0, 0, 1, 1, 1, 2, 2, 3, 3, 3, 4, 5, 5, 5, 6, 6, 7, 7, 7, 8, 8, 8, 9, 9, 10, 10];
   let stair = "";
   steps.forEach((value, week) => {
@@ -428,7 +433,7 @@ export function campaignsArt(w: number, h: number): Art {
     labels: [
       { x: ox, y: oy - 32, text: "THE SEARCH SPACE · 26 WEEKS", colour: "#94a3b8", size: 13, mono: true },
       { x: wx + cell / 2, y: wy + cell + 8, text: "found", colour: "#d9f99d", size: 14, mono: true, anchor: "middle" },
-      { x: ox, y: oy + rows * (cell + gap) + 4, text: "hatched: a family of dead ends, pruned by one anti-pattern", colour: "#fdba74", size: 13, mono: true },
+      { x: ox, y: caption, text: "hatched: a family of dead ends, pruned by one anti-pattern", colour: "#fdba74", size: 13, mono: true },
       { x: right, y: base - height - 26, text: "procedural rules", colour: "#fdba74", size: 14, mono: true, anchor: "end" },
       { x: left + 4, y: base - height * 0.32 - 24, text: "pack size: flat", colour: "#c4b5fd", size: 14, mono: true },
       { x: left, y: base + 10, text: "week 1", colour: "#64748b", size: 13, mono: true },

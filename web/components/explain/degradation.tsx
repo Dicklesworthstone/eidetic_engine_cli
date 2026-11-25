@@ -87,7 +87,7 @@ const CAPABILITIES: readonly { name: string; judge: (off: Off) => { state: State
     name: "Semantic similarity",
     judge: (off) =>
       off.model
-        ? { state: "off", note: "lexical search carries the query" }
+        ? { state: "off", note: "lexical search answers the query" }
         : off.index
           ? { state: "off", note: "lexical fallback until the rebuild" }
           : { state: "ok", note: off.network ? "from the cached model" : "local Model2Vec" },
@@ -114,18 +114,18 @@ const CAPABILITIES: readonly { name: string; judge: (off: Off) => { state: State
   {
     name: "Session evidence import",
     judge: (off) =>
-      off.cass ? { state: "off", note: "explicit ee remember still captures" } : { state: "ok", note: "ee import cass" },
+      off.cass ? { state: "off", note: "ee remember still works" } : { state: "ok", note: "ee import cass" },
   },
   {
     name: "Context packs · ee pack",
     judge: (off) =>
       off.model || off.index || off.graph || off.reranker
-        ? { state: "degraded", note: "built from what remains, and says so" }
+        ? { state: "degraded", note: "built from the parts left, with degraded entries" }
         : { state: "ok", note: "every section, every arm" },
   },
   {
     name: "Provenance and the JSON contract",
-    judge: () => ({ state: "ok", note: "every response, always" }),
+    judge: () => ({ state: "ok", note: "on every response" }),
   },
 ];
 
@@ -151,7 +151,7 @@ export function DegradationBoard() {
   return (
     <DemoFrame
       eyebrow="Graceful degradation"
-      title="Pull a plug. Read what ee says."
+      title="What still works when a part is missing."
       basis="record"
       source={
         <>
@@ -215,7 +215,7 @@ export function DegradationBoard() {
           })}
           <div className="flex flex-wrap gap-2 pt-2">
             <DemoButton onClick={() => setOff(ALL)} disabled={pulled === PARTS.length}>
-              <PlugZap className="h-3.5 w-3.5" /> Pull every plug
+              <PlugZap className="h-3.5 w-3.5" /> Remove all
             </DemoButton>
             <DemoButton onClick={() => setOff(NONE)} disabled={pulled === 0}>
               <Plug className="h-3.5 w-3.5" /> Restore all
@@ -278,14 +278,14 @@ export function DegradationBoard() {
 
           <div className="grid grid-cols-1 gap-3 text-[13px] leading-relaxed text-slate-400 md:grid-cols-2">
             <p>
-              <span className="font-semibold text-slate-200">Offline is not a failure.</span> With the model cached, going offline
-              changes nothing. A machine that has never fetched it falls back to deterministic hash embeddings and says so with{" "}
-              <Cmd>embed_model_unavailable</Cmd>.
+              <span className="font-semibold text-slate-200">Working offline.</span> With the model cached, going offline
+              changes nothing. A machine that has never downloaded the model falls back to deterministic hash embeddings and
+              reports <Cmd>embed_model_unavailable</Cmd>.
             </p>
             <p>
-              <span className="font-semibold text-slate-200">A stale index is not a dead end.</span> When a read-only request&rsquo;s
-              whole corpus fits 4,096 rows and 16 MiB, ee searches a complete in-memory snapshot instead and reports{" "}
-              <Cmd>search_live_snapshot_lexical</Cmd>.
+              <span className="font-semibold text-slate-200">Stale index.</span> When a read-only request&rsquo;s whole
+              corpus fits within 4,096 rows and 16 MiB, ee searches a complete in-memory snapshot instead of the index and
+              reports <Cmd>search_live_snapshot_lexical</Cmd>.
             </p>
           </div>
         </div>

@@ -202,6 +202,73 @@ describe("the contract the records follow", () => {
     }
   });
 
+  test("the next-action rule is repair_command_preflight_policy, for every class and both flags", () => {
+    // The fixtures below pin only five of the rule's branches, so read the Rust match itself.
+    const guard = read("src/core/preflight_guard.rs");
+    /** `Self::Variant => "wire_name",` pairs in the first impl block after `anchor`. */
+    const wireNames = (text: string, anchor: string) => {
+      const from = text.indexOf(anchor);
+      expect(from).toBeGreaterThanOrEqual(0);
+      const block = text.slice(from, text.indexOf("\n}\n", text.indexOf("fn as_str", from)));
+      return new Map([...block.matchAll(/Self::(\w+) => "([a-z_]+)",/g)].map((match) => [match[1] ?? "", match[2] ?? ""]));
+    };
+    const actionName = wireNames(guard, "impl RepairCommandNextAction {");
+    const className = wireNames(models, "pub enum RepairActionRiskClass {");
+    expect(actionName.size).toBe(5);
+    expect(className.size).toBe(RISK_CLASSES.length);
+    const start = guard.indexOf("fn repair_command_preflight_policy(");
+    const body = guard.slice(start, guard.indexOf("\n}\n", start));
+    const arms = [...body.matchAll(/RepairActionRiskClass::(\w+) => \(([\s\S]*?)"repair_safety:/g)];
+    expect(arms.length).toBe(RISK_CLASSES.length);
+    let checked = 0;
+    for (const [, variant, arm] of arms) {
+      const riskClass = className.get(variant ?? "") as RiskClass | undefined;
+      expect(riskClass).toBeDefined();
+      // An arm is one action, or `if a { X } else if b { Y } else { Z }` over the two flags.
+      const branches = [...(arm ?? "").matchAll(/(?:if (\w+) \{|else \{)\s*RepairCommandNextAction::(\w+)/g)];
+      const only = /^\s*RepairCommandNextAction::(\w+),/.exec(arm ?? "")?.[1];
+      for (const hasPreflight of [false, true]) {
+        for (const requiresHumanApproval of [false, true]) {
+          const flags: Record<string, boolean> = {
+            has_preflight_command: hasPreflight,
+            requires_human_approval: requiresHumanApproval,
+          };
+          for (const [, condition] of branches) {
+            if (condition !== undefined && !(condition in flags)) throw new Error(`${variant}: unknown condition ${condition}`);
+          }
+          const taken = only ?? branches.find(([, condition]) => condition === undefined || flags[condition])?.[2];
+          const expected = actionName.get(taken ?? "");
+          expect(expected).toBeDefined();
+          expect(nextAction(riskClass as RiskClass, hasPreflight, requiresHumanApproval)).toBe(
+            expected as ReturnType<typeof nextAction>,
+          );
+          checked += 1;
+        }
+      }
+    }
+    expect(checked).toBe(RISK_CLASSES.length * 4);
+  });
+
+  test("the rule table's words name every action the rule can reach for each class", () => {
+    const WORDS: Record<ReturnType<typeof nextAction>, string> = {
+      run_directly: "run it",
+      run_preflight_first: "preflight",
+      coordinate_first: "coordinate",
+      ask_human: "ask",
+      manual_only: "manual",
+    };
+    for (const row of RULE_ROWS) {
+      const reached = new Set(
+        [false, true].flatMap((preflight) => [false, true].map((approval) => nextAction(row.riskClass, preflight, approval))),
+      );
+      for (const [action, word] of Object.entries(WORDS)) {
+        expect(`${row.riskClass}: ${row.leads.includes(word)}`).toBe(
+          `${row.riskClass}: ${reached.has(action as ReturnType<typeof nextAction>)}`,
+        );
+      }
+    }
+  });
+
   test("the next-action rule reproduces every classification the fixtures pin", () => {
     const guard = read("src/core/preflight_guard.rs");
     expect(guard).toContain("fn repair_command_preflight_policy(");

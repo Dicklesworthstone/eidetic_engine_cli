@@ -303,13 +303,13 @@ const LENSES: Record<
     label: "PageRank",
     question: "Which memories does everything else lean on?",
     commands: ["ee graph pagerank --limit 10", "ee graph centrality --algorithm pagerank"],
-    note: "Rank flows along leaning links and pools in the facts and incidents the rules were built from. Here a contradiction carries no rank.",
+    note: "Rank flows from each memory to the memories it leans on, so it collects in the facts and incidents the rules were built from. In this toy a contradicts link passes no rank.",
     metric: (i) => at(SCORES.rank, i),
     show: (i) => fixed(at(SCORES.rank, i), 3),
   },
   hits: {
     label: "HITS",
-    question: "Which memories gather the rest, and which are the ones gathered?",
+    question: "Which memories are hubs that lean on many others, and which are the authorities they lean on?",
     commands: ["ee graph hits --limit 10"],
     note: "Size is authority; the outer ring is hub score. The grounding and orientation context profiles can boost authorities and hubs when graph profile scores are available.",
     metric: (i) => at(SCORES.authority, i),
@@ -317,9 +317,9 @@ const LENSES: Record<
   },
   bridges: {
     label: "Bridges",
-    question: "Which memories tie two topics together, and which would cut the graph in two?",
+    question: "Which memories connect two topics, and which would split the graph if removed?",
     commands: ["ee graph betweenness --limit 10", "ee graph articulation", "ee insights --section bridges --json"],
-    note: "Size is betweenness; a dashed ring marks an articulation point. Look before you curate one away. ee proximity explains a pair's Gomory-Hu min cut.",
+    note: "Size is betweenness; a dashed ring marks an articulation point, and removing one in curation disconnects part of the graph. ee proximity explains a pair's Gomory-Hu min cut.",
     metric: (i) => at(SCORES.between, i),
     show: (i) => fixed(at(SCORES.between, i), 3),
   },
@@ -327,15 +327,15 @@ const LENSES: Record<
     label: "Communities",
     question: "Which memories form one topic?",
     commands: ["ee graph communities", "ee graph louvain"],
-    note: "Synchronous label propagation, ties broken to the smallest label, so the same graph always splits the same way. Pack DNA reports which community a pack's weight sits in.",
+    note: "Computed here by synchronous label propagation with ties broken to the smallest label, so the same graph always splits the same way. Pack DNA reports which community a pack's weight sits in.",
     metric: (i) => (undirected[i] as number[]).length,
     show: (i) => `community ${at(SCORES.community, i) + 1}`,
   },
   core: {
     label: "k-core",
-    question: "What is the dense centre, and what hangs off the edge?",
+    question: "Which memories form the densely linked core, and which sit on the periphery?",
     commands: ["ee graph k-core", "ee insights --section knowledgeSkyline --json"],
-    note: "Peel away every memory with fewer than k links until none is left: what survives longest is the core. Onion layers like these feed the knowledge skyline.",
+    note: "Remove every memory with fewer than k links, raise k and repeat; the memories removed last form the core. The knowledge skyline uses onion layers like these.",
     metric: (i) => at(SCORES.core, i),
     show: (i) => `${at(SCORES.core, i)}-core`,
   },
@@ -439,7 +439,7 @@ export function GraphLens() {
   return (
     <DemoFrame
       eyebrow="FrankenNetworkX · graph analytics over memory links"
-      title="One memory graph, five lenses."
+      title={`Five lenses on a toy graph of ${N} memories.`}
       basis="toy"
       source={
         <>
@@ -643,11 +643,11 @@ export function GraphLens() {
       </div>
 
       <p className="mt-6 rounded-xl border border-white/[0.07] bg-black/20 px-4 py-3 text-[13px] leading-relaxed text-slate-400">
-        <span className="font-semibold text-slate-200">Where this stands.</span> Each lens is a command you run on demand
+        <span className="font-semibold text-slate-200">Current status.</span> Each lens is a command you run on demand
         over your own store. The graph features that would change ranking or pack explanations (Pack DNA, proximity, HITS
-        profiles, the skyline, structural decay) ship switched off under{" "}
+        profiles, the skyline, structural decay) are off by default under{" "}
         <span className="font-mono text-[12px] text-slate-300">graph.feature.*</span>. Personalized PageRank is not
-        available in production: asking for it reports{" "}
+        available in production: a request for it reports{" "}
         <span className="font-mono text-[12px] text-slate-300">graph_ppr_upstream_unavailable</span> and falls back to
         textual ranking.
       </p>

@@ -192,6 +192,8 @@ const byScore = (task: TaskId) => (a: Lesson, b: Lesson) => b.score[task] - a.sc
 interface NotesWeek {
   ids: number[];
   lost: number;
+  /** Whether the file was trimmed this week, whether or not the trim cost a true lesson. */
+  trimmed: boolean;
 }
 
 /**
@@ -205,7 +207,8 @@ function notesHistory(): NotesWeek[] {
   let lost = 0;
   for (let week = 1; week <= WEEKS; week++) {
     file = [...file, ...LESSONS.filter((lesson) => lesson.week === week).map((lesson) => lesson.id)];
-    if (file.length > NOTES_TRIM_AT) {
+    const trimmed = file.length > NOTES_TRIM_AT;
+    if (trimmed) {
       const before = new Set(file.map(lessonAt).filter((lesson) => lesson.staleWeek > week).map((lesson) => lesson.fact));
       const seen = new Set<number>();
       const kept = file.filter((id) => {
@@ -218,7 +221,7 @@ function notesHistory(): NotesWeek[] {
       const after = new Set(file.map((id) => lessonAt(id).fact));
       for (const fact of before) if (!after.has(fact)) lost += 1;
     }
-    history.push({ ids: file, lost });
+    history.push({ ids: file, lost, trimmed });
   }
   return history;
 }
@@ -226,9 +229,7 @@ function notesHistory(): NotesWeek[] {
 const NOTES = notesHistory();
 
 /** The weeks in which the notes file was trimmed. */
-export const TRIM_WEEKS: readonly number[] = NOTES.flatMap((entry, index) =>
-  index > 0 && entry.lost > (NOTES[index - 1] as NotesWeek).lost ? [index + 1] : [],
-);
+export const TRIM_WEEKS: readonly number[] = NOTES.flatMap((entry, index) => (entry.trimmed ? [index + 1] : []));
 
 /** Facts about the task, written by `week` and still true. */
 function trueFacts(week: number, task: TaskId): Set<number> {

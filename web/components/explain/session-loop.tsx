@@ -211,11 +211,8 @@ export function SessionLoop() {
       <DemoButton onClick={() => go(active - 1, true)} label="Previous station" className="px-2.5">
         <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
       </DemoButton>
-      <DemoButton
-        onClick={() => setChoice(!playing)}
-        pressed={playing}
-        label={playing ? "Pause the session" : "Play the session"}
-      >
+      {/* No aria-pressed: the label already names the state's opposite, and both would read "Pause, pressed". */}
+      <DemoButton onClick={() => setChoice(!playing)} label={playing ? "Pause the session" : "Play the session"}>
         {playing ? <Pause className="h-3.5 w-3.5" aria-hidden="true" /> : <Play className="h-3.5 w-3.5" aria-hidden="true" />}
         {playing ? "Pause" : "Play"}
       </DemoButton>
@@ -230,8 +227,8 @@ export function SessionLoop() {
 
   return (
     <DemoFrame
-      eyebrow="For agents · one session, station by station"
-      title="Every session starts where the last one stopped."
+      eyebrow="For agents · one session, command by command"
+      title="The ee commands in one agent session."
       basis="diagram"
       source={
         <>
@@ -241,16 +238,17 @@ export function SessionLoop() {
           src/core/resume.rs · src/core/preflight_guard.rs · src/core/outcome.rs (DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR 5)
           · src/core/handoff.rs · src/output/mod.rs (build_pack_skipped_item, render_handoff_create_json) · docs/schemas
           · ee.response.v2, ee.resume.v1, ee.orient.v1, ee.pack.v2, ee.recall.v1, ee.preflight.guard.v1. Field names
-          are spelled as those files spell them; values are illustrative, and … marks a cut.
+          are spelled as those files spell them; each excerpt is a selection of fields, values are illustrative, and …
+          marks a cut.
           web/tests/session-loop.test.ts checks every key against the files each station cites.
         </>
       }
     >
       <div ref={ref} className="min-w-0" onFocus={onFocusIn} onBlur={onFocusOut}>
         <p className="max-w-3xl text-[15px] leading-relaxed text-slate-300">
-          Nine stops. Five only read, three write, and one is the harness&apos;s own work. Every response is JSON with
-          a stable shape, so the agent reads named paths instead of scraping prose. Pick a station, or let the session
-          run.
+          The session has nine stations: five only read from ee, three write to it, and one is the harness&apos;s own
+          work with no ee call. Every ee response is JSON with a versioned schema, so the agent can read fields by name.
+          Pick a station to see its command and response, or press Play to step through them.
         </p>
 
         {mode === "stack" ? (
@@ -719,6 +717,15 @@ function Stepper({
   controls: ReactNode;
   onSelect: (index: number) => void;
 }) {
+  const heads = useRef<(HTMLButtonElement | null)[]>([]);
+  // Opening a station closes the one above it, which can lift the tapped row off the top of the screen
+  // (Safari keeps no scroll anchor). Once the list has re-rendered, bring that row back into view.
+  const pick = (index: number) => {
+    onSelect(index);
+    window.requestAnimationFrame(() =>
+      heads.current[index]?.scrollIntoView({ block: "nearest", behavior: animate ? "smooth" : "auto" }),
+    );
+  };
   return (
     <div className="mt-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -768,10 +775,15 @@ function Stepper({
               </div>
               <div className="min-w-0 pb-4">
                 <button
+                  ref={(element) => {
+                    heads.current[index] = element;
+                  }}
                   type="button"
                   aria-expanded={on}
+                  // One station is always open, so the open one's header cannot close it.
+                  aria-disabled={on || undefined}
                   aria-controls={`${uid}-step-${index}`}
-                  onClick={() => onSelect(index)}
+                  onClick={() => pick(index)}
                   className="flex w-full flex-col items-start rounded-lg px-1 pt-2.5 text-left focus-visible:ring-2 focus-visible:ring-violet-400 focus-visible:outline-none"
                 >
                   <span className="flex w-full flex-wrap items-baseline gap-x-2 gap-y-0.5">
@@ -806,12 +818,12 @@ function Stepper({
           </div>
           <button
             type="button"
-            onClick={() => onSelect(0)}
+            onClick={() => pick(0)}
             className="rounded-lg px-1 pt-2.5 text-left text-[13.5px] leading-snug text-slate-400 focus-visible:ring-2 focus-visible:ring-violet-400 focus-visible:outline-none"
           >
             <span className="font-mono text-[10.5px] tracking-[0.16em] text-slate-500 uppercase">Next session</span>
             <span className="block">
-              Back to <span className="font-mono text-slate-200">ee resume</span>, with one more session to find.
+              Back to <span className="font-mono text-slate-200">ee resume</span> for the next session.
             </span>
           </button>
         </li>
@@ -899,7 +911,7 @@ function StationDetail({
         <dd className="mt-1 text-[13.5px] leading-relaxed text-slate-300">{station.returns}</dd>
       </div>
       <div className="border-l-2 pl-3" style={{ borderColor: tint }}>
-        <dt className={LABEL}>Shaped for an agent</dt>
+        <dt className={LABEL}>Why it works this way</dt>
         <dd className="mt-1 text-[13.5px] leading-relaxed text-slate-200">{station.because}</dd>
       </div>
     </dl>
@@ -1006,12 +1018,17 @@ const COMMAND_CLASS: Record<CommandToken["kind"], string> = {
 };
 
 function CommandLine({ command }: { command: string }) {
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState(0);
+  // Each copy restarts the check mark's time; the timer goes with the component.
+  useEffect(() => {
+    if (copied === 0) return;
+    const timer = window.setTimeout(() => setCopied(0), 1600);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(command);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
+      setCopied((count) => count + 1);
     } catch {
       // No clipboard (an insecure context, say): the command is still there to select.
     }
@@ -1110,8 +1127,8 @@ function JsonExcerpt({
       className="mt-1.5 flex items-center justify-center rounded-xl border border-dashed border-white/[0.12] px-5 py-6 text-center text-[13px] leading-relaxed text-slate-400"
       style={{ minHeight }}
     >
-      No ee response here. The work runs on the harness&apos;s tools; ee is called again when there is something worth
-      keeping.
+      No ee response at this step. The harness does the work with its own tools and calls ee again when there is
+      something to record.
     </div>
   );
 

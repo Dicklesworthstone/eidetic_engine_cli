@@ -78,7 +78,7 @@ export function nextAction(riskClass: RiskClass, hasPreflight: boolean, requires
 export const RULE_ROWS: readonly { riskClass: RiskClass; leads: string }[] = [
   { riskClass: "read_only_probe", leads: "run it" },
   { riskClass: "idempotent_refresh", leads: "run it · preflight if given · ask if approval" },
-  { riskClass: "mutating_local_repair", leads: "preflight first if given · ask if approval" },
+  { riskClass: "mutating_local_repair", leads: "run it · preflight if given · ask if approval" },
   { riskClass: "mutating_external_coordination_repair", leads: "coordinate first · ask if approval" },
   { riskClass: "approval_required_repair", leads: "ask a human" },
   { riskClass: "destructive_or_irreversible_repair", leads: "ask a human" },
@@ -96,7 +96,7 @@ export const VERDICT: Record<Verdict, { label: string; tone: string }> = {
   recheck: { label: "Re-check the path", tone: "border-sky-400/45 bg-sky-400/15 text-sky-100" },
   preflight: { label: "Preflight, then migrate", tone: "border-amber-400/45 bg-amber-400/15 text-amber-100" },
   adjust: { label: "Raise the budget, re-run", tone: "border-cyan-400/45 bg-cyan-400/15 text-cyan-100" },
-  proceed: { label: "Proceed — degraded, and say so", tone: "border-amber-400/45 bg-amber-400/15 text-amber-100" },
+  proceed: { label: "Proceed, and report the degradation", tone: "border-amber-400/45 bg-amber-400/15 text-amber-100" },
   fresh: { label: "Start a fresh page sequence", tone: "border-violet-400/45 bg-violet-400/15 text-violet-100" },
   ask: { label: "Ask a human", tone: "border-rose-400/45 bg-rose-400/15 text-rose-100" },
 };
@@ -149,7 +149,7 @@ export const SITUATIONS: readonly Situation[] = [
     typical: {
       lines: ["Error: search index is out of date.", "Please rebuild the index and try again."],
       exit: 1,
-      missing: "Rebuild with what? Is it safe to run unattended? The prose cannot say.",
+      missing: "The message names no command and does not say whether a rebuild is safe to run unattended.",
     },
     record: {
       schema: "ee.error.v2",
@@ -200,11 +200,11 @@ export const SITUATIONS: readonly Situation[] = [
     evidence: ["error/message"],
     expectNext: "run_directly",
     reading: {
-      envelope: "A failure. Read the error object, not a sentence.",
-      broke: "The index is derived from the database, and three generations behind it (9 against 12). Medium: nothing is lost.",
-      plan: "Priority 1 rebuilds; priority 2 only inspects. The structured command is more exact than the prose repair.",
-      safety: "An idempotent refresh, no approval, no preflight. It is the one class an agent may retry on its own.",
-      act: { commands: ["ee index rebuild --workspace ."], note: "then the command that failed, unchanged" },
+      envelope: "schema is ee.error.v2, so the command failed and the details are in the error object.",
+      broke: "The index is built from the database and is three generations behind it (9 against 12). Severity is medium; no data is lost.",
+      plan: "Priority 1 rebuilds the index and priority 2 only inspects it. The structured command adds --workspace ., which the repair string leaves out.",
+      safety: "An idempotent refresh with no approval and no preflight command. ee's rule says to run it directly, and a second run does no harm.",
+      act: { commands: ["ee index rebuild --workspace ."], note: "then re-run the command that failed, unchanged" },
       recheck: "Exit 0, and no index code left in degraded[].",
     },
     verdict: "retry",
@@ -218,7 +218,7 @@ export const SITUATIONS: readonly Situation[] = [
     typical: {
       lines: ["Error: database not found.", "Run `init` to create one."],
       exit: 1,
-      missing: "The reflex it invites plants a new, empty store at what may be a typo.",
+      missing: "Following that advice creates a new, empty store at a path that may be a typo.",
     },
     record: {
       schema: "ee.error.v2",
@@ -295,28 +295,28 @@ export const SITUATIONS: readonly Situation[] = [
     evidence: ["error/details/storeDiscovery"],
     expectNext: "run_directly",
     reading: {
-      envelope: "A failure. Read the error object, not a sentence.",
-      broke: "Exit 10 is an addressing miss, kept apart from a storage failure (exit 3). Discovery was complete: no populated store nearby.",
-      plan: "Re-check the address first, the database override second. ee init comes last, and only for a store you meant to create.",
-      safety: "A read-only probe: a flag to re-check, not a command that changes anything.",
+      envelope: "schema is ee.error.v2, so the command failed and the details are in the error object.",
+      broke: "Exit 10 means the addressed workspace has no store; a storage failure would be exit 3. Discovery completed and found no populated store nearby.",
+      plan: "Re-check the workspace path first and the database override second. ee init is last, and only for a store you meant to create.",
+      safety: "A read-only probe. The entry is a flag to re-check and carries no command.",
       act: {
         commands: ["--workspace /workspace/missing"],
         note: "compare it with the workspace the task names, and re-run with the right one",
       },
-      recheck: "Exit 0 from the intended store. No ee init unless this path was meant to be new.",
+      recheck: "Exit 0 from the intended store, with no ee init unless this path was meant to hold a new store.",
     },
     verdict: "recheck",
   },
   {
     id: "migration",
-    label: "Migration owed",
+    label: "Migration required",
     short: "Migration",
     exit: 8,
     invocation: null,
     typical: {
       lines: ["Error: unsupported database version."],
       exit: 1,
-      missing: "Upgrade with what, and is it reversible? Nothing says.",
+      missing: "The message names no upgrade command and does not say whether the upgrade can be undone.",
     },
     record: {
       schema: "ee.error.v2",
@@ -357,15 +357,15 @@ export const SITUATIONS: readonly Situation[] = [
     evidence: ["error/message"],
     expectNext: "run_preflight_first",
     reading: {
-      envelope: "A failure. Read the error object, not a sentence.",
-      broke: "The store is two schema versions behind this binary. Medium: the data is intact, but this command cannot run on it.",
-      plan: "One action: apply the outstanding migrations.",
+      envelope: "schema is ee.error.v2, so the command failed and the details are in the error object.",
+      broke: "The store's schema is two versions behind this binary (5 against 7). Severity is medium; the data is intact, but this command cannot run on it.",
+      plan: "The plan has one entry: apply the outstanding migrations.",
       safety: "It changes durable local state, so ee attaches a preflight command. No human approval is required.",
       act: {
         commands: ["ee preflight check --cmd 'ee migrate run' --workspace . --json", "ee migrate run"],
         note: "the preflight reports risk and never blocks",
       },
-      recheck: "Re-run the command that failed: exit 0.",
+      recheck: "Re-run the command that failed and expect exit 0.",
     },
     verdict: "preflight",
   },
@@ -378,7 +378,7 @@ export const SITUATIONS: readonly Situation[] = [
     typical: {
       lines: [],
       exit: 0,
-      missing: "An empty answer reads as “nothing relevant”. It was a budget problem.",
+      missing: "The empty answer looks like nothing matched, when the budget was too small to fit anything.",
     },
     record: {
       schema: "ee.response.v2",
@@ -453,10 +453,10 @@ export const SITUATIONS: readonly Situation[] = [
     evidence: ["degraded/0/message"],
     expectNext: "run_directly",
     reading: {
-      envelope: "It succeeded, so the next read is degraded[], not the result.",
-      broke: "The pack is empty: there were candidates, and none fit one token. A warning, not an error.",
-      plan: "Raise the budget first, then a leaner profile, then a broader query.",
-      safety: "A flag, not a command: the agent re-runs its own read with a bigger budget.",
+      envelope: "success is true, so the agent reads degraded[] before it uses the result.",
+      broke: "The pack is empty because none of the candidates fit in a one-token budget. Severity is warning.",
+      plan: "Raise the budget first, then switch to the compact profile, then broaden the query.",
+      safety: "The entry is a flag with no command. The agent re-runs its own read with a larger budget.",
       act: { commands: ["ee pack 'release ritual' --workspace . --max-tokens 8000 --json"], note: "priority 1's flag and value" },
       recheck: "pack.items is no longer empty, and pack_budget_too_small is gone from degraded[].",
     },
@@ -471,7 +471,7 @@ export const SITUATIONS: readonly Situation[] = [
     typical: {
       lines: ["Found 3 results."],
       exit: 0,
-      missing: "Nothing says semantic search was off, so nobody knows the ranking is keyword-only.",
+      missing: "The output does not say that semantic search was off, so the reader cannot tell the ranking is keyword-only.",
     },
     record: {
       schema: "ee.response.v2",
@@ -533,13 +533,13 @@ export const SITUATIONS: readonly Situation[] = [
     evidence: ["degraded/0/details/lexicalAvailable", "data/resultCount"],
     expectNext: "run_directly",
     reading: {
-      envelope: "It succeeded, so the next read is degraded[], not the result.",
-      broke: "Semantic similarity is off; lexicalAvailable is true and 3 results came back. They are usable, ranked by words alone.",
-      plan: "Re-embed first. Rebuilding the binary is second, and only if it lacks the embedder.",
-      safety: "An idempotent refresh, safe to run. But the answer does not wait on it: the results are already good to use.",
+      envelope: "success is true, so the agent reads degraded[] before it uses the result.",
+      broke: "Semantic similarity is off, lexicalAvailable is true, and 3 results came back. They are usable, ranked by lexical match only.",
+      plan: "Re-embed first. Rebuilding the binary comes second, and only if it was built without the embedder.",
+      safety: "An idempotent refresh that is safe to run. The 3 results can be used now, so the answer does not wait for it.",
       act: {
         commands: ["ee index reembed --workspace ."],
-        note: "after answering, not before: and the answer says semantic search was off",
+        note: "run it after answering, and say in the answer that semantic search was off",
       },
       recheck: "The next search's degraded[] no longer lists embed_model_unavailable.",
     },
@@ -554,7 +554,7 @@ export const SITUATIONS: readonly Situation[] = [
     typical: {
       lines: ["Showing results 1–20 of 84"],
       exit: 0,
-      missing: "It quietly started over: the agent reads page one twice and counts items twice.",
+      missing: "The listing restarted at page one without saying so, so the agent reads and counts those items twice.",
     },
     record: {
       schema: "ee.response.v2",
@@ -582,12 +582,12 @@ export const SITUATIONS: readonly Situation[] = [
     evidence: ["degraded/0/message"],
     expectNext: null,
     reading: {
-      envelope: "It succeeded, so the next read is degraded[], not the result.",
-      broke: "A write moved the store on between pages. The page comes back empty by contract: never a restart, never duplicates.",
-      plan: "No recovery[]. Use the repair as written, and never invent one.",
-      safety: "No riskClass to read. The repair is ee's own exact instruction, and it only re-runs a read.",
+      envelope: "success is true, so the agent reads degraded[] before it uses the result.",
+      broke: "A write advanced the store's generation between pages. ee returns an empty page, so the sequence neither restarts nor repeats items.",
+      plan: "There is no recovery[], so the agent runs the repair as written and does not make one up.",
+      safety: "There is no riskClass. The repair is ee's exact instruction, and it only re-runs a read.",
       act: { commands: ["ee schema list --max-output-tokens 150 --json"], note: "the same command, without --cursor" },
-      recheck: "A fresh first page and a new continuationCursor, all from one generation.",
+      recheck: "A new first page and a new continuationCursor, both from one database generation.",
     },
     verdict: "fresh",
   },

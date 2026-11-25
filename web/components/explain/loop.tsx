@@ -30,7 +30,7 @@ const COMMANDS: readonly {
     name: "remember",
     direction: "push",
     line: 'ee remember "<lesson>" --workspace . --level procedural --kind rule --json',
-    what: "Captures a durable lesson as a typed memory, with its level, kind and provenance.",
+    what: "Stores a lesson as a typed memory, with its level, kind and provenance.",
     touches: ["db"],
   },
   {
@@ -38,7 +38,7 @@ const COMMANDS: readonly {
     name: "journal append",
     direction: "push",
     line: 'ee journal append "<observation>" --workspace . --source manual --json',
-    what: "Appends a raw observation; ee journal distill --dry-run later turns the journal into reviewable candidates.",
+    what: "Appends a raw observation. Later, ee journal distill --dry-run turns the journal into candidates for review.",
     touches: ["db"],
   },
   {
@@ -54,7 +54,7 @@ const COMMANDS: readonly {
     name: "import cass",
     direction: "push",
     line: "ee import cass --workspace . --json",
-    what: "Mines past agent sessions (Claude Code, Codex, Cursor, Gemini, ChatGPT) as evidence: idempotent, resumable, ledger-tracked.",
+    what: "Imports past agent sessions (Claude Code, Codex, Cursor, Gemini, ChatGPT) as evidence. A ledger records each import, so a rerun resumes and adds no duplicates.",
     touches: ["db"],
   },
   {
@@ -70,7 +70,7 @@ const COMMANDS: readonly {
     name: "recall",
     direction: "pull",
     line: "ee recall --path <path> --workspace . --budget-tokens 400 --format markdown",
-    what: "Before an edit: the memories that bear on a file or a diff, in a 400-token budget.",
+    what: "Before an edit, returns the memories that bear on a file or a diff, within a 400-token budget.",
     touches: ["db", "index"],
   },
   {
@@ -78,7 +78,7 @@ const COMMANDS: readonly {
     name: "search",
     direction: "pull",
     line: 'ee search "<question>" --workspace . --explain --json',
-    what: "Hybrid lexical and semantic search, with each result's score components explained.",
+    what: "Runs hybrid lexical and semantic search and explains each result's score components.",
     touches: ["db", "index"],
   },
   {
@@ -86,7 +86,7 @@ const COMMANDS: readonly {
     name: "ask",
     direction: "pull",
     line: 'ee ask "<question>" --workspace . --json',
-    what: "A direct question, answered with citations to the memories it rests on.",
+    what: "Answers a direct question and cites the memories the answer rests on.",
     touches: ["db", "index"],
   },
   {
@@ -102,7 +102,7 @@ const COMMANDS: readonly {
     name: "preflight",
     direction: "pull",
     line: 'ee preflight check --cmd "<command>" --workspace . --json',
-    what: "Before a risky shell command, looks up matching risk and failure memories. Advisory: it never blocks.",
+    what: "Before a risky shell command, looks up matching risk and failure memories. It only advises and never blocks the command.",
     touches: ["db", "index"],
   },
 ];
@@ -229,7 +229,7 @@ export function MemoryLoop() {
   return (
     <DemoFrame
       eyebrow="Who owns what"
-      title="Push evidence in. Pull context out."
+      title="Agents write evidence to ee and read context from it."
       basis="diagram"
       source={
         <>
@@ -386,7 +386,7 @@ export function MemoryLoop() {
             <text x={inner.x + 2} y={ee.y + 30} fill="#fff" fontSize="17" fontWeight="800">
               ee
               <tspan dx="8" fontSize="11" fontWeight="500" fill="#94a3b8">
-                owns memory
+                stores memory
               </tspan>
             </text>
 
@@ -512,8 +512,8 @@ export function MemoryLoop() {
         </div>
 
         <p className="mt-5 text-[13px] leading-relaxed text-slate-400">
-          The harness owns tools, approvals and the prompt loop; ee owns memory. Everything on the dashed side is derived: lose
-          the index and <Cmd>ee index rebuild</Cmd> regenerates it from the source of truth.
+          The harness keeps its tools, approvals and prompt loop; ee stores memory and answers queries. The dashed boxes are
+          derived data: if the index is lost, <Cmd>ee index rebuild</Cmd> regenerates it from the source of truth.
         </p>
       </div>
     </DemoFrame>

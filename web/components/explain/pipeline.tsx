@@ -52,7 +52,7 @@ const STAGES: readonly Stage[] = [
   {
     span: "search",
     name: "Hybrid search",
-    what: "Frankensearch retrieves lexical (BM25) and semantic (Model2Vec) hits and fuses the two rankings by reciprocal rank. A stale or missing index is reported with a repair command, not a crash.",
+    what: "Frankensearch retrieves lexical (BM25) and semantic (Model2Vec) hits and fuses the two rankings by reciprocal rank. A stale or missing index is reported as a degradation, with the command that repairs it.",
     status: "always",
     code: "search_index_stale",
     count: 60,
@@ -60,7 +60,7 @@ const STAGES: readonly Stage[] = [
   {
     span: "packL2Lookup",
     name: "Check the pack cache",
-    what: "If this exact request was already packed against the same index generation, the cached pack can be replayed. Changed source state ignores the hit, and live graph scoring bypasses the cache.",
+    what: "If this exact request was already packed against the same index generation, the cached pack can be replayed. A hit is ignored if the source state has changed, and live graph scoring bypasses the cache.",
     status: "optional",
     statusNote: "a miss here",
     count: 60,
@@ -75,7 +75,7 @@ const STAGES: readonly Stage[] = [
   {
     span: "focusState",
     name: "Add the focus set",
-    what: "Adds the memories in the workspace's focus set (ee focus add/set), scored like any other candidate. Focus changes ranking, never trust class or stored content.",
+    what: "Adds the memories in the workspace's focus set (ee focus add/set), scored like any other candidate. Focus changes ranking only; trust class and stored content stay as they are.",
     status: "optional",
     statusNote: "when a focus set exists",
     code: "context_focus_state_unavailable",
@@ -84,7 +84,7 @@ const STAGES: readonly Stage[] = [
   {
     span: "memoryTierAdmission",
     name: "Storage-tier nudge",
-    what: "Nudges hot memories up by 0.025 and warm ones by 0.010. It filters nothing, and failure, risk and safety evidence is kept even when cold.",
+    what: "Raises hot memories by 0.025 and warm ones by 0.010. It filters nothing, and failure, risk and safety evidence is kept even when cold.",
     status: "off",
     statusNote: "[pack] memory_tier_admission, off by default",
     count: 53,
@@ -109,7 +109,7 @@ const STAGES: readonly Stage[] = [
   {
     span: "packAssembly",
     name: "Select and render",
-    what: "Chooses items under the profile's section quotas and the token budget, by MMR (0.75 × relevance − 0.25 × redundancy) or, for the submodular profile, facility location; then renders the pack. Every candidate left out keeps a reason.",
+    what: "Chooses items under the profile's section quotas and the token budget, by MMR (0.75 × relevance − 0.25 × redundancy) or, for the submodular profile, facility location; then renders the pack. Every candidate left out is recorded with a reason.",
     status: "always",
     count: 14,
   },
@@ -145,7 +145,7 @@ const SCALE_MAX = 1.6;
 
 /**
  * How ee builds a pack, stage by stage: the twelve spans of its timing trace in order, what each does, which are
- * conditional or off, and the honest one (personalized PageRank) that is wired but unavailable. Below it, the two
+ * conditional or off, and the one (personalized PageRank) that is wired but unavailable. Below it, the two
  * retrieval arms and the multipliers that order candidates.
  */
 export function PackPipeline() {
@@ -168,7 +168,7 @@ export function PackPipeline() {
   return (
     <DemoFrame
       eyebrow="Pack assembly · the trace, in order"
-      title="Twelve stages, one pack."
+      title="The twelve stages of ee pack, in order."
       basis="diagram"
       source={
         <>
@@ -183,10 +183,15 @@ export function PackPipeline() {
       <div ref={ref}>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="max-w-2xl text-[15px] leading-relaxed text-slate-300">
-            <span className="font-mono text-violet-200">ee pack</span> runs the same spans every time, and names
-            them in its timing trace. Pick one, or let the run play.
+            <span className="font-mono text-violet-200">ee pack</span> runs the same spans every time and names
+            each one in its timing trace. Select a stage to read what it does; Play steps through them.
           </p>
-          <DemoButton onClick={() => setPlaying((on) => !on)} pressed={!playing} label={playing ? "Pause the run" : "Play the run"}>
+          {/* The label says what a press does, so no aria-pressed as well: "Pause, pressed" contradicts itself. */}
+          <DemoButton
+            onClick={() => setPlaying((on) => !on)}
+            label={playing ? "Pause the run" : "Play the run"}
+            className={cn(playing && "border-violet-400/60 text-violet-200")}
+          >
             {playing ? <Pause className="h-3.5 w-3.5" aria-hidden="true" /> : <Play className="h-3.5 w-3.5" aria-hidden="true" />}
             {playing ? "Pause" : "Play"}
           </DemoButton>
@@ -258,7 +263,7 @@ export function PackPipeline() {
           })}
         </ol>
         <p className="mt-2 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[10px] text-slate-500">
-          <span>bars: candidates in play, illustrative</span>
+          <span>bars: candidates remaining, illustrative</span>
           <span className="flex items-center gap-1.5">
             <span className="h-1.5 w-1.5 rounded-full bg-sky-300" aria-hidden="true" /> conditional
           </span>
@@ -302,7 +307,7 @@ export function PackPipeline() {
         <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
           <div className="rounded-2xl border border-white/[0.08] bg-black/25 p-4 sm:p-5">
             <p className="text-[9px] font-black tracking-[0.2em] text-[color:var(--chapter,#a78bfa)] uppercase">
-              Search · two arms, one ranking
+              Search · lexical and semantic, fused
             </p>
             <div className="mt-4 grid grid-cols-[minmax(0,1fr)_2.25rem_minmax(0,0.9fr)] items-center gap-y-3">
               <div className="rounded-xl border border-sky-300/25 bg-sky-300/[0.06] px-3 py-2.5">
@@ -324,8 +329,8 @@ export function PackPipeline() {
               </div>
             </div>
             <p className="mt-4 text-[13px] leading-relaxed text-slate-400">
-              Both arms run locally. If the model cannot load, a deterministic hash embedder stands in and earns no
-              semantic credit: lexical scores take its weight, and the response says so in{" "}
+              Both searches run locally. If the model cannot load, a deterministic hash embedder replaces it and gets
+              no semantic credit; lexical scores take the semantic weight, and the response records this in{" "}
               <span className="font-mono text-slate-300">degraded</span>.
             </p>
           </div>
@@ -379,8 +384,9 @@ export function PackPipeline() {
               </span>
             </div>
             <p className="mt-2 text-[13px] leading-relaxed text-slate-400">
-              Age, doubt and harmful reports each have a floor: they rank a memory down, never out. The one zero is
-              maturity for a deprecated or retired rule. Non-rule memories sit at maturity 1.
+              Recency, confidence and harmful reports each have a floor, so they can lower a memory&apos;s rank but cannot
+              remove it. Maturity is the only multiplier that reaches 0, for a deprecated or retired rule. Memories that
+              are not rules have maturity 1.
             </p>
           </div>
         </div>

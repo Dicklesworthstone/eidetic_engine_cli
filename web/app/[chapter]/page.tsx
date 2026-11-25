@@ -1,4 +1,4 @@
-// Each chapter on a page of its own, /<slug>/, so one chapter can be sent on with its own
+// Each chapter on a page of its own, /<slug>, so one chapter can be sent on with its own
 // share images (opengraph-image.tsx and twitter-image.tsx beside this file).
 
 import { ArrowLeft, ArrowRight } from "lucide-react";
@@ -79,7 +79,8 @@ export default async function ChapterPage({ params }: Props) {
           </ol>
         </nav>
       </main>
-      <SiteFooter installHref="/proof#install" />
+      {/* On /proof the install section is on this page: an in-page anchor, which the first-view script in app/layout.tsx recognises. */}
+      <SiteFooter installHref={chapter.id === "proof" ? "#install" : "/proof#install"} />
     </>
   );
 }

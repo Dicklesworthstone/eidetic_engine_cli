@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 
 import { assemble } from "@/components/explain/pack-builder";
 import { BALANCED_BPS, BUDGETS, CANDIDATE_FLOOR, pack, STORE_SIZE, TASKS, toyHash } from "@/components/hero";
-import { chapters } from "@/lib/content";
+import { chapterById, chapters, heroStats, rigor } from "@/lib/content";
 import { SHARE_IMAGE_PATHS, SHARE_IMAGE_TYPE } from "@/lib/share";
 import worker from "../worker";
 
@@ -21,9 +21,27 @@ describe("the chapters", () => {
     });
   });
 
-  test("no two sections on the home page share an anchor, and none shadows a chapter's", () => {
-    const anchors = chapters.flatMap((chapter) => [`ch-${chapter.id}`, ...chapter.sections.map((section) => section.id)]);
+  test("no two ids the home page gives its chapters, sections and their headings collide, with each other or the page's own", () => {
+    const own = ["top", "main", "hero-heading", "summary", "summary-heading"];
+    const anchors = [
+      ...own,
+      ...chapters.flatMap((chapter) => [
+        `ch-${chapter.id}`,
+        `ch-${chapter.id}-heading`,
+        ...chapter.sections.flatMap((section) => [section.id, `${section.id}-heading`]),
+      ]),
+    ];
     expect(new Set(anchors).size).toBe(anchors.length);
+  });
+
+  test("the proof chapter's share line quotes the counted figures, so a recount cannot leave it behind", () => {
+    const line = chapterById("proof").share.line;
+    for (const label of ["Tests", "Failure modes", "JSON contracts"]) {
+      const stat = heroStats.find((item) => item.label === label);
+      expect(stat).toBeDefined();
+      expect(line).toContain(`${stat?.value} `);
+    }
+    expect(line).toContain(`${rigor.find((item) => item.label === "architecture decisions")?.value} decision records`);
   });
 
   test("every chapter page has both share images", () => {

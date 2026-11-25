@@ -12,11 +12,11 @@ export function SiteFooter({ installHref = "#install" }: { installHref?: string 
         <div className="grid grid-cols-1 gap-12 lg:grid-cols-12">
           <div className="lg:col-span-7">
             <p className="display-2 font-extrabold text-white">
-              <RecallTitle text="Stop re-teaching your [agents]." />
+              <RecallTitle text="Give your agents a long-term [memory]." />
             </p>
             <p className="mt-6 max-w-2xl text-[15px] leading-relaxed text-slate-400">
-              ee is open source, MIT-licensed with an OpenAI/Anthropic rider, and built in the open: every decision
-              record, schema and failure mode is in the repository.
+              ee is open source under the MIT license with an OpenAI/Anthropic rider. Its decision records, JSON schemas
+              and failure-mode fixtures are all in the repository.
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
               <a

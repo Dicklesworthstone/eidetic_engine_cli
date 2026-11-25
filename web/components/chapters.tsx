@@ -87,12 +87,12 @@ function Amnesiac() {
         index={sectionIndex("forget", "amnesia")}
         layout="wide"
         eyebrow="Six sessions, two agents"
-        title="Session six walks into session two's [trap]."
+        title="Without memory, session six repeats session two's [mistake]."
         kicker={
           <>
-            The harness gives every session a fresh context window. Without a durable place to put what it learned, an
-            agent spends the start of each session re-learning the project, and the middle of it rediscovering failures
-            that someone already paid for.
+            The harness gives every session a fresh context window. With nowhere durable to put what it learned, an agent
+            spends the start of each session re-learning the project and the middle of it working through problems an
+            earlier session already solved.
           </>
         }
       >
@@ -104,13 +104,13 @@ function Amnesiac() {
         index={sectionIndex("forget", "scale")}
         layout="wide"
         eyebrow="CLAUDE.md, AGENTS.md, notes.md"
-        title="A notes file can't hold a [campaign]."
+        title="What happens as the notes file [grows]."
         kicker={
           <>
-            Most agent memory today is a markdown file the harness loads whole at the start of every session. It is a
-            good start. But it grows with every lesson, it cannot tell a stale line from a current one, and every line
-            costs tokens in every session whether the task needs it or not. A vector store fixes the size, not the
-            judgment. Drag the weeks and watch the three diverge.
+            Most agent memory today is a markdown file that the harness loads whole at the start of every session. It
+            grows with every lesson, nothing in it marks a line as stale, and every line costs tokens in every session
+            whether the task needs it or not. A vector store keeps the size down by returning only the closest matches,
+            but it cannot tell a stale or repeated chunk from a current one. Move through the weeks to compare all three.
           </>
         }
       >
@@ -122,11 +122,11 @@ function Amnesiac() {
         index={sectionIndex("forget", "layer")}
         layout="wide"
         eyebrow="Where ee sits"
-        title="The harness owns the loop. ee owns [memory]."
+        title="ee is a command the harness [calls]."
         kicker={
           <>
-            Claude Code, Codex or any shell keeps its tools, approvals and prompt loop. ee is what it calls: agents push
-            evidence in and pull context out, through one CLI with a stable JSON contract.
+            Claude Code, Codex or a shell script keeps its own tools, approvals and prompt loop. Agents call ee to record
+            evidence and to fetch context, through one CLI with a stable JSON contract.
           </>
         }
       >
@@ -137,11 +137,11 @@ function Amnesiac() {
         id="first"
         index={sectionIndex("forget", "first")}
         eyebrow="Five commands"
-        title="A memory, [used], in five commands."
+        title="The basic loop in five [commands]."
         kicker={
           <>
-            Open a workspace, teach it something, pack it into the next session, say whether it helped, and ask why it
-            was chosen. That is the whole loop; everything else on this site makes one of these five better.
+            Open a workspace, record a rule, pack it into the next session, report whether it helped, and ask why it was
+            chosen. The later chapters show what each of these steps does in detail.
           </>
         }
       >
@@ -175,8 +175,8 @@ function MemoryChapter() {
         id="decay"
         index={sectionIndex("memory", "decay")}
         layout="wide"
-        eyebrow="Four levels, five half-lives"
-        title="Forgetting is a [feature]."
+        eyebrow="Decay and demotion"
+        title="How fast each level [fades]."
         kicker={
           <>
             A memory&apos;s freshness halves on a schedule set by what it is: a day for working notes, a year for a
@@ -218,13 +218,13 @@ function MemoryChapter() {
         id="kinds"
         index={sectionIndex("memory", "kinds")}
         eyebrow="Typed fields"
-        title="Typed, not [prose]."
+        title="Fields a search can [filter on]."
         kicker={
           <>
-            A failure knows its cause and the commit that reverted it; a decision knows its options and when to revisit
-            it. Search filters on those fields by name, so an agent asks for{" "}
-            <Cmd>--kind failure --field family^rustc</Cmd> instead of hoping the wording matches. Bare prose stays bare:
-            ee never invents a field.
+            A failure records its cause and the commit that reverted it; a decision records its options and when to
+            revisit it. Search filters on those fields by name, so an agent can ask for{" "}
+            <Cmd>--kind failure --field family^rustc</Cmd> instead of relying on matching words. A memory written as
+            plain prose gets no typed fields; ee does not invent them.
           </>
         }
       >
@@ -276,12 +276,12 @@ function PackChapter() {
         index={sectionIndex("pack", "pipeline")}
         layout="wide"
         eyebrow="ee pack, stage by stage"
-        title="Twelve timed stages, one [pack]."
+        title="Twelve timed [stages]."
         kicker={
           <>
-            A pack is not a top-k query. It is a fixed pipeline: validate, retrieve with lexical and semantic search
-            fused by rank, resolve and admit candidates, select under quotas, assemble with provenance, and report every
-            stage&apos;s time and every degradation.
+            <Cmd>ee pack</Cmd> runs a fixed pipeline rather than a single top-k query. It validates the request,
+            retrieves with lexical and semantic search fused by rank, resolves and admits candidates, selects under
+            quotas, assembles the pack with provenance, and reports each stage&apos;s time and every degradation.
           </>
         }
       >
@@ -296,9 +296,9 @@ function PackChapter() {
         title="Build a pack [yourself]."
         kicker={
           <>
-            Change the profile and the budget and watch the pack change. Every candidate says why it is in or out: its
-            marginal gain, the memory it duplicates, the quota or the budget it hit. Then switch redundancy off and watch
-            near-duplicates crowd out the failure you needed.
+            Change the profile and the budget to see the pack change. Each candidate shows why it is in or out: its
+            marginal gain, the memory it duplicates, or the quota or budget it hit. With the redundancy penalty switched
+            off, near-duplicates fill the budget and the failure the task needed drops out.
           </>
         }
       >
@@ -312,8 +312,8 @@ function PackChapter() {
         title="Six questions every item [answers]."
         kicker={
           <>
-            An agent that cannot see why it was told something cannot weigh it. So every returned memory carries its
-            answers to six questions, and <Cmd>ee why</Cmd> and <Cmd>ee pack --explain</Cmd> show the rest.
+            To weigh a memory, an agent needs to know why it was returned. Every returned memory carries its answers to
+            six questions, and <Cmd>ee why</Cmd> and <Cmd>ee pack --explain</Cmd> show the full detail.
           </>
         }
       >
@@ -329,7 +329,7 @@ function PackChapter() {
           ))}
         </div>
         <div className="panel mt-4 rounded-2xl p-5 sm:p-6">
-          <MicroLabel className="text-slate-400">And what the scores are not</MicroLabel>
+          <MicroLabel className="text-slate-400">What the scores do not mean</MicroLabel>
           <p className="mt-3 text-[15px] leading-relaxed text-slate-300">
             Relevance scores rank results; they are not probabilities that a result answers the task. When results
             exist, ee reports retrieval quality as <Cmd>unknown</Cmd> rather than inventing a number, because score
@@ -345,12 +345,12 @@ function PackChapter() {
         index={sectionIndex("pack", "hash")}
         layout="wide"
         eyebrow="Deterministic by default"
-        title="Same inputs, same [hash]."
+        title="A pack hash that [reproduces]."
         kicker={
           <>
             Given the same snapshots, config, profile, budget and query, ties break the same way and the pack hash
-            reproduces, so a pack can be cited, compared and replayed. That took more than hashing the output: the first
-            version of the hash had a collision, and this is it.
+            reproduces, so a pack can be cited, compared and replayed. The first version of the hash had a collision,
+            which the figure below lets you recreate.
           </>
         }
       >
@@ -368,12 +368,12 @@ function LearningChapter() {
         index={sectionIndex("learn", "trust")}
         layout="wide"
         eyebrow="Bayesian trust classes"
-        title="Trust is earned, one [outcome] at a time."
+        title="A posterior for every [memory]."
         kicker={
           <>
-            Every memory starts at the trust its source earns: 0.85 for a human typing it, 0.50 for an agent&apos;s
-            say-so, 0.45 for an imported session line. Then outcomes move a Beta posterior, and the class changes only
-            when the 90% interval clears a threshold. Press the buttons.
+            A memory&apos;s starting trust depends on its source: 0.85 when a person types it, 0.50 when an agent
+            asserts it, 0.45 for a line imported from a session. Outcomes then update a Beta posterior, and the trust
+            class changes only when the 90% interval crosses a threshold. Use the buttons to record outcomes.
           </>
         }
       >
@@ -385,7 +385,7 @@ function LearningChapter() {
         index={sectionIndex("learn", "fixes")}
         layout="wide"
         eyebrow="Failure-to-fix recall"
-        title="A fix, remembered by its [fingerprint]."
+        title="Fixes from past [sessions]."
         kicker={
           <>
             ee imports your past agent sessions through cass, finds the failures that were fixed and verified, and keeps
@@ -401,12 +401,12 @@ function LearningChapter() {
         id="curate"
         index={sectionIndex("learn", "curate")}
         eyebrow="No silent memory mutation"
-        title="Propose. Validate. [Apply]."
+        title="Changes go through [review]."
         kicker={
           <>
-            Memory that rewrites itself in the dark cannot be trusted. Every promotion, merge, replacement and tombstone
-            goes through a reviewable candidate and leaves an audit entry. The steward proposes; it never silently
-            rewrites procedural memory, and turning a session journal into candidates needs no LLM.
+            Every promotion, merge, replacement and tombstone starts as a candidate that can be reviewed, and applying it
+            writes an audit entry. The steward process proposes changes to procedural memory but does not apply them
+            itself. Turning a session journal into candidates does not use an LLM.
           </>
         }
       >
@@ -437,12 +437,12 @@ function LearningChapter() {
         id="guard"
         index={sectionIndex("learn", "guard")}
         eyebrow="Privacy and trust"
-        title="Memory that can't be turned [against you]."
+        title="Checks on the way in and [out]."
         kicker={
           <>
-            A memory store is an attack surface: whatever gets in reaches every future session. So secrets are stripped
-            on the way in, injected instructions are screened on the way out, and nothing ee says can stop your agent
-            from acting.{" "}
+            Anything written to the store can reach every later session. ee strips secrets before it stores a memory,
+            screens stored memories for injected instructions before it packs them, and only advises on commands: no ee
+            check can stop the agent from running one.{" "}
             <a className={link} href={siteConfig.trustModel}>
               The trust model
             </a>
@@ -481,13 +481,13 @@ function CampaignsChapter() {
         id="campaign"
         index={sectionIndex("campaigns", "campaign")}
         layout="wide"
-        eyebrow="Twenty-six weeks, one store"
-        title="The pack stays small. What's in it [improves]."
+        eyebrow="A simulated campaign"
+        title="Twenty-six weeks of one [campaign]."
         kicker={
           <>
-            A campaign is a problem you keep coming back to. Scrub through half a year of one: working notes churn and
-            fade, failures pile up and are distilled into rules, decisions come due for review, a rule that starts
-            misleading is demoted. Monday&apos;s pack never grows past its budget; it just knows more.
+            Drag through half a year of one campaign. Working notes expire, failures accumulate and are distilled into
+            rules, decisions come up for review, and a rule that starts misleading is demoted. For any day, the figure
+            also shows the pack the next session would start with.
           </>
         }
       >
@@ -498,13 +498,13 @@ function CampaignsChapter() {
         id="ledger"
         index={sectionIndex("campaigns", "ledger")}
         layout="wide"
-        eyebrow="The negative evidence ledger"
-        title="What didn't work is worth [remembering]."
+        eyebrow="Negative evidence"
+        title="A ledger of failed [attempts]."
         kicker={
           <>
-            In a long optimisation or research campaign most attempts fail, and every failure was paid for. Recorded with
-            its family and cause, a failure stops the next session paying for it again; a family of them becomes an
-            anti-pattern that rules out a whole region at once. Run both searches side by side.
+            In a long optimisation or research campaign most attempts fail, and each one cost time. A failure recorded
+            with its family and cause keeps later sessions from trying it again, and enough failures in one family can
+            become an anti-pattern rule that rules out that whole region.
           </>
         }
       >
@@ -579,13 +579,13 @@ function CampaignsChapter() {
         id="team"
         index={sectionIndex("campaigns", "team")}
         layout="wide"
-        eyebrow="From one agent to a team"
-        title="One memory model, every [scale]."
+        eyebrow="Scale"
+        title="From one agent to a [team]."
         kicker={
           <>
-            The store that serves one agent on one repository also serves a swarm working at once, a small team sharing
-            what each member learns, and every workspace you open, with no server to run and no lane allowed to
-            silently override another.
+            The same store serves one agent on one repository, a swarm of agents working at once, a small team sharing
+            what each member learns, and a user-global lane across every workspace you open. When two lanes disagree,
+            the conflict is recorded rather than settled silently.
           </>
         }
       >
@@ -625,9 +625,9 @@ function AgentsChapter() {
         title="Errors that say what to do [next]."
         kicker={
           <>
-            A human can read &ldquo;something went wrong&rdquo; and investigate. An agent needs more: what broke, how
-            badly, the exact command that repairs it, whether that command is safe to run unattended, and whether a human
-            has to say yes first. ee puts all of it in the error.
+            An error message written for a person leaves an agent guessing. An ee error states what broke, how serious it
+            is, the command that repairs it, whether that command is safe to run unattended, and whether a person has to
+            approve it first.
           </>
         }
       >
@@ -637,12 +637,12 @@ function AgentsChapter() {
       <Section
         id="discover"
         index={sectionIndex("agents", "discover")}
-        eyebrow="No human required"
+        eyebrow="Self-documenting"
         title="It documents itself to the [agent]."
         kicker={
           <>
-            An agent meeting ee for the first time does not need a person to explain it. Every surface it needs to learn
-            the tool is a command with JSON output, and every outcome has a code it can branch on.
+            An agent can learn ee without a person explaining it. The documentation, the command tree and the schemas are
+            all commands that return JSON, and every outcome has an exit code the agent can branch on.
           </>
         }
       >
@@ -674,11 +674,10 @@ function AgentsChapter() {
         </div>
 
         <div className="panel mt-4 rounded-2xl p-5 sm:p-6">
-          <MicroLabel className="text-slate-400">posture, not healthy: true</MicroLabel>
+          <MicroLabel className="text-slate-400">Five postures</MicroLabel>
           <p className="mt-3 text-[14.5px] leading-relaxed text-slate-300">
-            <Cmd>ee status</Cmd> and <Cmd>ee doctor</Cmd> do not answer with a yes or no. They report one of five
-            postures, so an agent can tell a store that is still warming up from one that needs a repair and one it must
-            not touch.
+            <Cmd>ee status</Cmd> and <Cmd>ee doctor</Cmd> report one of five postures rather than a yes or no, so an
+            agent can tell a store that is still warming up from one that needs a repair and one it must not touch.
           </p>
           <ol className="mt-4 flex flex-wrap items-center gap-1.5 font-mono text-[11.5px]">
             {postures.map((posture, at) => (
@@ -710,12 +709,13 @@ function GraphChapter() {
         id="lenses"
         index={sectionIndex("graph", "lenses")}
         layout="wide"
-        eyebrow="Structure, not just similarity"
-        title="One memory graph, five [lenses]."
+        eyebrow="Graph lenses"
+        title="What the links [show]."
         kicker={
           <>
-            Similarity finds memories that look like the task. Structure finds the ones that matter: the rule that twelve
-            decisions rest on, the fact that is the only bridge between two topics. Tap a lens, then a memory.
+            Similarity search finds memories whose text looks like the task. The links find others that text similarity
+            misses, such as the rule twelve decisions rest on or the only fact connecting two topics. Tap a lens, then a
+            memory.
           </>
         }
       >
@@ -726,12 +726,12 @@ function GraphChapter() {
         id="toolbox"
         index={sectionIndex("graph", "toolbox")}
         eyebrow="FrankenNetworkX, in the CLI"
-        title="Real graph algorithms, each a [question]."
+        title="Each algorithm answers a [question]."
         kicker={
           <>
-            Each one is a command with deterministic JSON output. Graph views explain and navigate memory; they never
-            replace a memory&apos;s own provenance, and the features that let graph structure move a pack&apos;s
-            ranking are opt-in.
+            Each one is a command with deterministic JSON output. Graph views help explain and navigate memory, but a
+            memory&apos;s own provenance stays the record of where it came from, and the features that let graph
+            structure change a pack&apos;s ranking are off by default.
           </>
         }
       >
@@ -758,13 +758,13 @@ function ProofChapter() {
         id="compare"
         index={sectionIndex("proof", "compare")}
         layout="wide"
-        eyebrow="Against the alternatives"
-        title="Not another [vector store]."
+        eyebrow="Comparison"
+        title="ee beside the [alternatives]."
         kicker={
           <>
-            A vector database finds text that looks similar. A notes file is whatever someone last remembered to write. ee
-            is the layer between: it knows what kind of thing each memory is, how much to trust it, how old it is, and
-            why it belongs in this pack.
+            A vector database returns text that looks similar to the query. A notes file holds whatever someone last
+            wrote down. ee also records what kind of thing each memory is, how far to trust it, how old it is, and why it
+            was put in this pack.
           </>
         }
       >
@@ -776,11 +776,11 @@ function ProofChapter() {
         index={sectionIndex("proof", "degrade")}
         layout="wide"
         eyebrow="Graceful degradation"
-        title="Pull a plug. It still [works]."
+        title="Commands still answer with parts [missing]."
         kicker={
           <>
-            Every optional part of ee can be missing. When one is, the command still answers, says what it lost in a
-            machine-readable <Cmd>degraded</Cmd> entry, and names the repair. Try it.
+            Any optional part of ee can be missing. When one is, the command still answers, records what it lost in a
+            machine-readable <Cmd>degraded</Cmd> entry, and names the repair. Switch parts off below to see the effect.
           </>
         }
       >
@@ -791,11 +791,11 @@ function ProofChapter() {
         id="rigor"
         index={sectionIndex("proof", "rigor")}
         eyebrow="Hard requirements"
-        title="Shortcuts are [forbidden]."
+        title="Dependencies the build [refuses]."
         kicker={
           <>
-            Each line below is a dependency the build refuses, with what ee uses instead. They are why ee runs as one
-            binary with no async runtime it does not own, no database it did not choose, and no network in the core.
+            Each line below is a dependency that fails the build, and what ee uses instead. Together they keep ee a single
+            binary with its own runtime and storage stack and no HTTP code in the core.
           </>
         }
       >
@@ -874,14 +874,9 @@ function ProofChapter() {
       <Section
         id="status"
         index={sectionIndex("proof", "status")}
-        eyebrow="What is not done"
-        title="Honest [status]."
-        kicker={
-          <>
-            A memory you cannot trust is worse than none, and the same goes for a project page. These are the limits as
-            the README states them today.
-          </>
-        }
+        eyebrow="Limitations"
+        title="What is not [done yet]."
+        kicker={<>These are the limitations the README lists as of {siteConfig.version}.</>}
       >
         <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {limitations.map((item, at) => (
@@ -902,7 +897,7 @@ function ProofChapter() {
         id="install"
         index={sectionIndex("proof", "install")}
         eyebrow={`${siteConfig.version} · ${siteConfig.released}`}
-        title="Running in [one minute]."
+        title="Install it and connect your [harness]."
         kicker={
           <>
             Install the binary, open a workspace, and let your harness call it. The installer verifies the release

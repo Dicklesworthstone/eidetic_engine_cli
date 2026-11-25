@@ -40,6 +40,9 @@ const CAMPAIGNS = Object.fromEntries(DOMAINS.map((domain) => [domain.id, simulat
 
 const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
 const when = (day: number) => `Week ${weekOf(day)} · ${DOW[Math.floor(day) % 7] ?? "Mon"}`;
+const DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"] as const;
+/** The scrubber's value as a screen reader should say it (the visible "Week 3 · Tue" abbreviates the day). */
+const spoken = (day: number) => `Week ${weekOf(day)} of ${weekOf(DAYS - 1)}, ${DAY_NAMES[Math.floor(day) % 7] ?? "Monday"}`;
 
 /** Days of campaign per millisecond of playback, and how long playback rests on each event. */
 const SPEED = 11 / 1000;
@@ -49,7 +52,7 @@ const EVENT_STYLE: Record<EventType, { label: string; colour: string }> = {
   import: { label: "Playbook import", colour: LEVEL_COLOUR.procedural },
   promote: { label: "Rules promoted", colour: LEVEL_COLOUR.procedural },
   antipattern: { label: "Anti-pattern", colour: LEVEL_COLOUR.procedural },
-  validated: { label: "Trust moves up", colour: EVIDENCE },
+  validated: { label: "Trust raised", colour: EVIDENCE },
   decision: { label: "Decision recorded", colour: SECTION_COLOUR.decisions },
   revisit: { label: "Revisit due", colour: SECTION_COLOUR.decisions },
   demote: { label: "Rule deprecated", colour: "#fb7185" },
@@ -74,7 +77,7 @@ const TRUST_STYLE: Record<Trust, string> = {
 };
 
 const EMPTY: Record<PackSection, string> = {
-  rules: "Nothing yet: no rule has been earned.",
+  rules: "No rule promoted yet.",
   decisions: "No decision recorded yet.",
   failures: "No failure recorded yet.",
   evidence: "No evidence yet.",
@@ -114,7 +117,8 @@ export function CampaignTimeline() {
     let last = performance.now();
     let holdUntil = 0;
     const tick = (now: number) => {
-      const elapsed = Math.min(80, now - last);
+      // A frame's timestamp can precede the performance.now() taken when the effect ran; never step backwards.
+      const elapsed = clamp(now - last, 0, 80);
       last = now;
       if (now >= holdUntil) {
         const current = clock.current;
@@ -175,7 +179,7 @@ export function CampaignTimeline() {
   return (
     <DemoFrame
       eyebrow="Five campaigns · 26 weeks each"
-      title="The store grows. The pack keeps its size."
+      title="As the store grows, each pack stays within 4,000 tokens."
       basis="toy"
       source={
         <>
@@ -201,9 +205,11 @@ export function CampaignTimeline() {
             options={DOMAINS.map((entry) => ({ value: entry.id, label: entry.label }))}
           />
           <div className="flex flex-wrap gap-2">
+            {/* Stepping is not a toggle, and a reduced-motion reader starts on the last week, with nowhere to step. */}
             <DemoButton
               onClick={toggle}
-              pressed={animating}
+              pressed={reduced ? undefined : animating}
+              disabled={reduced && atEnd}
               label={reduced ? "Step to next week" : animating ? "Pause the campaign" : "Play the campaign"}
             >
               {reduced ? (
@@ -254,13 +260,14 @@ export function CampaignTimeline() {
               value={whole}
               onChange={jump}
               display={when(whole)}
+              valueText={spoken(whole)}
             />
 
             <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-2 xl:grid-cols-4">
               <Readout
                 label="Memories live"
                 value={grouped(total)}
-                note={`${grouped(campaign.written[whole] ?? 0)} written · ${grouped(campaign.retired[whole] ?? 0)} expired or tombstoned`}
+                note={`${grouped(campaign.written[whole] ?? 0)} written · ${grouped(campaign.retired[whole] ?? 0)} retired`}
               />
               <Readout
                 label="Procedural rules"
@@ -289,19 +296,19 @@ export function CampaignTimeline() {
 
         <div className="mt-7 grid grid-cols-1 gap-3 text-[13px] leading-relaxed text-slate-400 md:grid-cols-3">
           <p>
-            <span className="font-semibold text-slate-200">Lessons become rules.</span> Three notes carrying one lesson make a
-            candidate (<Cmd>ee playbook extract</Cmd>); a reviewer validates and applies it. Three harmful outcomes from two
-            sources propose an anti-pattern.
+            <span className="font-semibold text-slate-200">Rules from repeated lessons.</span> When three notes carry the
+            same lesson, <Cmd>ee playbook extract</Cmd> proposes a rule candidate, which a reviewer validates and applies.
+            Three harmful outcomes from two sources propose an anti-pattern.
           </p>
           <p>
-            <span className="font-semibold text-slate-200">Decisions come due.</span> <Cmd>ee decide record</Cmd> keeps the
-            choice, the alternatives and the reason. With <Cmd>--revisit-by +90d</Cmd> it comes back in{" "}
-            <Cmd>ee decide revisit</Cmd>, and the new decision supersedes the old.
+            <span className="font-semibold text-slate-200">Revisit dates.</span> <Cmd>ee decide record</Cmd> stores the
+            choice, the alternatives and the reason. With <Cmd>--revisit-by +90d</Cmd>, the decision is listed by{" "}
+            <Cmd>ee decide revisit</Cmd> when it falls due, and the new decision supersedes the old one.
           </p>
           <p>
-            <span className="font-semibold text-slate-200">Forgetting keeps the pack sharp.</span> Scratch expires when a
-            session closes, unrecalled notes are tombstoned by the decay sweep, and a rule that starts doing harm is
-            deprecated. However large the store grows, the pack stays within its budget.
+            <span className="font-semibold text-slate-200">What leaves the store.</span> Scratch expires when its workflow
+            closes. The decay sweep tombstones notes that nobody recalls. A rule with harmful outcomes from two sources is
+            deprecated through curation. The pack stays within its budget however large the store gets.
           </p>
         </div>
       </div>
@@ -437,7 +444,9 @@ function Chart({
         style={{ touchAction: "pan-y" }}
         onPointerDown={(event) => {
           event.currentTarget.setPointerCapture(event.pointerId);
-          scrub(event);
+          // A finger landing here may only be scrolling the page past the chart (pan-y hands vertical drags to the
+          // browser), so a touch scrubs once it moves sideways rather than jumping and pausing the campaign at once.
+          if (event.pointerType !== "touch") scrub(event);
         }}
         onPointerMove={(event) => {
           if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event);
@@ -580,7 +589,7 @@ function EventCard({ campaign, latest, onJump }: { campaign: Campaign; latest: n
   const previous = latest > 0 ? timeline[latest - 1] : undefined;
   const style = event ? EVENT_STYLE[event.type] : { label: "Week one", colour: "#94a3b8" };
   return (
-    <div className="mt-4 rounded-xl border border-white/10 bg-black/30 p-3.5 sm:p-4" aria-live="polite">
+    <div className="mt-4 rounded-xl border border-white/10 bg-black/30 p-3.5 sm:p-4">
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
           <span
@@ -596,7 +605,7 @@ function EventCard({ campaign, latest, onJump }: { campaign: Campaign; latest: n
           <DemoButton
             className="px-2 py-1.5"
             onClick={() => onJump(previous ? previous.day : 0)}
-            disabled={latest < 0}
+            disabled={latest < 0 || (!previous && event?.day === 0)}
             label="Previous event"
           >
             <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
@@ -606,17 +615,41 @@ function EventCard({ campaign, latest, onJump }: { campaign: Campaign; latest: n
           </DemoButton>
         </div>
       </div>
+      {/* Every event is laid out in one cell and only the current one shows, so the card is as tall as the tallest
+          and the page below never moves while the campaign plays. */}
+      <div className="grid">
+        {[-1, ...timeline.map((_, index) => index)].map((index) => (
+          <div
+            key={index}
+            aria-hidden={index === latest ? undefined : true}
+            className={cn("min-w-0 [grid-area:1/1]", index !== latest && "invisible")}
+          >
+            <EventText event={timeline[index]} workspace={domain.workspace} />
+          </div>
+        ))}
+      </div>
+      {/* The title alone is announced: the whole card, read at every event of a playing campaign, would queue up. */}
+      <p className="sr-only" aria-live="polite">
+        {event ? `Event ${latest + 1}, ${when(event.day)}: ${event.title}` : ""}
+      </p>
+    </div>
+  );
+}
+
+function EventText({ event, workspace }: { event: CampaignEvent | undefined; workspace: string }) {
+  return (
+    <>
       <p className="mt-2 text-[14px] font-bold text-white">{event ? event.title : "A fresh workspace"}</p>
       <p className="mt-1 text-[12.5px] leading-relaxed text-slate-400">
         {event
           ? event.detail
-          : "Nothing to recall yet. The first sessions write scratch notes, capture what happened, and record a few facts."}
+          : "The store is empty. The first sessions write scratch notes, capture what happened and record a few facts."}
       </p>
       <p className="mt-2 font-mono text-[11px] leading-relaxed [overflow-wrap:anywhere] text-violet-200">
         <span className="text-slate-600 select-none">$ </span>
-        {event ? event.command : `ee init --workspace ${domain.workspace}`}
+        {event ? event.command : `ee init --workspace ${workspace}`}
       </p>
-    </div>
+    </>
   );
 }
 
@@ -705,7 +738,7 @@ function PackCard({ campaign, pack }: { campaign: Campaign; pack: Pack }) {
         </div>
         <p className="mt-1.5 flex justify-between gap-3 font-mono text-[10px] text-slate-500">
           <span>spend by section</span>
-          <span>budget {grouped(BUDGET)}, never more</span>
+          <span>budget {grouped(BUDGET)}, a hard cap</span>
         </p>
       </div>
     </div>

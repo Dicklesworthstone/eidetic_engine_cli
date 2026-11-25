@@ -17,9 +17,9 @@ export type CardId = "home" | Chapter["id"];
 
 const HOME = {
   kicker: "Memory for AI agents · Rust · local-first",
-  headline: "Your agents forget.",
-  accent: "ee remembers.",
-  line: "Durable, explainable memory for agents. Every line of context says where it came from and why it is there.",
+  headline: "Long-term memory for",
+  accent: "coding agents.",
+  line: "Stores what your agents learn and gives each session a context pack within a token budget.",
   colour: "#a78bfa",
 };
 
@@ -30,7 +30,7 @@ function chapterFor(id: CardId): Chapter | undefined {
 /** The alt text for a card. */
 export function shareAlt(id: CardId = "home"): string {
   const chapter = chapterFor(id);
-  if (!chapter) return `${siteConfig.name} (ee): your agents forget, ee remembers. Durable, local-first, explainable memory for AI agents.`;
+  if (!chapter) return `${siteConfig.name} (ee): long-term memory for coding agents. ee ${HOME.line.charAt(0).toLowerCase()}${HOME.line.slice(1)}`;
   return `${siteConfig.name} (ee), chapter ${chapter.number}: ${chapter.share.headline} ${chapter.share.accent} ${chapter.share.line}`;
 }
 
@@ -124,7 +124,11 @@ function Drawing({ art, width, height }: { art: Art; width: number; height: numb
   );
 }
 
-/** The agent's reading of an error, for chapter 06: the envelope and the exit codes. */
+/**
+ * The agent's reading of an error, for chapter 06: the envelope and the exit codes. The record is
+ * tests/snapshots/error_envelope_golden__error_envelope_search_index.snap, abridged; it names no
+ * command, and a stale index on `ee search` degrades (search_index_stale) rather than failing.
+ */
 function Envelope({ width, height, colour }: { width: number; height: number; colour: string }) {
   const key = "#bef264";
   const text = "#fde68a";
@@ -133,11 +137,11 @@ function Envelope({ width, height, colour }: { width: number; height: number; co
     [0, "{", "", ""],
     [1, '"schema": ', '"ee.error.v2"', text],
     [1, '"error": {', "", ""],
-    [2, '"code": ', '"search_index_stale"', text],
+    [2, '"code": ', '"search_index"', text],
     [2, '"severity": ', '"medium"', "#fdba74"],
-    [2, '"repair": ', '"ee index rebuild --workspace ."', text],
+    [2, '"repair": ', '"ee index rebuild"', text],
     [2, '"details": { "recovery": [{', "", ""],
-    [3, '"priority": ', "0", "#c4b5fd"],
+    [3, '"priority": ', "1", "#c4b5fd"],
     [3, '"riskClass": ', '"idempotent_refresh"', "#86efac"],
     [3, '"requiresHumanApproval": ', "false", "#fda4af"],
     [3, '"command": ', '"ee index rebuild …"', text],
@@ -164,7 +168,7 @@ function Envelope({ width, height, colour }: { width: number; height: number; co
           <div style={{ width: 10, height: 10, borderRadius: 9999, background: "#fb7185", display: "flex" }} />
           <div style={{ width: 10, height: 10, borderRadius: 9999, background: "#fbbf24", display: "flex" }} />
           <div style={{ width: 10, height: 10, borderRadius: 9999, background: colour, display: "flex" }} />
-          <span style={{ marginLeft: 10, fontSize: 14, color: plain }}>$ ee search "release" --json · exit 4</span>
+          <span style={{ marginLeft: 10, fontSize: 14, color: plain }}>exit 4 · a search index error</span>
         </div>
         {lines.map(([depth, head, value, valueColour], index) => (
           <div key={index} style={{ display: "flex", paddingLeft: depth * 20, whiteSpace: "nowrap" }}>
@@ -405,9 +409,12 @@ export async function shareCard(width: number, height: number, id: CardId = "hom
 
         <div style={{ display: "flex", flexDirection: "column", marginTop: 26, fontWeight: 800, letterSpacing: -3.2, lineHeight: 1.0 }}>
           <span style={{ fontSize: 66, color: "#ffffff" }}>{words.headline}</span>
+          {/* Clipped text is painted only inside the box, which at line-height 1 ends above a descender: pad it, then take the padding back. */}
           <span
             style={{
               fontSize: 66,
+              paddingBottom: 16,
+              marginBottom: -16,
               backgroundImage: `linear-gradient(100deg, ${tint(colour, 0.7)} 0%, ${tint(colour, 0.25)} 40%, ${colour} 75%, #67e8f9 120%)`,
               backgroundClip: "text",
               color: "transparent",
