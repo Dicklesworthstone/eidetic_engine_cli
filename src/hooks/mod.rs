@@ -9,11 +9,10 @@ pub use installer::{
     HarnessConformanceCompatibility, HarnessConformanceExpected, HarnessConformanceInput,
     HarnessConformanceSimulationOptions, HarnessConformanceSupport, HarnessConformanceTranscript,
     HarnessHookCapabilityGap, HarnessHookCounts, HarnessHookInstallAuditDocLink,
-    HarnessHookInstallAuditFinding,
-    HarnessHookInstallAuditRepair, HarnessHookInstallAuditReport, HarnessHookInstallOptions,
-    HarnessHookInstallReport, HarnessHookInvocation, HarnessHookMarkers, HarnessHookPlanItem,
-    HarnessHookSnippet, HarnessHookTarget, check_git_hook_readiness, generate_harness_hook_install,
-    simulate_harness_conformance,
+    HarnessHookInstallAuditFinding, HarnessHookInstallAuditRepair, HarnessHookInstallAuditReport,
+    HarnessHookInstallOptions, HarnessHookInstallReport, HarnessHookInvocation, HarnessHookMarkers,
+    HarnessHookPlanItem, HarnessHookSnippet, HarnessHookTarget, check_git_hook_readiness,
+    generate_harness_hook_install, simulate_harness_conformance,
 };
 
 pub const SUBSYSTEM: &str = "hooks";

@@ -3656,13 +3656,13 @@ fn query_assistance_preserves_captured_applicability_and_source_content() {
         let mut options = fixture.options();
         options.as_of = Some(captured);
         options.include_future = include_future;
-        let visible = query_assist_visible_candidates(
-            &options,
-            &hits,
-            &mut Vec::new(),
-            Some(&fixture.db),
+        let visible =
+            query_assist_visible_candidates(&options, &hits, &mut Vec::new(), Some(&fixture.db));
+        assert!(
+            visible
+                .iter()
+                .any(|hit| hit.doc_id == expired_since_capture)
         );
-        assert!(visible.iter().any(|hit| hit.doc_id == expired_since_capture));
         let future = visible.iter().find(|hit| hit.doc_id == future_at_capture);
         assert_eq!(future.is_some(), include_future);
         if let Some(future) = future {

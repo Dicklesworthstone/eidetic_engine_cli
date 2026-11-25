@@ -10,9 +10,8 @@
 
 use ee::core::recorder::{
     RecordPersistedEventError, RecorderEventOptions, RecorderEventsListOptions,
-    RecorderFinishOptions, RecorderStartOptions,
-    finish_and_persist_recording, list_recorder_events, record_and_persist_event,
-    start_and_persist_recording,
+    RecorderFinishOptions, RecorderStartOptions, finish_and_persist_recording,
+    list_recorder_events, record_and_persist_event, start_and_persist_recording,
 };
 use ee::db::{CreateRecorderEventInput, CreateRecorderRunInput, DbConnection};
 use ee::models::{RecorderEventType, RecorderRunStatus};
@@ -291,8 +290,15 @@ fn recorder_terminal_runs_refuse_core_and_direct_database_appends() {
             .is_err(),
             "direct writes must also refuse {status} runs"
         );
-        assert_eq!(conn.get_recorder_run(&run_id).expect("unchanged run"), before);
-        assert!(conn.list_recorder_events(&run_id).expect("events").is_empty());
+        assert_eq!(
+            conn.get_recorder_run(&run_id).expect("unchanged run"),
+            before
+        );
+        assert!(
+            conn.list_recorder_events(&run_id)
+                .expect("events")
+                .is_empty()
+        );
     }
 }
 
@@ -329,20 +335,28 @@ fn recorder_append_refuses_malformed_earlier_rows_without_hydrating_them() {
     // CHECK accepts this positive integer, but the existing u32 decoder rejects it.
     conn.execute_raw("DROP TRIGGER recorder_events_no_update")
         .expect("fixture trigger");
-    conn.execute_raw("UPDATE recorder_events SET source_line_start = 4294967296 WHERE sequence = 1")
-        .expect("corrupt earlier metadata");
+    conn.execute_raw(
+        "UPDATE recorder_events SET source_line_start = 4294967296 WHERE sequence = 1",
+    )
+    .expect("corrupt earlier metadata");
     assert!(
         conn.list_recorder_events(&start.run_id).is_err(),
         "old full-row reader rejects it"
     );
     let error = record_and_persist_event(&conn, &event_options(&start.run_id, Some("third")))
         .expect_err("aggregate guard must retain the decoder's rejection");
-    assert!(error.to_string().contains("malformed event rows"), "{error}");
+    assert!(
+        error.to_string().contains("malformed event rows"),
+        "{error}"
+    );
     let tail = conn
         .list_recorder_events_filtered(Some(&start.run_id), None, None, 1)
         .expect("last row remains valid");
     assert_eq!(tail.len(), 1);
-    assert_eq!(tail[0].event_id, last.event_id, "no later event was inserted");
+    assert_eq!(
+        tail[0].event_id, last.event_id,
+        "no later event was inserted"
+    );
 }
 
 #[test]
@@ -480,8 +494,7 @@ fn recorder_finish_preview_works_on_read_only_connection_and_releases_snapshot()
     let writer = DbConnection::open_file(&database).expect("database");
     writer.migrate().expect("schema");
     let start = start_and_persist_recording(&writer, &start_options()).expect("start");
-    record_and_persist_event(&writer, &event_options(&start.run_id, Some("first")))
-        .expect("event");
+    record_and_persist_event(&writer, &event_options(&start.run_id, Some("first"))).expect("event");
     let before = writer.get_recorder_run(&start.run_id).expect("active row");
     let reader = DbConnection::open_file_read_only(&database).expect("read-only database");
     let options = RecorderFinishOptions {
@@ -500,7 +513,10 @@ fn recorder_finish_preview_works_on_read_only_connection_and_releases_snapshot()
     record_and_persist_event(&writer, &event_options(&start.run_id, Some("second")))
         .expect("writer continues after preview");
     let second = finish_and_persist_recording(&reader, &options).expect("new preview snapshot");
-    assert_eq!(second.event_count, 2, "the prior read snapshot was released");
+    assert_eq!(
+        second.event_count, 2,
+        "the prior read snapshot was released"
+    );
 }
 
 #[test]
@@ -629,12 +645,17 @@ fn recorder_finish_and_parallel_appends_share_one_terminal_snapshot() {
             Err(error) => panic!("unexpected append failure: {error}"),
         }
     }
-    let rows = conn.list_recorder_events(&start.run_id).expect("final events");
+    let rows = conn
+        .list_recorder_events(&start.run_id)
+        .expect("final events");
     let stored = conn
         .get_recorder_run(&start.run_id)
         .expect("run")
         .expect("present");
-    assert_eq!(u64::try_from(rows.len()).expect("bounded fixture"), accepted);
+    assert_eq!(
+        u64::try_from(rows.len()).expect("bounded fixture"),
+        accepted
+    );
     assert_eq!(finished.event_count, accepted);
     assert_eq!(stored.event_count, accepted);
     assert_eq!(

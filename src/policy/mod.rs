@@ -7236,7 +7236,11 @@ mod tests {
                 "[REDACTED:phone_number] [REDACTED:email_address] [REDACTED:email_address]",
                 &["email_address", "phone_number"],
             ),
-            ("ordinary release evidence", "ordinary release evidence", &[]),
+            (
+                "ordinary release evidence",
+                "ordinary release evidence",
+                &[],
+            ),
             (
                 "a@b.c 1025550123 ２０２５５５０１２３",
                 "a@b.c 1025550123 ２０２５５５０１２３",

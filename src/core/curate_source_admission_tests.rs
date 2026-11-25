@@ -1061,7 +1061,9 @@ fn inherited_seals_guard_derivation_reflection_and_batched_source_selection() ->
             .map_err(|error| error.to_string())?
     );
     fixture.derive(true).map_err(|error| error.message())?;
-    fixture.reflect(true, false).map_err(|error| error.message())?;
+    fixture
+        .reflect(true, false)
+        .map_err(|error| error.message())?;
     assert!(
         curate_core::source_admission::withheld_memory_ids(
             &fixture.connection,

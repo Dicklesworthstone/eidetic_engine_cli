@@ -44169,10 +44169,7 @@ impl DbConnection {
     /// required-column checks and refuses sparse/duplicate sequences instead
     /// of silently extending a damaged chain. Call inside the append's writer
     /// transaction so the aggregate and tail describe the same history.
-    pub(crate) fn recorder_append_tail(
-        &self,
-        run_id: &str,
-    ) -> Result<Option<StoredRecorderEvent>> {
+    pub(crate) fn recorder_append_tail(&self, run_id: &str) -> Result<Option<StoredRecorderEvent>> {
         let rows = self.query_for(
             DbOperation::Query,
             r"SELECT COUNT(*), COUNT(DISTINCT sequence), MIN(sequence), MAX(sequence),
@@ -44221,7 +44218,10 @@ impl DbConnection {
             "SELECT event_id, run_id, sequence, event_type, timestamp, payload_hash, payload_bytes, redaction_status, redacted_bytes, previous_event_hash, event_hash, chain_status, source_span_id, source_line_start, source_line_end, created_at FROM recorder_events WHERE run_id = ?1 ORDER BY sequence DESC LIMIT 1",
             &[Value::Text(run_id.to_owned())],
         )?;
-        let tail = rows.first().map(stored_recorder_event_from_row).transpose()?;
+        let tail = rows
+            .first()
+            .map(stored_recorder_event_from_row)
+            .transpose()?;
         if tail.as_ref().map(|event| event.sequence) != Some(last) {
             return Err(DbError::MalformedRow {
                 operation: DbOperation::Query,

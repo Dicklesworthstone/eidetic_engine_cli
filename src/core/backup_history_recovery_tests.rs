@@ -263,7 +263,10 @@ mod rule_redaction_recovery {
                         if matches!(trust, TrustClass::CassEvidence | TrustClass::LegacyImport) {
                             assert_eq!(actual.trust_class, source.trust_class);
                         }
-                        assert_eq!(actual.negative_feedback_count, source.negative_feedback_count);
+                        assert_eq!(
+                            actual.negative_feedback_count,
+                            source.negative_feedback_count
+                        );
                         assert_eq!(
                             actual.validation_contradictions,
                             source.validation_contradictions
@@ -419,7 +422,10 @@ mod rule_redaction_recovery {
             .iter()
             .filter(|entry| entry.code == BACKUP_RULE_REDACTION_REVIEW_REQUIRED_CODE)
             .collect::<Vec<_>>();
-        assert_eq!(warnings.len(), usize::from(redaction == RedactionLevel::Standard));
+        assert_eq!(
+            warnings.len(),
+            usize::from(redaction == RedactionLevel::Standard)
+        );
         if let Some(warning) = warnings.first() {
             assert!(warning.message.contains("changed 2 active native rules"));
             assert!(!warning.message.contains("rule-scope-canary"));
@@ -444,7 +450,8 @@ mod rule_redaction_recovery {
         let db = DbConnection::open_file(&source.database).map_err(|e| e.to_string())?;
         for original in &source.source_rules {
             assert_eq!(
-                db.get_procedural_rule(&original.id).map_err(|e| e.to_string())?,
+                db.get_procedural_rule(&original.id)
+                    .map_err(|e| e.to_string())?,
                 Some(original.clone())
             );
         }
@@ -453,7 +460,10 @@ mod rule_redaction_recovery {
             .map_err(|e| e.to_string())?;
         assert_eq!(events.len(), source.source_feedback.len());
         for original in &source.source_feedback {
-            assert_eq!(events.iter().find(|event| event.id == original.id), Some(original));
+            assert_eq!(
+                events.iter().find(|event| event.id == original.id),
+                Some(original)
+            );
         }
         db.close().map_err(|e| e.to_string())
     }
@@ -470,9 +480,10 @@ mod rule_redaction_recovery {
                 })
                 .map_err(|e| e.message())?;
                 assert_eq!(
-                    inspected.degraded.iter().any(|entry| {
-                        entry.code == BACKUP_RULE_REDACTION_REVIEW_REQUIRED_CODE
-                    }),
+                    inspected
+                        .degraded
+                        .iter()
+                        .any(|entry| { entry.code == BACKUP_RULE_REDACTION_REVIEW_REQUIRED_CODE }),
                     needs_warning
                 );
                 assert_eq!(
@@ -489,9 +500,10 @@ mod rule_redaction_recovery {
                 let preview =
                     restore_backup_to_side_path(&preview_options).map_err(|e| e.message())?;
                 assert_eq!(
-                    preview.degraded.iter().any(|entry| {
-                        entry.code == BACKUP_RULE_REDACTION_REVIEW_REQUIRED_CODE
-                    }),
+                    preview
+                        .degraded
+                        .iter()
+                        .any(|entry| { entry.code == BACKUP_RULE_REDACTION_REVIEW_REQUIRED_CODE }),
                     needs_warning
                 );
                 assert!(!options.side_path.join(WORKSPACE_MARKER).exists());
@@ -501,9 +513,10 @@ mod rule_redaction_recovery {
                 assert_eq!(restored.restored_rule_tag_count, 4);
                 assert_eq!(restored.restored_feedback_count, 2);
                 assert_eq!(
-                    restored.degraded.iter().any(|entry| {
-                        entry.code == BACKUP_RULE_REDACTION_REVIEW_REQUIRED_CODE
-                    }),
+                    restored
+                        .degraded
+                        .iter()
+                        .any(|entry| { entry.code == BACKUP_RULE_REDACTION_REVIEW_REQUIRED_CODE }),
                     needs_warning
                 );
                 let db = DbConnection::open_file(&restored.restored_database_path)
@@ -541,7 +554,9 @@ mod rule_redaction_recovery {
                         expected.last_validated_at = None;
                     }
                     assert_eq!(actual, expected);
-                    let rule_sources = sources.get(&original.id).ok_or("source relationship lost")?;
+                    let rule_sources = sources
+                        .get(&original.id)
+                        .ok_or("source relationship lost")?;
                     let rule_tags = tags.get(&original.id).ok_or("rule tags lost")?;
                     assert_eq!(rule_sources, &vec![memory_id.clone()]);
                     assert_eq!(rule_tags, &vec!["release".to_owned()]);
@@ -633,7 +648,9 @@ mod rule_redaction_recovery {
         .err()
         .ok_or("published restored authority for redacted instructions")?;
         assert!(
-            error.message().contains("content differs for procedural_rules"),
+            error
+                .message()
+                .contains("content differs for procedural_rules"),
             "{}",
             error.message()
         );

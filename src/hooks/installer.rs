@@ -6016,9 +6016,15 @@ print(json.dumps({"success": True, "data": {"ambientContext": {"text": "Anchored
             .ok_or("hook context missing")?;
         assert!(context.contains("Anchored recall fixture"));
         assert!(context.contains("provenance=ee:ee.ambient_context.v1"));
-        assert_eq!(response["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(
+            response["hookSpecificOutput"]["hookEventName"],
+            "PreToolUse"
+        );
         let duplicate = run_python_hook_probe(pre_edit_python(), &event, temp.path(), &ee_binary)?;
-        assert!(duplicate.stdout.is_empty(), "repeat context must stay deduplicated");
+        assert!(
+            duplicate.stdout.is_empty(),
+            "repeat context must stay deduplicated"
+        );
         assert!(duplicate.stderr.is_empty());
         assert!(!temp.path().join("recall-argv.json").exists());
         Ok(())

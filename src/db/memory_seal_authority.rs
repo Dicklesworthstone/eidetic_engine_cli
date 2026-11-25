@@ -282,7 +282,11 @@ mod tests {
             capture_query_sql_for_test(|| connection.get_effective_memory_seals_batch(&requested));
         assert_eq!(actual?, expected);
         assert!(expected.is_empty());
-        assert_eq!(queries.len(), 2, "one absence witness per deduplicated page");
+        assert_eq!(
+            queries.len(),
+            2,
+            "one absence witness per deduplicated page"
+        );
         assert!(queries.iter().all(|sql| {
             sql.contains("EXISTS")
                 && !sql.contains("JOIN")

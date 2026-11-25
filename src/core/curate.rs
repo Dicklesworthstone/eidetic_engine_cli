@@ -12215,7 +12215,10 @@ fn steward_consolidation_source_id(stored: &StoredCurationCandidate) -> Option<&
     if stored.source_type != crate::curate::CandidateSource::RuleEngine.as_str() {
         return None;
     }
-    stored.source_id.as_deref().filter(|id| id.starts_with("mem_"))
+    stored
+        .source_id
+        .as_deref()
+        .filter(|id| id.starts_with("mem_"))
 }
 
 /// Revalidate a `Consolidate` candidate at apply time. A candidate only
@@ -14535,13 +14538,18 @@ fn require_memory_update_target_authority(
         return Ok(());
     }
     source_admission::with_snapshot(connection, || {
-        let unavailable = || DomainError::Storage {
+        let unavailable = || {
+            DomainError::Storage {
             message: "Could not verify current curation target authority; no memory update was authorized."
                 .to_owned(),
             repair: Some("ee doctor --json".to_owned()),
+        }
         };
         let target_id = required_stored_target_memory_id(stored)?;
-        let Some(target) = connection.get_memory(target_id).map_err(|_| unavailable())? else {
+        let Some(target) = connection
+            .get_memory(target_id)
+            .map_err(|_| unavailable())?
+        else {
             // The ordinary target validator owns missing and foreign rows.
             return Ok(());
         };
@@ -14561,7 +14569,9 @@ fn require_memory_update_target_authority(
         {
             return Err(refuse(
                 "is superseded",
-                format!("Inspect ee memory history {target_id} --json and propose against the current revision."),
+                format!(
+                    "Inspect ee memory history {target_id} --json and propose against the current revision."
+                ),
             ));
         }
         if crate::core::memory::resolve_memory_seal_lineage(connection, &target)

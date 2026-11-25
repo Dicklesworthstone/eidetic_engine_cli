@@ -1847,8 +1847,7 @@ fn mark_rule_in_snapshot(
     trigger: RuleLifecycleTrigger,
     options: &RuleMarkOptions<'_>,
 ) -> Result<RuleMarkReport, DomainError> {
-    if trigger != RuleLifecycleTrigger::Supersede
-        && options.evidence.superseding_rule_id.is_some()
+    if trigger != RuleLifecycleTrigger::Supersede && options.evidence.superseding_rule_id.is_some()
     {
         return Err(rule_read_usage_error(
             "a superseding replacement is only valid for the supersede trigger".to_owned(),
@@ -3947,9 +3946,11 @@ fn build_rule_lifecycle_evidence(
         }
         let superseding = load_active_rule(connection, workspace_id, &superseding_rule_id)?;
         let replacement_maturity =
-            RuleMaturity::from_str(&superseding.maturity).map_err(|error| DomainError::Storage {
-                message: format!("Superseding procedural rule has invalid maturity: {error}"),
-                repair: Some(format!("ee rule show {superseding_rule_id} --json")),
+            RuleMaturity::from_str(&superseding.maturity).map_err(|error| {
+                DomainError::Storage {
+                    message: format!("Superseding procedural rule has invalid maturity: {error}"),
+                    repair: Some(format!("ee rule show {superseding_rule_id} --json")),
+                }
             })?;
         if replacement_maturity.is_terminal() || superseding.superseded_by.is_some() {
             return Err(rule_read_usage_error(
@@ -5770,12 +5771,8 @@ mod tests {
             connection.close().map_err(|error| error.to_string())?;
             for trigger in ["validation_passed", "review_approved"] {
                 for dry_run in [true, false] {
-                    let mut options = lifecycle_mark_options(
-                        directory.path(),
-                        &database,
-                        &rule_id,
-                        trigger,
-                    );
+                    let mut options =
+                        lifecycle_mark_options(directory.path(), &database, &rule_id, trigger);
                     options.evidence.helpful_outcomes = 1;
                     options.evidence.validation_passes = 1;
                     options.evidence.review_approved = true;
@@ -5810,12 +5807,8 @@ mod tests {
         let sources = seed_rule_source_group(&connection, &workspace_id, 100, SOURCE)?;
         let rule_id = seed_lifecycle_rule(&connection, &workspace_id, sources.clone())?;
         connection.close().map_err(|error| error.to_string())?;
-        let mut options = lifecycle_mark_options(
-            directory.path(),
-            &database,
-            &rule_id,
-            "validation_passed",
-        );
+        let mut options =
+            lifecycle_mark_options(directory.path(), &database, &rule_id, "validation_passed");
         options.evidence.helpful_outcomes = 1;
         options.evidence.validation_passes = 1;
         options.evidence.review_approved = true;
@@ -5874,12 +5867,8 @@ mod tests {
             .logical_table_digests()
             .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
-        let mut options = lifecycle_mark_options(
-            directory.path(),
-            &database,
-            &first,
-            "outcome_helpful",
-        );
+        let mut options =
+            lifecycle_mark_options(directory.path(), &database, &first, "outcome_helpful");
         options.evidence.superseding_rule_id = Some(&second);
         for dry_run in [true, false] {
             options.dry_run = dry_run;
@@ -5901,10 +5890,7 @@ mod tests {
         options.trigger = "supersede";
         options.dry_run = false;
         let forward = mark_rule(&options).map_err(|error| error.message())?;
-        assert_eq!(
-            forward.rule.superseded_by.as_deref(),
-            Some(second.as_str())
-        );
+        assert_eq!(forward.rule.superseded_by.as_deref(), Some(second.as_str()));
         assert_eq!(forward.rule.maturity, "superseded");
 
         options.rule_id = &second;
@@ -5969,12 +5955,8 @@ mod tests {
                 .logical_table_digests()
                 .map_err(|error| error.to_string())?;
             connection.close().map_err(|error| error.to_string())?;
-            let options = lifecycle_mark_options(
-                directory.path(),
-                &database,
-                &rule_id,
-                "outcome_helpful",
-            );
+            let options =
+                lifecycle_mark_options(directory.path(), &database, &rule_id, "outcome_helpful");
             let error =
                 mark_rule(&options).expect_err("failed lifecycle writes must not report success");
             if ignored {

@@ -452,25 +452,35 @@ fn superseded_memory_preserves_feedback_receipts_but_only_its_new_revision_can_l
         record_outcome(&options).unwrap().status,
         OutcomeRecordStatus::Recorded
     );
-    let revision = crate::core::memory::revise_memory(
-        &crate::core::memory::ReviseMemoryOptions {
-            database_path: &fixture.database,
-            original_memory_id: MEMORY,
-            content: Some("Release validation requires integration and migration checks."),
-            level: None,
-            kind: None,
-            confidence: None,
-            tags: None,
-            provenance_uri: None,
-            reason: crate::core::memory::ReviseReason::Update,
-            actor: Some("atomic-learning-reviewer"),
-            dry_run: false,
-        },
-    );
+    let revision = crate::core::memory::revise_memory(&crate::core::memory::ReviseMemoryOptions {
+        database_path: &fixture.database,
+        original_memory_id: MEMORY,
+        content: Some("Release validation requires integration and migration checks."),
+        level: None,
+        kind: None,
+        confidence: None,
+        tags: None,
+        provenance_uri: None,
+        reason: crate::core::memory::ReviseReason::Update,
+        actor: Some("atomic-learning-reviewer"),
+        dry_run: false,
+    });
     assert!(revision.success && revision.persisted, "{revision:?}");
     let new_id = revision.new_id.as_deref().unwrap();
-    assert!(fixture.db.get_memory_superseded_at(MEMORY).unwrap().is_some());
-    assert!(fixture.db.get_memory_superseded_at(new_id).unwrap().is_none());
+    assert!(
+        fixture
+            .db
+            .get_memory_superseded_at(MEMORY)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        fixture
+            .db
+            .get_memory_superseded_at(new_id)
+            .unwrap()
+            .is_none()
+    );
     let before = fixture.persisted_feedback_state();
     let new_memory = fixture.db.get_memory(new_id).unwrap();
     let new_posterior = fixture

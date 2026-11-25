@@ -459,9 +459,12 @@ fn memory_provenance_survives_restore_rebackup_and_real_reverification() -> Test
     let expected = read_provenance(&source)?;
     source.close().map_err(|error| error.to_string())?;
     let first = restore_backup_to_side_path(&fixture.options).map_err(|error| error.message())?;
-    assert!(!first.degraded.iter().any(|item| {
-        item.code == "backup_memory_provenance_unavailable"
-    }));
+    assert!(
+        !first
+            .degraded
+            .iter()
+            .any(|item| { item.code == "backup_memory_provenance_unavailable" })
+    );
     let db = DbConnection::open_file(&first.restored_database_path)
         .map_err(|error| error.to_string())?;
     assert_eq!(read_provenance(&db)?, expected);
@@ -507,13 +510,21 @@ fn memory_provenance_survives_restore_rebackup_and_real_reverification() -> Test
     assert_eq!(checked.mismatch_count, 2);
     assert_eq!(checked.missing_count, 2);
     assert_eq!(checked.verified_count, 4);
-    for (number, status) in [(3, "mismatch"), (4, "missing"), (7, "mismatch"), (8, "missing")] {
+    for (number, status) in [
+        (3, "mismatch"),
+        (4, "missing"),
+        (7, "mismatch"),
+        (8, "missing"),
+    ] {
         let row = checked
             .records
             .iter()
             .find(|row| row.memory_id == provenance_memory_id(number))
             .ok_or("integrity sample omitted historical provenance")?;
-        assert_eq!(row.status, status, "recovery must not heal source corruption");
+        assert_eq!(
+            row.status, status,
+            "recovery must not heal source corruption"
+        );
     }
     db.close().map_err(|error| error.to_string())?;
     Ok(())
@@ -559,12 +570,14 @@ fn redacted_memory_cannot_rebind_a_previously_verified_commitment() -> TestResul
     assert!(!bytes.contains("PRIVATE_PROVENANCE_BODY"));
     assert!(!bytes.contains("PRIVATE_PROVENANCE_HASH"));
     assert!(!bytes.contains("PRIVATE_PROVENANCE_TIME"));
-    assert!(!bytes.contains(
-        original
-            .provenance_chain_hash
-            .as_deref()
-            .ok_or("source commitment missing")?
-    ));
+    assert!(
+        !bytes.contains(
+            original
+                .provenance_chain_hash
+                .as_deref()
+                .ok_or("source commitment missing")?
+        )
+    );
     let restored =
         restore_backup_to_side_path(&fixture.options).map_err(|error| error.message())?;
     let db = DbConnection::open_file(&restored.restored_database_path)
@@ -652,7 +665,10 @@ fn both_recovery_fences_reject_changed_memory_provenance_without_count_changes()
                 "timestamp",
                 "provenance_verified_at = '2026-10-01T00:00:00+00:00'",
             ),
-            ("note", "provenance_verification_note = 'PRIVATE_MUTATION_SENTINEL'"),
+            (
+                "note",
+                "provenance_verification_note = 'PRIVATE_MUTATION_SENTINEL'",
+            ),
         ] {
             let mut options = fixture.options.clone();
             options.side_path = fixture.root.path().join(format!("changed-{late}-{column}"));
@@ -685,9 +701,14 @@ fn both_recovery_fences_reject_changed_memory_provenance_without_count_changes()
                 restore_backup_to_side_path_with_recovery_hooks(&options, mutate, |_| Ok(()))
             };
             let error = result.err().ok_or("published altered memory provenance")?;
-            assert!(reached_fence, "restore must reach the intended mutation fence");
             assert!(
-                error.message().contains("Restored durable content differs for memories"),
+                reached_fence,
+                "restore must reach the intended mutation fence"
+            );
+            assert!(
+                error
+                    .message()
+                    .contains("Restored durable content differs for memories"),
                 "{}",
                 error.message()
             );
@@ -804,7 +825,9 @@ fn provenance_expectation_rejects_incomplete_duplicate_or_substituted_carriers()
         }
         let result = TrustExpectation::from_assets(&assets, &original.backup_id, &workspace_id())
             .and_then(|expectation| expectation.verify_connection(&source));
-        let error = result.err().ok_or("admitted invalid memory provenance carrier")?;
+        let error = result
+            .err()
+            .ok_or("admitted invalid memory provenance carrier")?;
         assert!(!error.message().contains("PRIVATE_PROVENANCE"));
         assert_eq!(read_provenance(&source)?, source_before);
     }
@@ -855,28 +878,17 @@ fn legacy_provenance_fence_requires_missing_commitments_including_historical_row
     Ok(())
 }
 
-fn sign_admission_trust_chunk(
-    chunk: &mut BackupTrustHistory,
-    root: &StoreAuthRoot,
-) -> TestResult {
+fn sign_admission_trust_chunk(chunk: &mut BackupTrustHistory, root: &StoreAuthRoot) -> TestResult {
     // Sign the encoded shape directly: malformed-shape controls must reach
     // semantic admission with valid authentication, not fail in a test signer.
     chunk.authentication = None;
-    let hash = canonical_record_hash(
-        &serde_json::to_vec(&chunk).map_err(|error| error.to_string())?,
-    );
-    let context = crate::core::backup::trust_history_auth_context(
-        &chunk.schema,
-        &chunk.workspace_id,
-    );
-    let header = authenticate_artifact(
-        root,
-        MacDomain::NativeImportRecordsRoot,
-        &context,
-        &hash,
-        1,
-    )
-    .map_err(|error| error.to_string())?;
+    let hash =
+        canonical_record_hash(&serde_json::to_vec(&chunk).map_err(|error| error.to_string())?);
+    let context =
+        crate::core::backup::trust_history_auth_context(&chunk.schema, &chunk.workspace_id);
+    let header =
+        authenticate_artifact(root, MacDomain::NativeImportRecordsRoot, &context, &hash, 1)
+            .map_err(|error| error.to_string())?;
     assert!(
         verify_artifact(
             root,
@@ -930,14 +942,16 @@ fn write_admission_archive(
     Ok(())
 }
 
-fn key_file_fingerprints(
-    directory: &std::path::Path,
-) -> Result<BTreeMap<PathBuf, String>, String> {
+fn key_file_fingerprints(directory: &std::path::Path) -> Result<BTreeMap<PathBuf, String>, String> {
     let mut fingerprints = BTreeMap::new();
     for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let path = entry.path();
-        if entry.file_type().map_err(|error| error.to_string())?.is_dir() {
+        if entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_dir()
+        {
             fingerprints.extend(key_file_fingerprints(&path)?);
         } else {
             fingerprints.insert(
@@ -962,7 +976,10 @@ fn public_verification_rejects_invalid_provenance_before_any_restore_writes() ->
         read_backup_manifest(&fixture.options.backup_path).map_err(|error| error.message())?;
     let original: BackupTrustHistory = serde_json::from_slice(
         &std::fs::read(
-            fixture.options.backup_path.join("derived/trust-history/00000000.json"),
+            fixture
+                .options
+                .backup_path
+                .join("derived/trust-history/00000000.json"),
         )
         .map_err(|error| error.to_string())?,
     )
@@ -970,9 +987,8 @@ fn public_verification_rejects_invalid_provenance_before_any_restore_writes() ->
     let key_directory = workspace_keys_dir(&fixture.options.workspace_path);
     let root = StoreAuthRoot::open(&key_directory).map_err(|error| error.to_string())?;
     let keys_before = key_file_fingerprints(&key_directory)?;
-    let database_before = hash_bytes(
-        &std::fs::read(&fixture.database).map_err(|error| error.to_string())?,
-    );
+    let database_before =
+        hash_bytes(&std::fs::read(&fixture.database).map_err(|error| error.to_string())?);
     for defect in [
         "empty",
         "missing",
@@ -1066,12 +1082,29 @@ fn public_verification_rejects_invalid_provenance_before_any_restore_writes() ->
             .filter(|issue| backup_verification_issue_is_blocking(issue))
             .map(|issue| issue.code.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(blocking, vec!["trust_history_invalid"], "wrong boundary for {defect}");
-        assert!(report.checked_derived.iter().any(|asset| asset.kind == "trust_history"));
-        assert!(!report.data_json().to_string().contains("PRIVATE_ADMISSION_SENTINEL"));
+        assert_eq!(
+            blocking,
+            vec!["trust_history_invalid"],
+            "wrong boundary for {defect}"
+        );
+        assert!(
+            report
+                .checked_derived
+                .iter()
+                .any(|asset| asset.kind == "trust_history")
+        );
+        assert!(
+            !report
+                .data_json()
+                .to_string()
+                .contains("PRIVATE_ADMISSION_SENTINEL")
+        );
         for dry_run in [true, false] {
             let mut options = fixture.options.clone();
-            options.side_path = fixture.root.path().join(format!("refused-{defect}-{dry_run}"));
+            options.side_path = fixture
+                .root
+                .path()
+                .join(format!("refused-{defect}-{dry_run}"));
             options.dry_run = dry_run;
             let error = restore_backup_to_side_path(&options)
                 .err()
@@ -1081,7 +1114,10 @@ fn public_verification_rejects_invalid_provenance_before_any_restore_writes() ->
                 "{defect}: {}",
                 error.message()
             );
-            assert!(!options.side_path.exists(), "created a destination for {defect}");
+            assert!(
+                !options.side_path.exists(),
+                "created a destination for {defect}"
+            );
             assert!(!workspace_keys_dir(&options.side_path).exists());
         }
         assert_eq!(key_file_fingerprints(&key_directory)?, keys_before);
@@ -1107,15 +1143,21 @@ fn public_provenance_admission_accepts_redacted_ids_and_explicit_legacy_history(
         options.dry_run = true;
         let preview = restore_backup_to_side_path(&options).map_err(|error| error.message())?;
         assert_eq!(preview.status, "dry_run");
-        assert!(!preview.degraded.iter().any(|entry| {
-            entry.code == "backup_memory_provenance_unavailable"
-        }));
+        assert!(
+            !preview
+                .degraded
+                .iter()
+                .any(|entry| { entry.code == "backup_memory_provenance_unavailable" })
+        );
         assert!(!options.side_path.exists());
         let (_, manifest) =
             read_backup_manifest(&fixture.options.backup_path).map_err(|error| error.message())?;
         let mut legacy: BackupTrustHistory = serde_json::from_slice(
             &std::fs::read(
-                fixture.options.backup_path.join("derived/trust-history/00000000.json"),
+                fixture
+                    .options
+                    .backup_path
+                    .join("derived/trust-history/00000000.json"),
             )
             .map_err(|error| error.to_string())?,
         )
@@ -1130,9 +1172,12 @@ fn public_provenance_admission_accepts_redacted_ids_and_explicit_legacy_history(
         assert_eq!(report.status, "verified", "{:?}", report.issues);
         let preview = restore_backup_to_side_path(&options).map_err(|error| error.message())?;
         assert_eq!(preview.status, "dry_run");
-        assert!(preview.degraded.iter().any(|entry| {
-            entry.code == "backup_memory_provenance_unavailable"
-        }));
+        assert!(
+            preview
+                .degraded
+                .iter()
+                .any(|entry| { entry.code == "backup_memory_provenance_unavailable" })
+        );
         assert!(!options.side_path.exists());
     }
     Ok(())

@@ -10602,7 +10602,8 @@ fn backup_memory_provenance(
                 row.provenance_verification_status.as_str(),
                 crate::db::PROVENANCE_STATUS_VERIFIED | crate::db::PROVENANCE_STATUS_UNVERIFIED
             ) {
-                row.provenance_verification_status = crate::db::PROVENANCE_STATUS_MISSING.to_owned();
+                row.provenance_verification_status =
+                    crate::db::PROVENANCE_STATUS_MISSING.to_owned();
                 row.provenance_verified_at = None;
                 row.provenance_verification_note = Some(
                     "Backup redaction withheld the original provenance commitment; recovery must not generate a replacement commitment."
@@ -10648,7 +10649,9 @@ fn verify_backup_memory_provenance(
         let mut chunk: BackupTrustHistory = serde_json::from_slice(&bytes)
             .map_err(|_| work_history_error("invalid trust-history asset encoding"))?;
         if !valid_trust_history_schema(&chunk)
-            || schema.as_ref().is_some_and(|expected| *expected != chunk.schema)
+            || schema
+                .as_ref()
+                .is_some_and(|expected| *expected != chunk.schema)
             || chunk.backup_id != inspect.backup_id
             || Some(chunk.workspace_id.as_str()) != inspect.workspace_id.as_deref()
             || chunk.chunk_count != assets.len()
@@ -10723,7 +10726,10 @@ fn verify_backup_memory_provenance(
             .map_err(|_| work_history_error("backup primary records failed recovery admission"))?;
     {
         let expected_ids = expected.memory_ids().collect::<BTreeSet<_>>();
-        let archived_ids = memory_ids.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        let archived_ids = memory_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
         if expected_ids.len() != expected.memory_ids().len()
             || expected_ids.len() as u64 != inspect.counts.memory_count
             || expected_ids != archived_ids
@@ -10756,7 +10762,9 @@ fn read_manifest_bound_backup_asset(
         .metadata()
         .map_err(|_| work_history_error("authenticated backup asset cannot be inspected"))?;
     if !metadata.is_file() || metadata.len() > max_bytes {
-        return Err(work_history_error("invalid authenticated backup asset size"));
+        return Err(work_history_error(
+            "invalid authenticated backup asset size",
+        ));
     }
     let mut bytes = Vec::new();
     file.take(max_bytes + 1)
@@ -11046,9 +11054,7 @@ fn restore_trust_history(
         }
     }
     if has_memory_provenance && memory_provenance.len() != memories.len() {
-        return Err(work_history_error(
-            "incomplete recovered memory provenance",
-        ));
+        return Err(work_history_error("incomplete recovered memory provenance"));
     }
     let mut ids = BTreeSet::new();
     for seal in &seals {
@@ -16770,7 +16776,10 @@ mod tests {
         ensure_equal(report.status.as_str(), "partial", "unsigned backup status")?;
         ensure(
             report.memory_count > 0
-                && report.derived.iter().all(|asset| asset.kind != "trust_history"),
+                && report
+                    .derived
+                    .iter()
+                    .all(|asset| asset.kind != "trust_history"),
             "emergency memory export omits unauthenticated provenance-only trust carriers",
         )?;
         ensure_equal(
@@ -16835,7 +16844,9 @@ mod tests {
         .err()
         .ok_or_else(|| "published unauthenticated agent history".to_owned())?;
         ensure(
-            error.message().contains("require source-store authentication"),
+            error
+                .message()
+                .contains("require source-store authentication"),
             "durable trust history still requires keys",
         )?;
         ensure(
@@ -26491,8 +26502,7 @@ mod tests {
             .map_err(|error| error.to_string())?,
         );
         let signed = serde_json::to_vec(&legacy).map_err(|error| error.to_string())?;
-        let wire: JsonValue =
-            serde_json::from_slice(&signed).map_err(|error| error.to_string())?;
+        let wire: JsonValue = serde_json::from_slice(&signed).map_err(|error| error.to_string())?;
         ensure(
             wire.get("memoryProvenance").is_none(),
             "legacy fixture carries no v2 memory provenance field",
@@ -26507,7 +26517,12 @@ mod tests {
         )
         .map_err(|error| error.message())?;
         ensure_equal(
-            (counts.seals, counts.quarantines, counts.certificates, counts.agents),
+            (
+                counts.seals,
+                counts.quarantines,
+                counts.certificates,
+                counts.agents,
+            ),
             (1, 1, 1, 1),
             "legacy authenticated trust rows remain recoverable",
         )?;
@@ -26551,7 +26566,11 @@ mod tests {
             .verify_sampled_memory_provenance(&workspace_id, 100)
             .map_err(|error| error.to_string())?;
         ensure_equal(
-            (reverified.checked_count, reverified.missing_count, reverified.verified_count),
+            (
+                reverified.checked_count,
+                reverified.missing_count,
+                reverified.verified_count,
+            ),
             (1, 1, 0),
             "explicit reverification cannot certify a missing legacy commitment",
         )
@@ -26620,8 +26639,7 @@ mod tests {
                     asset["byte_size"] = json!(payloads[0].bytes.len());
                 }
             }
-            authenticate_backup_manifest(&mut manifest, &root)
-                .map_err(|error| error.message())?;
+            authenticate_backup_manifest(&mut manifest, &root).map_err(|error| error.message())?;
             fs::write(
                 &created.manifest_path,
                 serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
@@ -26637,14 +26655,18 @@ mod tests {
             };
             for dry_run in [true, false] {
                 options.dry_run = dry_run;
-                let restored = restore_backup_to_side_path(&options)
-                    .map_err(|error| error.message())?;
+                let restored =
+                    restore_backup_to_side_path(&options).map_err(|error| error.message())?;
                 let warning = restored
                     .degraded
                     .iter()
                     .find(|entry| entry.code == BACKUP_MEMORY_PROVENANCE_UNAVAILABLE_CODE)
                     .ok_or_else(|| format!("{legacy_kind} recovery omitted provenance warning"))?;
-                ensure_equal(warning.severity.as_str(), "warning", "legacy provenance severity")?;
+                ensure_equal(
+                    warning.severity.as_str(),
+                    "warning",
+                    "legacy provenance severity",
+                )?;
                 ensure(
                     warning.message.contains("missing commitments")
                         && warning.message.contains("not reverified")

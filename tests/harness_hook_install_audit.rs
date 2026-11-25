@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use ee::hooks::{
-    HARNESS_HOOK_INSTALL_SCHEMA_V2, HarnessHookCounts, HarnessHookInstallOptions, HarnessHookTarget,
-    generate_harness_hook_install,
+    HARNESS_HOOK_INSTALL_SCHEMA_V2, HarnessHookCounts, HarnessHookInstallOptions,
+    HarnessHookTarget, generate_harness_hook_install,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -1287,9 +1287,8 @@ fn install_audit_distinguishes_empty_counts_from_unavailable_settings() -> TestR
 
         let directory = temp.path().join("settings-directory");
         fs::create_dir(&directory).map_err(|error| error.to_string())?;
-        let unreadable =
-            generate_harness_hook_install(&options(target, &directory, false, false))
-                .map_err(|error| error.message())?;
+        let unreadable = generate_harness_hook_install(&options(target, &directory, false, false))
+            .map_err(|error| error.message())?;
         assert_eq!(unreadable.install_audit.duplicate_event_count, None);
         assert_eq!(unreadable.install_audit.duplicate_hook_count, None);
         assert!(directory.is_dir());

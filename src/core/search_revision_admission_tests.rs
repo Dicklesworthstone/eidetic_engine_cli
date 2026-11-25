@@ -325,9 +325,7 @@ fn bounded_batches_preserve_candidate_order_and_defer_unknown_store_identities()
     );
     let revision_reads: Vec<_> = queries
         .iter()
-        .filter(|sql| {
-            sql.starts_with("SELECT id, workspace_id, superseded_at FROM memories WHERE")
-        })
+        .filter(|sql| sql.starts_with("SELECT id, workspace_id, superseded_at FROM memories WHERE"))
         .collect();
     assert_eq!(
         revision_reads.len(),

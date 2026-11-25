@@ -432,8 +432,7 @@ fn mixed_pack_hydration_reads_only_missing_rule_parents_and_preserves_pack() {
         102,
         |_| {},
         |rule| {
-            rule.source_memory_ids =
-                vec![matched[0].memory.clone(), additional.memory.clone()];
+            rule.source_memory_ids = vec![matched[0].memory.clone(), additional.memory.clone()];
         },
     );
     let matched_ids = matched
@@ -457,8 +456,7 @@ fn mixed_pack_hydration_reads_only_missing_rule_parents_and_preserves_pack() {
         },
         ..QueryFilters::default()
     };
-    let (cold, cold_queries) =
-        crate::db::capture_query_sql_for_test(|| f.resolve(&ids, &filters));
+    let (cold, cold_queries) = crate::db::capture_query_sql_for_test(|| f.resolve(&ids, &filters));
     let (warm, warm_queries) = crate::db::capture_query_sql_for_test(|| {
         f.resolve_with_admission(report(&ids), &filters, false, Some(&preloaded))
     });
@@ -491,8 +489,7 @@ fn mixed_pack_hydration_reads_only_missing_rule_parents_and_preserves_pack() {
     request.reference_time = Some(timestamp(BOUND));
     let assemble = |mut resolved: Resolution| {
         let mut draft =
-            crate::pack::assemble_draft(&request.query, request.budget, resolved.memories)
-                .unwrap();
+            crate::pack::assemble_draft(&request.query, request.budget, resolved.memories).unwrap();
         append_ranked_native_pack_items(
             resolved.candidates,
             Vec::new(),
@@ -558,14 +555,12 @@ fn mixed_pack_hydration_uses_local_parent_authority_over_global_preloads() {
     );
     let global_pair = global.add(
         2,
-        |memory| memory.content = "Unrelated global body must not supply a local parent.".to_owned(),
+        |memory| {
+            memory.content = "Unrelated global body must not supply a local parent.".to_owned()
+        },
         |_| {},
     );
-    let global_row = global
-        .db
-        .get_memory(&global_pair.memory)
-        .unwrap()
-        .unwrap();
+    let global_row = global.db.get_memory(&global_pair.memory).unwrap().unwrap();
     for returned_global_hit in [false, true] {
         for copied_workspace in [false, true] {
             let mut preloaded = local.db.get_memories_batch(&[&cached.memory]).unwrap();

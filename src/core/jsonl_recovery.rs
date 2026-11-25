@@ -289,7 +289,9 @@ impl BackupRecordsExpectation {
         source_auth: &StoreAuthRoot,
     ) -> Result<Self, DomainError> {
         if source.len() as u64 > JSONL_IMPORT_MAX_INPUT_BYTES {
-            return Err(mismatch("backup record stream exceeds the import byte limit"));
+            return Err(mismatch(
+                "backup record stream exceeds the import byte limit",
+            ));
         }
         let parsed = parse_jsonl_source(source);
         let auth = native_import_auth_state_with_root(&parsed, source_auth, workspace_id);
@@ -318,7 +320,10 @@ impl BackupRecordsExpectation {
 
     /// Identities after the importer's redaction and revision validation.
     pub(crate) fn memory_ids(&self) -> impl ExactSizeIterator<Item = &str> {
-        self.records.memories.iter().map(|memory| memory.id.as_str())
+        self.records
+            .memories
+            .iter()
+            .map(|memory| memory.id.as_str())
     }
 
     /// Read-only verification of the exact primary graph, including both live
