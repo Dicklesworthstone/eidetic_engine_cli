@@ -175,7 +175,11 @@ const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4: &str = "ee.pack.l2_context_response.v4
 const CONTEXT_SEARCH_ADVISORY_SNAPSHOT_SCHEMA_V1: &str = "ee.context.search_advisory_snapshot.v1";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
 const GRAPH_PPR_UPSTREAM_UNAVAILABLE_MESSAGE: &str = "Personalized PageRank pack influence is unavailable because the pinned FrankenNetworkX dependency does not expose deterministic personalized PageRank; textual ranking and non-PPR graph explanations remain active.";
-const GRAPH_PPR_UPSTREAM_UNAVAILABLE_REPAIR: &str = "Use --ppr-weight 0 and rely on textual ranking until a pinned FrankenNetworkX personalized PageRank API is available.";
+// Both emitters share this text, so it must hold for both: the rerank fires
+// when the PPR feature is on (`ee pack` takes its weight only from config) or
+// `ee context --ppr-weight` is above zero, and Pack DNA fires whenever it runs.
+// `ee pack` has no --ppr-weight, so the flag alone is not a repair.
+const GRAPH_PPR_UPSTREAM_UNAVAILABLE_REPAIR: &str = "Ranking already falls back to text. To stop requesting PPR, run `ee config set graph.feature.ppr.enabled false` and drop --ppr-weight from `ee context`; Pack DNA reports this whenever it runs, until a pinned FrankenNetworkX personalized PageRank API is available.";
 const CONTEXT_CHANGED_SYMBOL_BOOST: f32 = 0.05;
 const CONTEXT_MEMORY_TIER_HOT_BOOST: f32 = 0.025;
 const CONTEXT_MEMORY_TIER_WARM_BOOST: f32 = 0.010;

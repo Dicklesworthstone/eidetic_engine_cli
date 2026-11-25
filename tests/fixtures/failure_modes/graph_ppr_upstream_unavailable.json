@@ -9,9 +9,13 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "Pack PPR influence is requested while the pinned FrankenNetworkX release lacks deterministic personalized PageRank.",
-    "setup_commands": ["ee init --workspace .", "ee config set graph.feature.ppr.enabled true"],
-    "invocation": "ee pack 'graph-aware retrieval' --workspace . --ppr-weight 1 --json"
+    "description": "Pack PPR influence is requested while the pinned FrankenNetworkX release lacks deterministic personalized PageRank. Turning the feature on gives ee pack a PPR weight of graph.ppr.alpha (0.30 by default), and the rerank runs once the pack has a candidate.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee config set graph.feature.ppr.enabled true",
+      "ee remember --workspace . --level semantic --kind fact 'Graph-aware retrieval ranks memories by text and by their links.' --json"
+    ],
+    "invocation": "ee pack 'graph-aware retrieval' --workspace . --json"
   },
   "expected_emission": {
     "code": "graph_ppr_upstream_unavailable",
@@ -21,7 +25,7 @@
       "FrankenNetworkX",
       "textual ranking"
     ],
-    "repair_contains": "--ppr-weight 0",
-    "repair_string": "Use --ppr-weight 0 and rely on textual ranking until a pinned FrankenNetworkX personalized PageRank API is available."
+    "repair_contains": "ee config set graph.feature.ppr.enabled false",
+    "repair_string": "Ranking already falls back to text. To stop requesting PPR, run `ee config set graph.feature.ppr.enabled false` and drop --ppr-weight from `ee context`; Pack DNA reports this whenever it runs, until a pinned FrankenNetworkX personalized PageRank API is available."
   }
 }

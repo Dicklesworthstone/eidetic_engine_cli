@@ -94,7 +94,9 @@ if printf '%s' "$PPR_JSON" | jq . >/dev/null 2>&1; then
         assert_jq "$PPR_UPSTREAM_ENTRY" '.severity // empty' "medium" "g1_ppr_upstream_unavailable_severity"
         assert_jq "$PPR_UPSTREAM_ENTRY" '((.message // "") | test("FrankenNetworkX"))' "true" "g1_ppr_upstream_unavailable_names_blocker"
         assert_jq "$PPR_UPSTREAM_ENTRY" '((.message // "") | test("deterministic personalized PageRank"))' "true" "g1_ppr_upstream_unavailable_names_capability"
-        assert_jq "$PPR_UPSTREAM_ENTRY" '((.repair // "") | test("--ppr-weight 0"))' "true" "g1_ppr_upstream_unavailable_repair_actionable"
+        # The repair is shared with `ee pack`, which has no --ppr-weight, so it
+        # names the config switch that works on both surfaces.
+        assert_jq "$PPR_UPSTREAM_ENTRY" '((.repair // "") | test("ee config set graph[.]feature[.]ppr[.]enabled false"))' "true" "g1_ppr_upstream_unavailable_repair_actionable"
         # The honest consequence: no PPR scores while PPR cannot run. If a
         # breakdown DID appear beside this degradation the surface would be
         # contradicting itself, and that is worth a red.

@@ -7196,24 +7196,25 @@ ee context 'graph-aware retrieval' --workspace . --ppr-weight 1 --json
 
 **Introduced by:** bd-reality-core-convergence-1azkt.15 (epic G)
 
-**Trigger.** Pack PPR influence is requested while the pinned FrankenNetworkX release lacks deterministic personalized PageRank.
+**Trigger.** Pack PPR influence is requested while the pinned FrankenNetworkX release lacks deterministic personalized PageRank. Turning the feature on gives ee pack a PPR weight of graph.ppr.alpha (0.30 by default), and the rerank runs once the pack has a candidate.
 
 **Setup.**
 
 ```bash
 ee init --workspace .
 ee config set graph.feature.ppr.enabled true
+ee remember --workspace . --level semantic --kind fact 'Graph-aware retrieval ranks memories by text and by their links.' --json
 ```
 
 **Invocation.**
 
 ```bash
-ee pack 'graph-aware retrieval' --workspace . --ppr-weight 1 --json
+ee pack 'graph-aware retrieval' --workspace . --json
 ```
 
 **Expected emission.** Message contains: `Personalized PageRank pack influence ... FrankenNetworkX ... textual ranking`
 
-**Repair hint.** Use --ppr-weight 0 and rely on textual ranking until a pinned FrankenNetworkX personalized PageRank API is available.
+**Repair hint.** Ranking already falls back to text. To stop requesting PPR, run `ee config set graph.feature.ppr.enabled false` and drop --ppr-weight from `ee context`; Pack DNA reports this whenever it runs, until a pinned FrankenNetworkX personalized PageRank API is available.
 
 **Fixture.** [`tests/fixtures/failure_modes/graph_ppr_upstream_unavailable.json`](../tests/fixtures/failure_modes/graph_ppr_upstream_unavailable.json)
 
@@ -19546,5 +19547,5 @@ the gap is one of:
 For new degraded codes, follow the J6 fixture-authoring workflow in
 `tests/fixtures/failure_modes/` (see any existing fixture as a
 template), then regenerate.
-<!-- degraded-codes-fingerprint inputs=sha256:1619c14cdbc94b3dd01a22402dfb566fa4e98dd4efb1da0a5df1771ebd1a88a2 -->
-<!-- degraded-codes-fingerprint body=sha256:d6e0e2f2a957f02ee672adc1356f81c57f689d2cce5ef06bab57c5c616a7b8f3 -->
+<!-- degraded-codes-fingerprint inputs=sha256:439babb5d38d23be23550dc6cce83b66c987df60af7e7da609d8a5d90b5e2a8c -->
+<!-- degraded-codes-fingerprint body=sha256:e0e310ea8d418490bc81cadf97445ad0193f9ed5f77520a461f57204dda4dfdc -->
