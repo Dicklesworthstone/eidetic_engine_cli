@@ -991,9 +991,7 @@ fn import_jsonl_records_with_policy(
             match connection.get_memory(&memory.id)? {
                 Some(existing) => {
                     skipped_duplicate = skipped_duplicate.saturating_add(1);
-                    if let Some(issue) = reimport_conflict_issue(&existing, &memory)
-                        .or(typed_fields_conflict_issue(&connection, &memory)?)
-                        .or(code_anchor_conflict_issue(&connection, &memory)?)
+                    if let Some(issue) = existing_memory_conflict(&connection, &existing, &memory)?
                     {
                         report.issues.push(issue);
                         conflicting_memory_ids.insert(memory.id.clone());
@@ -1424,9 +1422,7 @@ fn destination_lineage_issues(
         let existing_logical_id = connection.get_memory_logical_id(&memory.id)?;
         let chain_changed = existing_logical_id.as_deref() != Some(memory.logical_id.as_str());
         let fields_changed = revision_roots.contains(memory.logical_id.as_str())
-            && (reimport_conflict_issue(&existing, memory).is_some()
-                || typed_fields_conflict_issue(connection, memory)?.is_some()
-                || code_anchor_conflict_issue(connection, memory)?.is_some());
+            && existing_memory_conflict(connection, &existing, memory)?.is_some();
         let supersession_changed = if memory.supersession_known || memory.superseded_at.is_some() {
             connection.get_memory_superseded_at(&memory.id)? != memory.superseded_at
         } else {
@@ -1456,6 +1452,34 @@ fn destination_lineage_issues(
         }
     }
     Ok(issues)
+}
+
+/// Use the same identity check before extending a revision chain or attaching
+/// incoming links to a pre-existing endpoint. Only inspect sidecars after
+/// cheaper row comparisons pass.
+fn existing_memory_conflict(
+    connection: &DbConnection,
+    existing: &StoredMemory,
+    incoming: &PreparedMemory,
+) -> Result<Option<JsonlImportIssue>, DbError> {
+    if let Some(issue) = reimport_conflict_issue(existing, incoming) {
+        return Ok(Some(issue));
+    }
+    // Both sides use canonical tag spelling and ascending order.
+    if connection.get_memory_tags(&incoming.id)? != incoming.input.tags {
+        return Ok(Some(JsonlImportIssue::warning(
+            None,
+            "reimport_divergent_existing_row",
+            format!(
+                "memory `{}` differs on tags; the existing row is preserved",
+                incoming.id
+            ),
+        )));
+    }
+    if let Some(issue) = typed_fields_conflict_issue(connection, incoming)? {
+        return Ok(Some(issue));
+    }
+    code_anchor_conflict_issue(connection, incoming)
 }
 
 fn typed_fields_conflict_issue(
@@ -1556,6 +1580,21 @@ fn reimport_conflict_issue(
     if existing.valid_to != incoming.input.valid_to {
         divergences.push("valid_to");
     }
+    if existing.confidence != incoming.input.confidence {
+        divergences.push("confidence");
+    }
+    if existing.utility != incoming.input.utility {
+        divergences.push("utility");
+    }
+    if existing.importance != incoming.input.importance {
+        divergences.push("importance");
+    }
+    if existing.provenance_uri != incoming.input.provenance_uri {
+        divergences.push("provenance_uri");
+    }
+    if existing.trust_subclass != incoming.input.trust_subclass {
+        divergences.push("trust_subclass");
+    }
     if existing.trust_class != incoming.input.trust_class {
         divergences.push("trust_class");
     }
@@ -1569,6 +1608,9 @@ fn reimport_conflict_issue(
         }
         (None, Some(_)) => {
             divergences.push("tombstone (import carries a tombstone; the existing row is live)");
+        }
+        (Some(stored), Some(archived)) if stored != archived => {
+            divergences.push("tombstoned_at");
         }
         _ => {}
     }
@@ -3768,7 +3810,7 @@ mod tests {
             .list_audit_entries(Some(&workspace_id), None)
             .map_err(|error| error.to_string())?;
         drop(connection);
-        for case in ["content", "logical_id", "valid_to", "new_head"] {
+        for case in ["content", "logical_id", "valid_to", "tag", "new_head"] {
             let mut records = base.clone();
             match case {
                 "content" => {
@@ -3777,6 +3819,7 @@ mod tests {
                 }
                 "logical_id" => records[3]["logical_id"] = records[3]["memory_id"].clone(),
                 "valid_to" => records[1]["valid_to"] = json!("2026-04-30T12:00:00Z"),
+                "tag" => records[2]["tag"] = json!("different-review"),
                 "new_head" => {
                     let new_id = json!(MemoryId::from_uuid(Uuid::from_u128(77)).to_string());
                     records[3]["memory_id"] = new_id.clone();
@@ -6505,6 +6548,62 @@ mod tests {
             true,
             "missing key store must fail closed for native human_explicit",
         )
+    }
+
+    #[test]
+    fn reimport_skips_new_links_to_semantically_different_existing_memories() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let options = JsonlImportOptions {
+            workspace_path: dir.path().join("workspace"),
+            database_path: None,
+            source_path: dir.path().join("source.jsonl"),
+            dry_run: false,
+        };
+        fs::write(&options.source_path, sample_jsonl()).map_err(|error| error.to_string())?;
+        let seed = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        assert_eq!(seed.memories_imported, 1);
+
+        let base = linked_jsonl_values()?;
+        for (key, changed) in [
+            ("provenance_uri", json!("ee-export://different-source")),
+            ("trust_subclass", json!("different-review")),
+            ("confidence", json!(0.25)),
+            ("utility", json!(0.25)),
+            ("importance", json!(0.25)),
+            ("tags", json!("different-review")),
+        ] {
+            let mut records = base.clone();
+            if key == "tags" {
+                records[2]["tag"] = changed;
+            } else {
+                records[1][key] = changed;
+            }
+            fs::write(&options.source_path, jsonl_values_text(&records))
+                .map_err(|error| error.to_string())?;
+            let report = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+            assert_eq!(report.status, "completed", "{key}: {:?}", report.issues);
+            assert_eq!(
+                (report.links_imported, report.links_skipped_conflict),
+                (0, 1)
+            );
+            assert!(
+                report.issues.iter().any(|issue| {
+                    issue.code == "reimport_divergent_existing_row" && issue.message.contains(key)
+                }),
+                "{key}: {:?}",
+                report.issues
+            );
+        }
+
+        // The exact endpoints are still present, without the conflicting link.
+        // The original export can attach it, and then replay it idempotently.
+        fs::write(&options.source_path, jsonl_values_text(&base))
+            .map_err(|error| error.to_string())?;
+        let matched = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        assert_eq!((matched.memories_imported, matched.links_imported), (0, 1));
+        let repeat = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        assert_eq!(repeat.links_skipped_duplicate, 1);
+        Ok(())
     }
 
     #[test]
