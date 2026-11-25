@@ -270,7 +270,7 @@ pub fn primer_settings_from_workspace(
     format: PrimerFormat,
     budget_override: Option<u32>,
 ) -> PrimerSettings {
-    let config = crate::config::workspace_config(workspace_path);
+    let config = crate::core::config_surface::effective_workspace_config(workspace_path);
     let default_tokens = config
         .as_ref()
         .and_then(|config| config.primer.default_tokens)

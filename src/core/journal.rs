@@ -619,7 +619,7 @@ impl JournalShowReport {
 /// (default true when the key or the config file is absent).
 #[must_use]
 pub fn journal_capture_enabled(workspace_path: &Path) -> bool {
-    crate::config::workspace_config(workspace_path)
+    crate::core::config_surface::effective_workspace_config(workspace_path)
         .and_then(|config| config.journal.enabled)
         .unwrap_or(true)
 }
@@ -627,7 +627,7 @@ pub fn journal_capture_enabled(workspace_path: &Path) -> bool {
 /// Effective `[journal] retention_days` (enforced by bd-1pi9m.5).
 #[must_use]
 pub fn journal_retention_days(workspace_path: &Path) -> u64 {
-    crate::config::workspace_config(workspace_path)
+    crate::core::config_surface::effective_workspace_config(workspace_path)
         .and_then(|config| config.journal.retention_days)
         .unwrap_or(JOURNAL_DEFAULT_RETENTION_DAYS)
 }
@@ -1490,7 +1490,7 @@ fn distill_proposal_confidence(cluster_size: usize) -> f32 {
 /// `[learn] cluster_coherence_threshold` with the shared clustering
 /// default (ADR 0062 §6 step 2).
 fn distill_cluster_threshold(workspace_path: &Path) -> f32 {
-    crate::config::workspace_config(workspace_path)
+    crate::core::config_surface::effective_workspace_config(workspace_path)
         .and_then(|config| config.learn.cluster_coherence_threshold)
         .map_or(
             crate::curate::cluster_coherence::DEFAULT_CLUSTER_COHERENCE_THRESHOLD as f32,
@@ -1501,7 +1501,7 @@ fn distill_cluster_threshold(workspace_path: &Path) -> f32 {
 /// `[curation] duplicate_similarity` with the remember-time default
 /// (ADR 0062 §6 step 4).
 fn distill_duplicate_similarity_threshold(workspace_path: &Path) -> f32 {
-    crate::config::workspace_config(workspace_path)
+    crate::core::config_surface::effective_workspace_config(workspace_path)
         .and_then(|config| config.curation.duplicate_similarity)
         .map_or(
             crate::core::memory::REMEMBER_DEFAULT_DUPLICATE_SIMILARITY,

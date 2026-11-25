@@ -8267,7 +8267,7 @@ fn remember_typed_fields_value(
 }
 
 fn remember_duplicate_similarity_threshold(workspace_path: &Path) -> f32 {
-    crate::config::workspace_config(workspace_path)
+    crate::core::config_surface::effective_workspace_config(workspace_path)
         .and_then(|config| config.curation.duplicate_similarity)
         .map_or(REMEMBER_DEFAULT_DUPLICATE_SIMILARITY, |value| value as f32)
 }

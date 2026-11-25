@@ -148,3 +148,81 @@ fn advertised_default_harmful_feedback_limits_read_every_layer() {
         "{error}"
     );
 }
+
+#[test]
+fn effective_workspace_config_reads_every_layer_and_falls_back_to_the_project() {
+    // Built-ins must equal the constants these readers fell back to, or the
+    // switch from the project file alone moves every workspace without config.
+    let built_in =
+        effective_config_or_project(Ok(layered(None, &[])), Path::new("/nonexistent")).unwrap();
+    assert_eq!(built_in.journal.enabled, Some(true));
+    assert_eq!(
+        built_in.journal.retention_days,
+        Some(crate::core::journal::JOURNAL_DEFAULT_RETENTION_DAYS)
+    );
+    assert_eq!(
+        built_in
+            .curation
+            .duplicate_similarity
+            .map(|value| value as f32),
+        Some(crate::core::memory::REMEMBER_DEFAULT_DUPLICATE_SIMILARITY)
+    );
+    assert_eq!(
+        built_in.decide.revisit_warning_days,
+        Some(crate::core::decide::DEFAULT_REVISIT_WARNING_DAYS)
+    );
+    assert_eq!(
+        built_in.learn.cluster_coherence_threshold,
+        Some(crate::curate::cluster_coherence::DEFAULT_CLUSTER_COHERENCE_THRESHOLD)
+    );
+    assert_eq!(
+        built_in.primer.default_tokens,
+        Some(u64::from(crate::core::primer::PRIMER_DEFAULT_BUDGET_TOKENS))
+    );
+    assert_eq!(built_in.privacy.redact_secrets, Some(true));
+    assert_eq!(built_in.memory.include_global, Some(true));
+    assert_eq!(built_in.memory.participate, Some(true));
+
+    let project = "[journal]\nenabled = true\nretention_days = 30\n";
+    let layered_values = effective_config_or_project(
+        Ok(layered(Some(project), &[("EE_JOURNAL_ENABLED", "false")])),
+        Path::new("/nonexistent"),
+    )
+    .unwrap();
+    assert_eq!(layered_values.journal.enabled, Some(false));
+    assert_eq!(layered_values.journal.retention_days, Some(30));
+
+    // A bad variable fails the merge. The reader must then see the project
+    // file, as it did before, not the permissive built-in participation.
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let home = temp.path().join("home");
+    fs::create_dir_all(workspace.join(".ee")).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    fs::write(
+        workspace.join(".ee/config.toml"),
+        "[memory]\nparticipate = false\n",
+    )
+    .unwrap();
+    let environment = BTreeMap::from([
+        (
+            if cfg!(windows) { "USERPROFILE" } else { "HOME" }.to_owned(),
+            OsString::from(home.as_os_str()),
+        ),
+        (
+            "EE_ADAPTIVE_NOISY_P99_MS".to_owned(),
+            OsString::from("many"),
+        ),
+    ]);
+    let failed = merged_config_with_environment(
+        &ConfigSurfaceOptions {
+            workspace_root: workspace.clone(),
+            config_path: None,
+        },
+        &environment,
+    );
+    assert!(failed.is_err(), "the bad variable must fail the merge");
+    let fallback = effective_config_or_project(failed, &workspace).unwrap();
+    assert_eq!(fallback.memory.participate, Some(false));
+    assert_eq!(fallback.journal.enabled, None);
+}

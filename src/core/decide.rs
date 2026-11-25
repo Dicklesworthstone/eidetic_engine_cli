@@ -215,7 +215,7 @@ struct DecideScope {
 
 #[must_use]
 pub fn configured_revisit_warning_days(workspace_path: &Path) -> u64 {
-    crate::config::workspace_config(workspace_path)
+    crate::core::config_surface::effective_workspace_config(workspace_path)
         .and_then(|config| config.decide.revisit_warning_days)
         .unwrap_or(DEFAULT_REVISIT_WARNING_DAYS)
 }

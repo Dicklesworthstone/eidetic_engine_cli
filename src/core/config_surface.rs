@@ -420,6 +420,29 @@ pub fn merged_workspace_config(
     })
 }
 
+/// The effective config for a reader that falls back to its own default rather
+/// than failing: every layer when they merge, otherwise the project file alone.
+///
+/// These readers used `crate::config::workspace_config`, which parses only
+/// `.ee/config.toml`, so documented variables such as `EE_JOURNAL_ENABLED` and
+/// the user config file never reached them. The project-file fallback keeps a
+/// bad layer from doing more than it did before: an invalid variable used to be
+/// ignored, and must not now discard a project opt-out such as
+/// `[memory] participate = false`.
+pub(crate) fn effective_workspace_config(workspace_root: &Path) -> Option<ConfigFile> {
+    effective_config_or_project(merged_workspace_config(workspace_root), workspace_root)
+}
+
+fn effective_config_or_project(
+    merged: Result<crate::config::MergedConfig, ConfigSurfaceError>,
+    workspace_root: &Path,
+) -> Option<ConfigFile> {
+    merged
+        .map(|merged| merged.values)
+        .ok()
+        .or_else(|| crate::config::workspace_config(workspace_root))
+}
+
 /// The operator's `[cass] binary` override for this workspace, if any
 /// (bd-reality-core-convergence-1azkt.44).
 ///

@@ -797,7 +797,7 @@ fn top_neighbor(memories: &[StoredMemory], content: &str) -> Option<(String, f32
 /// `[curation] duplicate_similarity` with the remember-time default (same
 /// threshold the distill pipeline uses).
 fn duplicate_similarity_threshold(workspace_path: &Path) -> f32 {
-    crate::config::workspace_config(workspace_path)
+    crate::core::config_surface::effective_workspace_config(workspace_path)
         .and_then(|config| config.curation.duplicate_similarity)
         .map_or(
             crate::core::memory::REMEMBER_DEFAULT_DUPLICATE_SIMILARITY,

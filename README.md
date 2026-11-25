@@ -2013,9 +2013,9 @@ index_dir     = "~/.local/share/ee/indexes"
 jsonl_export  = false
 
 [runtime]
-daemon            = false            # one-shot CLI mode
-job_budget_ms     = 5000             # cancel any in-process job after this
-import_batch_size = 200
+daemon            = false            # parsed, not read yet: start one with `ee daemon`
+job_budget_ms     = 5000             # parsed, not read yet
+import_batch_size = 200              # parsed, not read yet
 explanation_budget_ms = 0            # optional why / Pack DNA work; 0 disables
 
 [cass]
@@ -2051,7 +2051,7 @@ query_miss_retention_days = 30        # retained hash-only miss demand for `ee l
 
 [pack]
 default_profile  = "balanced"
-default_format   = "markdown"
+default_format   = "markdown"         # parsed but not yet read; pass --format
 default_max_tokens = 4000
 adaptive_budget  = false
 mmr_lambda       = 0.75
@@ -2064,8 +2064,8 @@ memory_tier_admission = false
 
 [curation]
 duplicate_similarity = 0.92
-harmful_weight       = 2.5            # harmful feedback hits harder than helpful
-decay_half_life_days = 60
+harmful_weight       = 2.5            # parsed, not read yet: harmful feedback weighs a fixed 2.5
+decay_half_life_days = 60             # parsed, not read yet
 
 [journal]
 enabled = true
@@ -2101,7 +2101,7 @@ primer_keyword_gate = "keyword"       # keyword | value_only — which matches w
                                       # matches are listed in `keywordGateAdmitted`.
 
 [trust]
-default_class = "agent_assertion"     # bumped on validation, demoted on contradiction
+default_class = "agent_assertion"     # parsed, not read yet: manual remember is human_explicit (ADR 0009)
 prompt_injection_guard = true
 
 [graph.memory]
