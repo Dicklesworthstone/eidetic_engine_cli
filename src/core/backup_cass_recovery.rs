@@ -8,6 +8,7 @@ use super::{Rows, recovery_error, storage_error};
 use crate::core::backup::{
     BackupCassEvidenceChunk, BackupCassEvidenceRecord, BackupCassSessionChunk,
     BackupCassSessionRecord, BackupRestoredDerivedAssetReport, read_restored_derived_json,
+    restored_cass_chunks,
 };
 use crate::db::{DbConnection, StoredSession};
 use crate::models::DomainError;
@@ -27,11 +28,7 @@ impl CassExpectation {
         let mut rows = Rows::default();
         let mut source_workspace: Option<String> = None;
         for kind in ["cass_sessions", "cass_evidence_spans"] {
-            let mut chunks = assets
-                .iter()
-                .filter(|asset| asset.kind == kind)
-                .collect::<Vec<_>>();
-            chunks.sort_by(|a, b| a.path.cmp(&b.path));
+            let chunks = restored_cass_chunks(assets, kind);
             for (index, asset) in chunks.into_iter().enumerate() {
                 let expected_index = u32::try_from(index)
                     .map_err(|_| recovery_error("Too many recovered CASS chunks"))?;

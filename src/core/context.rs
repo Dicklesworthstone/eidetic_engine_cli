@@ -3494,6 +3494,7 @@ async fn run_context_pack_attempt(
             // A failed workspace index must not hide the separate global store.
             let (memories, feedback) = global_store_fallback_memories(
                 &fallback_options,
+                checked_context_read_snapshot(&read_pool, &read_snapshot)?,
                 &mut degraded,
                 &mut search_preloaded_memories,
             )?;
@@ -5897,6 +5898,7 @@ fn lexical_memory_fallback_hits(
 /// hydration never looks for them in the workspace database.
 fn global_store_fallback_memories(
     search_options: &SearchOptions,
+    local_connection: &DbConnection,
     degraded: &mut Vec<ContextResponseDegradation>,
     preloaded: &mut BTreeMap<String, StoredMemory>,
 ) -> Result<
@@ -5907,9 +5909,12 @@ fn global_store_fallback_memories(
     ContextPackError,
 > {
     let mut search_degraded = Vec::new();
-    let (memories, feedback) =
-        crate::core::search::global_store_fallback_memories(search_options, &mut search_degraded)
-            .map_err(ContextPackError::Search)?;
+    let (memories, feedback) = crate::core::search::global_store_fallback_memories(
+        search_options,
+        local_connection,
+        &mut search_degraded,
+    )
+    .map_err(ContextPackError::Search)?;
     push_search_degradations(degraded, &search_degraded);
     for memory in &memories {
         preloaded
