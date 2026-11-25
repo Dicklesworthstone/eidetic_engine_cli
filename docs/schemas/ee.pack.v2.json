@@ -36,6 +36,10 @@
             "candidatePool": { "type": "integer" },
             "taskPaths": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 4096 } },
             "maxResults": { "type": "integer", "minimum": 0 },
+            "recencyReferenceUnixMinute": {
+              "type": "integer",
+              "description": "UTC epoch minute the pack scored recency against; omitted when not recorded."
+            },
             "memoryScope": { "type": "string" },
             "strictScope": { "type": "boolean" },
             "sections": { "type": "array", "items": { "type": "string" } }

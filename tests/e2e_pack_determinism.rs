@@ -766,7 +766,14 @@ fn pack_replay_and_diff_work_for_real_pack_records() -> TestResult {
     )?;
     ensure(
         diff_json.pointer("/data/diff/summary/changedCount") == Some(&serde_json::json!(0)),
-        "pack diff should report no changed items for repeated input",
+        // Name the fields that moved: identical hashes with a changed item mean a score, why,
+        // trust, section, revision or redaction differs between two runs of the same input.
+        format!(
+            "pack diff should report no changed items for repeated input; changed={}",
+            diff_json
+                .pointer("/data/diff/changed")
+                .unwrap_or(&serde_json::Value::Null)
+        ),
     )?;
     ensure(
         diff_json.pointer("/data/diff/likelyCauses") == Some(&serde_json::json!(["no_change"])),

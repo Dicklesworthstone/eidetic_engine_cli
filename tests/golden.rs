@@ -5929,11 +5929,14 @@ mod tests {
             .pointer("/error/details/recovery")
             .and_then(serde_json::Value::as_array)
             .ok_or("isolated workspace miss must include recovery actions")?;
+        // No env action since 260227264: workspace commands never read EE_DATABASE_PATH
+        // (bd-env-store-override-advertised-not-read-p6iqy). With no populated store nearby
+        // to retarget to, re-checking the address comes first and init second.
         ensure(
-            recovery.len() == 3
+            recovery.len() == 2
                 && recovery[0]["kind"] == serde_json::json!("flag")
-                && recovery[1]["kind"] == serde_json::json!("env")
-                && recovery[2]["command"]
+                && recovery[1]["kind"] == serde_json::json!("seed")
+                && recovery[1]["command"]
                     == serde_json::json!(format!(
                         "ee init --workspace {}",
                         expected_workspace.display()

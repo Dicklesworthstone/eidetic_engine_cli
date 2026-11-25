@@ -301,6 +301,7 @@ expression: canonical_json_text(value)
       "memoryScope": "swarm",
       "profile": "compact",
       "query": "format before release",
+      "recencyReferenceUnixMinute": 29624400,
       "sections": [
         "procedural_rules",
         "decisions",

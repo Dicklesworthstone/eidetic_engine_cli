@@ -535,6 +535,15 @@ fn contract_drift_radar_pins_json_example_count_semantics() -> TestResult {
         scripts_dir.join("contract-drift-radar.sh"),
     )
     .map_err(|error| format!("copy contract-drift-radar.sh: {error}"))?;
+    // The radar's summary phase runs this checker from the same root under `set -e`; without it
+    // the radar exits 2 before reporting the counts pinned below.
+    fs::copy(
+        repo_root()
+            .join("scripts")
+            .join("check-shell-schema-ownership.py"),
+        scripts_dir.join("check-shell-schema-ownership.py"),
+    )
+    .map_err(|error| format!("copy check-shell-schema-ownership.py: {error}"))?;
     fs::write(schemas_dir.join("ee.response.v2.json"), "{}\n")
         .map_err(|error| format!("write schema inventory fixture: {error}"))?;
     fs::write(

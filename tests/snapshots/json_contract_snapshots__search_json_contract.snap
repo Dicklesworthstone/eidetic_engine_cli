@@ -250,6 +250,7 @@ expression: canonical_json_text(value)
             },
             "policyHash": "[HASH]",
             "rankingBound": 1.8000001,
+            "recencyReferenceUnixMinute": 29624400,
             "referenceTime": "[TIMESTAMP]",
             "schema": "ee.search.quality_scoring.v1"
           },

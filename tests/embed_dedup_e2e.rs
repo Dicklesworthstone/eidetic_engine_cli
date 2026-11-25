@@ -89,10 +89,15 @@ fn run_ee(workspace: &Path, args: &[&str], env: DedupEnv<'_>) -> Result<TimedOut
 }
 
 fn assert_success(timed: &TimedOutput, context: &str) -> TestResult {
+    // Carry the child's output: a bare exit code (e.g. 2, Configuration) names no cause.
     ensure_equal(
         &timed.output.status.code(),
         &Some(EXIT_SUCCESS),
-        &format!("{context} exit code"),
+        &format!(
+            "{context} exit code (stdout: {}; stderr: {})",
+            String::from_utf8_lossy(&timed.output.stdout).trim(),
+            String::from_utf8_lossy(&timed.output.stderr).trim()
+        ),
     )?;
     ensure(
         String::from_utf8_lossy(&timed.output.stderr)
