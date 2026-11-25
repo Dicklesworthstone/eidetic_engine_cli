@@ -91,13 +91,19 @@ fn symbol_graph_degraded_fixture_catalog_covers_required_modes() -> TestResult {
             .pointer("/surfaces")
             .and_then(Value::as_array)
             .ok_or_else(|| format!("{path}: surfaces[] missing"))?;
+        // The `ee symbol` command ADR 0042 planned was never built. Symbol
+        // codes reach agents through context packs and, for source_unparsable,
+        // through `ee workspace hygiene`'s symbolRiskSummary.
         ensure(
             surfaces.iter().any(|surface| {
                 surface.as_str().is_some_and(|value| {
-                    value.contains("symbol") || value == "context" || value == "why"
+                    value.contains("symbol")
+                        || value == "context"
+                        || value == "why"
+                        || value == "workspace hygiene"
                 })
             }),
-            format!("{path}: fixture must identify a symbol/context/why surface"),
+            format!("{path}: fixture must identify a context, why or workspace hygiene surface"),
         )?;
         let messages = fixture
             .pointer("/expected_emission/message_contains")

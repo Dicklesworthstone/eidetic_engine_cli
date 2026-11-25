@@ -5,17 +5,13 @@
     "bead": "bd-2xuu7.6",
     "epic_letter": "G"
   },
-  "surfaces": ["symbol evidence links", "context", "why"],
+  "surfaces": ["pack", "context"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
-    "description": "Memory or CASS evidence references a source range that no longer exists in the current symbol snapshot.",
-    "setup_commands": [
-      "ee init --workspace .",
-      "printf 'pub fn current() {}\\n' > src/lib.rs",
-      "ee symbol snapshot --workspace . --json"
-    ],
-    "invocation": "ee symbol link --workspace . --evidence stale-line-span.json --json"
+    "description": "A memory's evidence carries an invalid line span (a zero start or end line, or an end before its start), so the evidence linker cannot place it in any symbol. The linker's only production caller is changed-symbol boosting in context packs, which reports this as symbol_index_stale; no command emits this code under its own name.",
+    "setup_commands": [],
+    "invocation": "Internal — exercised by evidence_linker_reports_stale_renamed_deleted_and_ambiguous_spans"
   },
   "expected_emission": {
     "code": "stale_line_span",

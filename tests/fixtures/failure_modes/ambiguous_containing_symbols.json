@@ -5,18 +5,13 @@
     "bead": "bd-2xuu7.6",
     "epic_letter": "G"
   },
-  "surfaces": ["symbol evidence links", "context", "why"],
+  "surfaces": ["pack", "context"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {
-    "description": "Symbol evidence points at a source span contained by multiple equally-specific symbols, so the link resolver refuses to guess which symbol owns the evidence.",
-    "setup_commands": [
-      "ee init --workspace .",
-      "printf 'mod a { pub fn run() {} } mod b { pub fn run() {} }\\n' > src/lib.rs",
-      "ee symbol snapshot --workspace . --json",
-      "ee symbol link --workspace . --evidence tests/fixtures/symbol_graph/ambiguous_span.json --json"
-    ],
-    "invocation": "ee symbol link --workspace . --evidence ambiguous-span.json --json"
+    "description": "A memory's evidence span is contained by two or more equally specific symbols, so the evidence linker refuses to guess which one owns it. The linker's only production caller is changed-symbol boosting in context packs, which reports this as symbol_index_stale; no command emits this code under its own name.",
+    "setup_commands": [],
+    "invocation": "Internal — exercised by evidence_linker_reports_stale_renamed_deleted_and_ambiguous_spans"
   },
   "expected_emission": {
     "code": "ambiguous_containing_symbols",

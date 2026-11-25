@@ -494,25 +494,16 @@ ee export agentsmd --workspace . --json
 
 **Severity:** warning
 
-**Surfaces:** symbol evidence links, context, why
+**Surfaces:** pack, context
 
 **Introduced by:** bd-2xuu7.6 (epic G)
 
-**Trigger.** Symbol evidence points at a source span contained by multiple equally-specific symbols, so the link resolver refuses to guess which symbol owns the evidence.
-
-**Setup.**
-
-```bash
-ee init --workspace .
-printf 'mod a { pub fn run() {} } mod b { pub fn run() {} }\n' > src/lib.rs
-ee symbol snapshot --workspace . --json
-ee symbol link --workspace . --evidence tests/fixtures/symbol_graph/ambiguous_span.json --json
-```
+**Trigger.** A memory's evidence span is contained by two or more equally specific symbols, so the evidence linker refuses to guess which one owns it. The linker's only production caller is changed-symbol boosting in context packs, which reports this as symbol_index_stale; no command emits this code under its own name.
 
 **Invocation.**
 
 ```bash
-ee symbol link --workspace . --evidence ambiguous-span.json --json
+Internal — exercised by evidence_linker_reports_stale_renamed_deleted_and_ambiguous_spans
 ```
 
 **Expected emission.** Message contains: `multiple symbols matched ... equal specificity`
@@ -16815,15 +16806,20 @@ ee search 'query' --workspace . --index-dir ./empty-index --source-mode hybrid -
 
 **Severity:** medium
 
-**Surfaces:** symbol snapshot, context, why
+**Surfaces:** workspace hygiene
 
 **Introduced by:** bd-2xuu7.6 (epic G)
 
-**Trigger.** The symbol extractor can read a Rust source file but cannot construct a balanced lexical symbol snapshot from it.
+**Trigger.** A Rust source that git reports as changed has an unbalanced brace, an unterminated declaration or an unbalanced macro brace group, so the lexical symbol extractor cannot build its symbols. `ee workspace hygiene` lists the code, without its message, in data.symbolRiskSummary.degradedCodes. A context pack with changed-symbol boosting reports the same failure as symbol_index_stale.
 
 **Setup.**
 
 ```bash
+git init -q
+mkdir -p src
+printf 'pub fn kept() {}\n' > src/lib.rs
+git add src/lib.rs
+git -c user.name=ee -c user.email=ee@example.invalid commit -qm init
 ee init --workspace .
 printf 'pub fn broken() {\n' > src/lib.rs
 ```
@@ -16831,10 +16827,10 @@ printf 'pub fn broken() {\n' > src/lib.rs
 **Invocation.**
 
 ```bash
-ee symbol snapshot --workspace . --path src/lib.rs --json
+ee workspace hygiene --workspace . --json
 ```
 
-**Expected emission.** Message contains: `symbol extraction ... unparsable`
+**Expected emission.** Message contains: `no matching closing brace`
 
 **Repair hint.** Not provided — this code is informational; no operator action is required.
 
@@ -16971,24 +16967,16 @@ ee hook status --harness claude-code --json
 
 **Severity:** warning
 
-**Surfaces:** symbol evidence links, context, why
+**Surfaces:** pack, context
 
 **Introduced by:** bd-2xuu7.6 (epic G)
 
-**Trigger.** Memory or CASS evidence references a source range that no longer exists in the current symbol snapshot.
-
-**Setup.**
-
-```bash
-ee init --workspace .
-printf 'pub fn current() {}\n' > src/lib.rs
-ee symbol snapshot --workspace . --json
-```
+**Trigger.** A memory's evidence carries an invalid line span (a zero start or end line, or an end before its start), so the evidence linker cannot place it in any symbol. The linker's only production caller is changed-symbol boosting in context packs, which reports this as symbol_index_stale; no command emits this code under its own name.
 
 **Invocation.**
 
 ```bash
-ee symbol link --workspace . --evidence stale-line-span.json --json
+Internal — exercised by evidence_linker_reports_stale_renamed_deleted_and_ambiguous_spans
 ```
 
 **Expected emission.** Message contains: `line span ... stale`
@@ -17489,7 +17477,7 @@ EE_SWARM_SCALE_FORCE_FAILURE=nondeterminism scripts/e2e_overhaul/swarm_scale.sh
 
 **Introduced by:** bd-2xuu7.6 (epic G)
 
-**Trigger.** A context pack asked for changed-symbol boosting (--changed-symbol or --changed-symbols-from-git), but git status failed, no candidate memory carried file-span provenance, or none of their Rust sources was readable, so the boost was skipped; or a source failed to parse, so the boost ran on partial symbols. Symbols are extracted from sources on every pack; there is no persisted snapshot.
+**Trigger.** A context pack asked for changed-symbol boosting (--changed-symbol or --changed-symbols-from-git), but git status failed, no candidate memory carried file-span provenance, or none of their Rust sources was readable, so the boost was skipped; or a source failed to parse, or a memory's span no longer resolved to one symbol (an invalid line span, a missing source file, a renamed or deleted symbol, or two equally specific containing symbols), so the boost ran on partial evidence. Symbols are extracted from sources on every pack; there is no persisted snapshot.
 
 **Setup.**
 
@@ -17505,7 +17493,7 @@ ee pack 'changed symbol' --workspace . --changed-symbol changed --json
 
 **Expected emission.** Message contains: `Symbol index is stale`
 
-**Repair hint.** Symbols are re-read from workspace sources on every pack, so there is no index to rebuild; check that `git status` runs in the workspace, that the memories carry file-span provenance, and that their Rust sources are readable and parse.
+**Repair hint.** Symbols are re-read from workspace sources on every pack, so there is no index to rebuild; check that `git status` runs in the workspace, that the memories carry file-span provenance whose spans still match a symbol, and that their Rust sources are readable and parse.
 
 **Fixture.** [`tests/fixtures/failure_modes/symbol_index_stale.json`](../tests/fixtures/failure_modes/symbol_index_stale.json)
 
@@ -19637,5 +19625,5 @@ the gap is one of:
 For new degraded codes, follow the J6 fixture-authoring workflow in
 `tests/fixtures/failure_modes/` (see any existing fixture as a
 template), then regenerate.
-<!-- degraded-codes-fingerprint inputs=sha256:cff0d4ca9186f427cedee386492cb3e1634a76394b33bb3243c6e92cda586671 -->
-<!-- degraded-codes-fingerprint body=sha256:1cfa1ff8c4a18e67a81aa2df6e5e3191c9f5a24c0b9510be2943092fddc08ad4 -->
+<!-- degraded-codes-fingerprint inputs=sha256:33a8b051a097a29517b4df33c14bd86b15d9a6c1229559d37f1407649fce1b6a -->
+<!-- degraded-codes-fingerprint body=sha256:9d315def1e144806981beb27c08da4bb0db667893c3374066ea9f657cca76bca -->

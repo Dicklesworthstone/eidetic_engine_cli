@@ -9,7 +9,7 @@
   "severity": "low",
   "repair_present": true,
   "trigger": {
-    "description": "A context pack asked for changed-symbol boosting (--changed-symbol or --changed-symbols-from-git), but git status failed, no candidate memory carried file-span provenance, or none of their Rust sources was readable, so the boost was skipped; or a source failed to parse, so the boost ran on partial symbols. Symbols are extracted from sources on every pack; there is no persisted snapshot.",
+    "description": "A context pack asked for changed-symbol boosting (--changed-symbol or --changed-symbols-from-git), but git status failed, no candidate memory carried file-span provenance, or none of their Rust sources was readable, so the boost was skipped; or a source failed to parse, or a memory's span no longer resolved to one symbol (an invalid line span, a missing source file, a renamed or deleted symbol, or two equally specific containing symbols), so the boost ran on partial evidence. Symbols are extracted from sources on every pack; there is no persisted snapshot.",
     "setup_commands": [
       "ee init --workspace ."
     ],
@@ -20,6 +20,6 @@
     "severity": "low",
     "message_contains": ["Symbol index is stale"],
     "repair_contains": "no index to rebuild",
-    "repair_string": "Symbols are re-read from workspace sources on every pack, so there is no index to rebuild; check that `git status` runs in the workspace, that the memories carry file-span provenance, and that their Rust sources are readable and parse."
+    "repair_string": "Symbols are re-read from workspace sources on every pack, so there is no index to rebuild; check that `git status` runs in the workspace, that the memories carry file-span provenance whose spans still match a symbol, and that their Rust sources are readable and parse."
   }
 }

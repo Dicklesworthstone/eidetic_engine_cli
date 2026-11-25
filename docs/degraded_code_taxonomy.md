@@ -581,8 +581,8 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `task_frame_intersect_empty` | info | bd-1idcb (G) |
 | `l2_pack_cache_corruption` | low | bd-ndzfg.4 |
 | `l2_pack_cache_unavailable` | low | bd-ndzfg.4 |
-| `source_unparsable` | medium | (TBD) |
-| `stale_line_span` | warning | (TBD) |
+| `source_unparsable` | medium | bd-2xuu7.6 |
+| `stale_line_span` | warning | bd-2xuu7.6 |
 | `symbol_index_stale` | low | bd-2xuu7.6 |
 
 #### Hook readiness (3)
@@ -1315,7 +1315,7 @@ the closed daemon hot-mode surface.
 | `unix_xdg_data_unavailable` | medium | bd-nnheo — platform twin of `windows_appdata_unavailable`: both are the `code` field of the same `PlatformDataDirError` (src/config/path_resolver.rs), so the severity is inherited rather than invented. Kept adjacent deliberately, because classifying one platform and not the other is how this gap arose. |
 | `workspace_nested_markers` | warning | bd-17c65.12.2 (L1) |
 | `workspace_symlink_refused` | medium | bd-2bbtw |
-| `ambiguous_containing_symbols` | warning | (TBD) |
+| `ambiguous_containing_symbols` | warning | bd-2xuu7.6 |
 | `load_bearing_tombstone_requires_override` | medium | (TBD) |
 | `unattributed_compile_blocker` | low | (TBD) |
 

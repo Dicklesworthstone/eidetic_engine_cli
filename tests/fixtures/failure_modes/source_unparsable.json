@@ -5,17 +5,25 @@
     "bead": "bd-2xuu7.6",
     "epic_letter": "G"
   },
-  "surfaces": ["symbol snapshot", "context", "why"],
+  "surfaces": ["workspace hygiene"],
   "severity": "medium",
   "repair_present": false,
   "trigger": {
-    "description": "The symbol extractor can read a Rust source file but cannot construct a balanced lexical symbol snapshot from it.",
-    "setup_commands": ["ee init --workspace .", "printf 'pub fn broken() {\\n' > src/lib.rs"],
-    "invocation": "ee symbol snapshot --workspace . --path src/lib.rs --json"
+    "description": "A Rust source that git reports as changed has an unbalanced brace, an unterminated declaration or an unbalanced macro brace group, so the lexical symbol extractor cannot build its symbols. `ee workspace hygiene` lists the code, without its message, in data.symbolRiskSummary.degradedCodes. A context pack with changed-symbol boosting reports the same failure as symbol_index_stale.",
+    "setup_commands": [
+      "git init -q",
+      "mkdir -p src",
+      "printf 'pub fn kept() {}\\n' > src/lib.rs",
+      "git add src/lib.rs",
+      "git -c user.name=ee -c user.email=ee@example.invalid commit -qm init",
+      "ee init --workspace .",
+      "printf 'pub fn broken() {\\n' > src/lib.rs"
+    ],
+    "invocation": "ee workspace hygiene --workspace . --json"
   },
   "expected_emission": {
     "code": "source_unparsable",
     "severity": "medium",
-    "message_contains": ["symbol extraction", "unparsable"]
+    "message_contains": ["no matching closing brace"]
   }
 }
