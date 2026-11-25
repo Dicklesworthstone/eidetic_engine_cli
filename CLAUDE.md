@@ -192,12 +192,16 @@ YOURSELF.** Three numbers were on record and none matched: 6 s here (602/608),
 `verify_budget_manifest_has_p50_and_regression_factor_for_every_stage` in
 `tests/verification_drift_guard.rs`, which is dispatch-only, so nobody here can
 read it off a gate. Replaying its arithmetic at HEAD on 2026-11-08 gave
-**604/608, i.e. 4 s** — and 605/608 after the stage below. The conclusion above
-survives either way (41 s does not fit in 3), but a stage that *would* fit gets
-refused by a reader who trusts the wrong number. Two details that decide it:
-`budget_stage_p50` parses `Option<u64>`, so a fractional p50 reads as ABSENT
-and panics the guard — sub-second stages declare `1`; and the unmeasured
-allowance is full at 24/24, so a new stage cannot be added unmeasured.
+**604/608, i.e. 4 s** — and 605/608 after the stage below. **Re-measured
+2026-11-24 it is 594/608, i.e. 14 s**: the total moves both ways as stages are
+measured, added and put behind opt-in flags, so recompute it with the rule in
+`scripts/verify-budget.toml`'s header rather than quoting either number. The
+conclusion above survives every reading (41 s does not fit in 14), but a stage
+that *would* fit gets refused by a reader who trusts the wrong number. Two
+details that decide it: `budget_stage_p50` parses `Option<u64>`, so a
+fractional p50 reads as ABSENT and panics the guard — sub-second stages declare
+`1`; and the unmeasured allowance (`UNMEASURED_STAGE_ALLOWANCE`, 23) is full at
+23/23, so a new stage cannot be added unmeasured.
 
 **AND NOTE WHAT ADDING A STAGE DOES TO THE ENUMERATION ABOVE.**
 `run_stage "Degraded Codes Doc Fingerprint"

@@ -37,6 +37,14 @@
 # deters work. Recomputing independently here (excluding the four opt-in stages)
 # lands at ~566-577 against 608, i.e. comfortably under either way.
 #
+# RE-MEASURED 2026-11-24: 594/608, i.e. 14s, with 23 stages unmeasured against
+# UNMEASURED_STAGE_ALLOWANCE = 23, so that ratchet is still full. The total has
+# moved both ways since the paragraph below, as stages were measured, added and
+# put behind opt-in flags, so recompute it before planning a stage. The guard's
+# rule: sum expected_seconds_p50 over the [[stage]] blocks, skipping rows marked
+# unmeasured and every stage verify.sh names in a `record_gated_off "<name>"`
+# line whose reason contains both "not set" and "--".
+#
 # HEADROOM IS 10s, NOT ZERO, AND THAT IS RECENT. This paragraph read "THERE IS
 # CURRENTLY ZERO HEADROOM ... total EXACTLY 608" as measured on 2026-10-19 with
 # 120 stages and 27 unmeasured. Re-measured 2026-10-28: the non-benchmark p50s
