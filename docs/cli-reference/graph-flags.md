@@ -36,8 +36,9 @@ ee --fields standard --cards summary --meta graph pagerank \
 `ee pack "<task>"` is the canonical agent-facing context-pack surface. The
 soft-deprecated `ee context "<task>"` compatibility surface still owns several
 context-diagnostic flags that have not been promoted to `ee pack`, including
-`--ppr-weight`, `--stream`, `--include-tombstoned`, `--changed-symbol`, and
-`--changed-symbols-from-git`.
+`--ppr-weight` and `--redaction`. `--changed-symbol` and
+`--changed-symbols-from-git` work on both `ee context "<task>"` and
+`ee pack "<task>"`, but not on `ee pack --query-file` or `ee pack build`.
 
 | Command | Flag | Values | Default | Use |
 | --- | --- | --- | --- | --- |

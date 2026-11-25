@@ -899,7 +899,7 @@ Common red flags:
 | JSON diet | `--no-rendered-text`, `--no-skipped`, `--no-meta`, `--no-pack-dna` | Suppress bulky sections for structured consumers |
 | Persistence | `--read-only`, `--no-persist` | Assemble prompt context without writing pack records, audit rows, or L2 cache entries |
 | Coordination | `--coordination-snapshot <path>`, `--coordination-stale-after-ms N` | Embed a redacted coordination snapshot |
-| Code-change hints | `--changed-symbol <selector>`, `--changed-symbols-from-git` | Bias toward memories linked to changed symbols |
+| Code-change hints | `--changed-symbol <selector>`, `--changed-symbols-from-git` | Bias toward memories linked to changed symbols; `ee pack "<task>"` only, not `--query-file` or `ee pack build` |
 | Time windows | `--as-of <RFC3339>`, `--include-expired`, `--include-future`, `--include-stale`, `--include-tombstoned` | Inspect validity-window behavior |
 | Trust lane | `--memory-scope self\|team\|global\|workspace\|verified\|swarm`, `--strict-scope` | Bound which trust lane can contribute. On `ee pack`/`pack build` an explicit value overrides any task-lens scope overlay; omitted keeps lens-then-`swarm` behavior. `self`/`swarm` are agent scopes; `team` covers explicit local-origin ownership plus receiver-derived member projections (no `trust.team_members` nickname compatibility) |
 | Privacy | `--redaction none\|minimal\|standard\|strict\|paranoid` | Tune output redaction where the command allows it |

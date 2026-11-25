@@ -3584,10 +3584,12 @@ fn auto_status_next_action_hint(
             .to_owned();
     }
     // `ee mesh status`, the only producer of this hint, probes the tailnet on
-    // every run, so re-running it is the recheck.
+    // every run, so re-running it is the recheck. The count is of eligible
+    // peers: policy-denied, timed-out, malformed and other-workspace peers are
+    // skipped with a reason, so the hint must not claim the tailnet is empty.
     if snapshot.storage.peer_count == 0 && signals.discovered_peer_count == 0 {
         return format!(
-            "No ee peers were discovered on this tailnet. Run ee with mesh enabled on a second machine in this tailnet, then re-run `ee mesh status --workspace {workspace_arg}`."
+            "No eligible ee peers were found on this tailnet; skipped peers and their reasons are in autoEnrollment.discovery.skippedPeers. Run ee with mesh enabled on a second machine in this tailnet, then re-run `ee mesh status --workspace {workspace_arg}`."
         );
     }
     if snapshot.storage.peer_count == 0 && signals.discovered_peer_count > 0 {

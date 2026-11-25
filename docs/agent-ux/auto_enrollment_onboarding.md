@@ -58,7 +58,8 @@ returns `auto_enrollment_already_complete` (info). Reversal:
 ee mesh disable --workspace . --json
 ```
 
-Read-only inspection (never writes; it probes the tailnet on every run):
+Read-only inspection (never writes; with mesh enabled it probes the tailnet on
+every run):
 
 ```bash
 ee mesh status --workspace . --json

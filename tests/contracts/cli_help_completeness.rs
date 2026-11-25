@@ -186,6 +186,8 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
             "--include-future",
             "--include-stale",
             "--read-only",
+            "--changed-symbol",
+            "--changed-symbols-from-git",
         ],
         "ee pack --help",
     )?;

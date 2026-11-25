@@ -3757,6 +3757,15 @@ pub struct PackArgs {
     #[arg(long, short = 'p')]
     pub profile: Option<String>,
 
+    /// Boost memories linked to this changed symbol; repeat for multiple selectors.
+    /// Needs a QUERY: the --query-file path has no changed-symbol input.
+    #[arg(long = "changed-symbol", value_name = "SYMBOL", action = ArgAction::Append, requires = "query")]
+    pub changed_symbols: Vec<String>,
+
+    /// Derive changed-symbol boosts from the current git workspace diff. Needs a QUERY.
+    #[arg(long = "changed-symbols-from-git", action = ArgAction::SetTrue, requires = "query")]
+    pub changed_symbols_from_git: bool,
+
     /// Pack output profile: lean, standard, or verbose.
     #[arg(long = "pack-profile", value_enum)]
     pub pack_profile: Option<PackOutputProfileArg>,
@@ -48055,8 +48064,8 @@ where
                 lens_overlay.and_then(|overlay| overlay.context_profile.as_ref().cloned())
             }),
             ppr_weight: None,
-            changed_symbols: Vec::new(),
-            changed_symbols_from_git: false,
+            changed_symbols: args.changed_symbols.clone(),
+            changed_symbols_from_git: args.changed_symbols_from_git,
             pack_profile: args.pack_profile.or(lens_pack_profile).unwrap_or_default(),
             // bd-pack-compact-mode-ibksx: `ee pack --compact` parses into
             // PackArgs; this is the bridge onto the shared ContextArgs path,
@@ -98177,6 +98186,134 @@ mod tests {
                     .to_string()
                     .contains("--bead-id cannot be combined with candidate pagination"),
                 format!("{surface}: rejection explains the incompatible bead input"),
+            )?;
+        }
+        Ok(())
+    }
+
+    // `ee pack` built its ContextArgs with an empty changed-symbol list, so the
+    // canonical surface could not reach the boost that docs/agent-ux/symbol-graph.md
+    // documents on it. The memory below carries no file-span provenance, so a
+    // pack that reaches the boost reports symbol_index_stale, and one that does
+    // not reach it cannot.
+    #[test]
+    fn pack_changed_symbol_flags_reach_the_context_boost() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let initialized = crate::core::init::init_workspace(&crate::core::init::InitOptions {
+            workspace_path: workspace.clone(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        ensure(
+            !matches!(initialized.status, crate::core::init::InitStatus::Failed),
+            format!("initialize symbol fixture: {:?}", initialized.action_errors),
+        )?;
+        let database = workspace.join(".ee/ee.db");
+        let connection =
+            crate::db::DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let workspace_id = connection
+            .get_workspace_by_path(&workspace.to_string_lossy())
+            .map_err(|error| error.to_string())?
+            .ok_or("initialized symbol fixture workspace missing")?
+            .id;
+        let _embedder = crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+        let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0x5e1b01));
+        connection
+            .insert_memory(
+                &memory_id.to_string(),
+                &crate::db::CreateMemoryInput {
+                    workspace_id,
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "Emberstone release renders the changed symbol boost.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("manual://symbol-cli-fixture".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["symbols".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let indexed = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            index_dir: None,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &indexed.status,
+            &crate::core::index::IndexRebuildStatus::Success,
+            "symbol fixture index built",
+        )?;
+        let workspace_arg = workspace.to_str().ok_or("UTF-8 fixture workspace")?;
+        let reports_stale_symbols = |command: &str, flags: &[&str]| -> Result<bool, String> {
+            let mut args = vec![
+                "ee",
+                "--json",
+                "--workspace",
+                workspace_arg,
+                command,
+                "emberstone release",
+                "--source-mode",
+                "lexical-only",
+                "--speed",
+                "instant",
+                "--read-only",
+            ];
+            args.extend_from_slice(flags);
+            let (exit, stdout, stderr) = invoke(&args);
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Success,
+                &format!("{command} {flags:?}: {stdout} {stderr}"),
+            )?;
+            let response: serde_json::Value = serde_json::from_str(&stdout)
+                .map_err(|error| format!("{command} {flags:?}: response must parse: {error}"))?;
+            let degraded = response
+                .pointer("/data/degraded")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| format!("{command} {flags:?}: data.degraded[] missing"))?;
+            Ok(degraded
+                .iter()
+                .any(|entry| entry["code"] == serde_json::json!("symbol_index_stale")))
+        };
+
+        for command in ["pack", "context"] {
+            ensure(
+                reports_stale_symbols(command, &["--changed-symbol", "render_boost"])?,
+                format!("`ee {command} --changed-symbol` must reach the changed-symbol boost"),
+            )?;
+            ensure(
+                !reports_stale_symbols(command, &[])?,
+                format!("`ee {command}` without a selector must not run the boost"),
+            )?;
+        }
+
+        // The --query-file path has no changed-symbol input, so a selector there
+        // is refused rather than dropped.
+        for flags in [
+            &["--changed-symbol", "render_boost"][..],
+            &["--changed-symbols-from-git"][..],
+        ] {
+            let mut args = vec!["ee", "pack", "--query-file", "task.eeq.json"];
+            args.extend_from_slice(flags);
+            ensure(
+                Cli::try_parse_from(args).is_err(),
+                format!("`ee pack --query-file` must refuse {flags:?}"),
             )?;
         }
         Ok(())

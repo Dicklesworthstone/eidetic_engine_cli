@@ -17485,11 +17485,11 @@ EE_SWARM_SCALE_FORCE_FAILURE=nondeterminism scripts/e2e_overhaul/swarm_scale.sh
 
 **Severity:** low
 
-**Surfaces:** context
+**Surfaces:** pack, context
 
 **Introduced by:** bd-2xuu7.6 (epic G)
 
-**Trigger.** A context pack asked for changed-symbol boosting (--changed-symbol or --changed-symbols-from-git), but git status failed, no candidate memory carried file-span provenance, or none of their Rust sources was readable, so the boost was skipped. Symbols are extracted from sources on every pack; there is no persisted snapshot.
+**Trigger.** A context pack asked for changed-symbol boosting (--changed-symbol or --changed-symbols-from-git), but git status failed, no candidate memory carried file-span provenance, or none of their Rust sources was readable, so the boost was skipped; or a source failed to parse, so the boost ran on partial symbols. Symbols are extracted from sources on every pack; there is no persisted snapshot.
 
 **Setup.**
 
@@ -17500,12 +17500,12 @@ ee init --workspace .
 **Invocation.**
 
 ```bash
-ee context 'changed symbol' --workspace . --changed-symbol changed --json
+ee pack 'changed symbol' --workspace . --changed-symbol changed --json
 ```
 
 **Expected emission.** Message contains: `Symbol index is stale`
 
-**Repair hint.** Symbols are re-read from workspace sources on every pack, so there is no index to rebuild; check that `git status` runs in the workspace, that the memories carry file-span provenance, and that their Rust sources are readable.
+**Repair hint.** Symbols are re-read from workspace sources on every pack, so there is no index to rebuild; check that `git status` runs in the workspace, that the memories carry file-span provenance, and that their Rust sources are readable and parse.
 
 **Fixture.** [`tests/fixtures/failure_modes/symbol_index_stale.json`](../tests/fixtures/failure_modes/symbol_index_stale.json)
 
@@ -19637,5 +19637,5 @@ the gap is one of:
 For new degraded codes, follow the J6 fixture-authoring workflow in
 `tests/fixtures/failure_modes/` (see any existing fixture as a
 template), then regenerate.
-<!-- degraded-codes-fingerprint inputs=sha256:8d7c726555dc51ab18f9cf2fb0588eecd138fba6d5d5dc44f1eb168b3894088d -->
-<!-- degraded-codes-fingerprint body=sha256:b1c1210901bc4c31a161640e32b1adccb5ac122c0418eb0ac6d5159ba2a0cbeb -->
+<!-- degraded-codes-fingerprint inputs=sha256:cff0d4ca9186f427cedee386492cb3e1634a76394b33bb3243c6e92cda586671 -->
+<!-- degraded-codes-fingerprint body=sha256:1cfa1ff8c4a18e67a81aa2df6e5e3191c9f5a24c0b9510be2943092fddc08ad4 -->

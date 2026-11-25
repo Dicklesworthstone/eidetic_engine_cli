@@ -13893,7 +13893,7 @@ fn push_symbol_index_stale_degradation(
     );
 }
 
-const SYMBOL_INDEX_STALE_REPAIR: &str = "Symbols are re-read from workspace sources on every pack, so there is no index to rebuild; check that `git status` runs in the workspace, that the memories carry file-span provenance, and that their Rust sources are readable.";
+const SYMBOL_INDEX_STALE_REPAIR: &str = "Symbols are re-read from workspace sources on every pack, so there is no index to rebuild; check that `git status` runs in the workspace, that the memories carry file-span provenance, and that their Rust sources are readable and parse.";
 
 fn context_proximity_feature_enabled(workspace_path: &Path) -> Result<bool, String> {
     let config = context_workspace_config(workspace_path, "Proximity-to-seed scoring")?;
