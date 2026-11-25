@@ -15381,12 +15381,23 @@ pub(crate) fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
     // fusion-only hits and amongst themselves by descending rerank score;
     // non-reranked hits use the cross-scale relevance projection and retain
     // native score ordering within one score kind.
-    hits.sort_by(rerank_aware_hit_order);
+    if hits.len() < 2 {
+        return;
+    }
+    // Choose the policy once for the whole pool. Switching comparators for
+    // each pair can form a cycle when only some hits carry quality metadata.
+    let compare: fn(&SearchHit, &SearchHit) -> std::cmp::Ordering =
+        if hits.iter().any(|hit| hit.ranking_components_json().is_some()) {
+            quality_scored_hit_order
+        } else {
+            rerank_aware_hit_order
+        };
+    hits.sort_by(compare);
     let mut run_start = 0_usize;
     while run_start < hits.len() {
         let mut run_end = run_start + 1;
         while run_end < hits.len()
-            && rerank_aware_hit_order(&hits[run_start], &hits[run_end]) == std::cmp::Ordering::Equal
+            && compare(&hits[run_start], &hits[run_end]) == std::cmp::Ordering::Equal
         {
             run_end += 1;
         }
@@ -16330,6 +16341,17 @@ fn preload_returned_search_memories(
     }
 }
 
+/// Apply the quality score, or its defined relevance fallback, to every hit
+/// in a quality-ranked pool. Equal scores retain the native scale tie-break.
+fn quality_scored_hit_order(left: &SearchHit, right: &SearchHit) -> std::cmp::Ordering {
+    right
+        .ranking_score()
+        .total_cmp(&left.ranking_score())
+        .then_with(|| right.relevance_score().total_cmp(&left.relevance_score()))
+        .then_with(|| left.score_kind().cmp(right.score_kind()))
+        .then_with(|| right.score.total_cmp(&left.score))
+}
+
 /// Ranking order for final search hits (bd-2vq2z.30). Reranked hits (those
 /// carrying a `rerank_score`) outrank fusion-only hits and order amongst
 /// themselves by descending rerank score, so a reranker's decision survives to
@@ -16338,14 +16360,6 @@ fn preload_returned_search_memories(
 /// native score breaks relevance ties within a score kind, preserving engine
 /// ordering where the projection clamps multiple values to the same endpoint.
 fn rerank_aware_hit_order(left: &SearchHit, right: &SearchHit) -> std::cmp::Ordering {
-    if left.ranking_components_json().is_some() || right.ranking_components_json().is_some() {
-        return right
-            .ranking_score()
-            .total_cmp(&left.ranking_score())
-            .then_with(|| right.relevance_score().total_cmp(&left.relevance_score()))
-            .then_with(|| left.score_kind().cmp(right.score_kind()))
-            .then_with(|| right.score.total_cmp(&left.score));
-    }
     match (left.rerank_score, right.rerank_score) {
         (Some(left_rerank), Some(right_rerank)) => right_rerank.total_cmp(&left_rerank),
         (Some(_), None) => std::cmp::Ordering::Less,
@@ -30778,6 +30792,36 @@ mod tests {
                 "mem_01J0000000000000000000000A",
             ]
         );
+    }
+
+    #[test]
+    fn mixed_quality_and_rerank_hits_have_one_order_for_every_input_permutation() {
+        let mut reranked = synthetic_hit("reranked", 0.1);
+        reranked.rerank_score = Some(0.1);
+        let ordinary = synthetic_hit("ordinary", 0.9);
+        let mut quality = synthetic_hit("quality", 0.4);
+        quality.metadata = Some(serde_json::json!({
+            (super::SEARCH_QUALITY_SCORING_KEY): {
+                "schema": super::SEARCH_SCORING_POLICY_V1,
+                "components": { "finalScore": 0.5 }
+            }
+        }));
+        let original = [reranked, ordinary, quality];
+        for order in [
+            [0, 1, 2], [0, 2, 1], [1, 0, 2],
+            [1, 2, 0], [2, 0, 1], [2, 1, 0],
+        ] {
+            let mut hits = order.map(|i| original[i].clone());
+            sort_search_hits_by_score_order(&mut hits);
+            assert_eq!(
+                hits.each_ref().map(|hit| hit.doc_id.as_str()),
+                ["ordinary", "quality", "reranked"],
+            );
+        }
+
+        let mut raw = [original[1].clone(), original[0].clone()];
+        sort_search_hits_by_score_order(&mut raw);
+        assert_eq!(raw[0].doc_id, "reranked");
     }
 
     #[test]
