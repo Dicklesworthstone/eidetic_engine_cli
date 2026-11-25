@@ -12,8 +12,9 @@ use chrono::{DateTime, Duration, Utc};
 use ee::models::{MemoryId, ProvenanceUri, RedactionLevel, UnitScore};
 use ee::obs::strip_volatile_fields;
 use ee::pack::{
-    ArenaMode, ContextPackProfile, PackAssemblyOptions, PackCandidate, PackCandidateInput,
-    PackDraft, PackProvenance, PackSection, TokenBudget, assemble_draft,
+    ArenaMode, ContextPackProfile, DEFAULT_MMR_RELEVANCE_WEIGHT, PackAssemblyOptions,
+    PackCandidate, PackCandidateInput, PackDraft, PackProvenance, PackSection, TokenBudget,
+    assemble_draft,
     assemble_draft_with_profile_and_options_seeded,
 };
 use ee::runtime::determinism::Deterministic;
@@ -416,6 +417,7 @@ fn pack_options() -> impl Strategy<Value = PackAssemblyOptions> {
                     output_redaction_enabled,
                     redaction_level: redaction_level_for(redaction_level_raw),
                     lod_budget_shares: None,
+                    mmr_relevance_weight: DEFAULT_MMR_RELEVANCE_WEIGHT,
                     relevance_floor: None,
                     arena_mode: ArenaMode::Disabled,
                 }
@@ -700,6 +702,7 @@ fn replay_pack_case_input_bytes(input: &serde_json::Value) -> Result<Vec<u8>, St
         output_redaction_enabled: input.config.output_redaction_enabled,
         redaction_level: parse_regression_redaction_level(&input.config.redaction_level)?,
         lod_budget_shares: None,
+        mmr_relevance_weight: DEFAULT_MMR_RELEVANCE_WEIGHT,
         relevance_floor: None,
         arena_mode: ArenaMode::Disabled,
     };
@@ -1382,6 +1385,7 @@ fn determinism_regression_fixture_captures_structured_pack_input() -> Result<(),
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
         lod_budget_shares: None,
+        mmr_relevance_weight: DEFAULT_MMR_RELEVANCE_WEIGHT,
         relevance_floor: None,
         arena_mode: ArenaMode::Disabled,
     };
@@ -1441,6 +1445,7 @@ fn determinism_regression_fixture_replays_structured_pack_input() -> Result<(), 
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
         lod_budget_shares: None,
+        mmr_relevance_weight: DEFAULT_MMR_RELEVANCE_WEIGHT,
         relevance_floor: None,
         arena_mode: ArenaMode::Disabled,
     };
@@ -1480,6 +1485,7 @@ fn determinism_regression_fixture_persists_pack_case_mismatches_only() -> Result
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
         lod_budget_shares: None,
+        mmr_relevance_weight: DEFAULT_MMR_RELEVANCE_WEIGHT,
         relevance_floor: None,
         arena_mode: ArenaMode::Disabled,
     };
@@ -1543,6 +1549,7 @@ fn determinism_regression_fixture_verifies_replayed_expected_hash() -> Result<()
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
         lod_budget_shares: None,
+        mmr_relevance_weight: DEFAULT_MMR_RELEVANCE_WEIGHT,
         relevance_floor: None,
         arena_mode: ArenaMode::Disabled,
     };
@@ -1591,6 +1598,7 @@ fn determinism_regression_fixture_replay_rejects_diff_window_drift() -> Result<(
             output_redaction_enabled: true,
             redaction_level: RedactionLevel::Strict,
             lod_budget_shares: None,
+            mmr_relevance_weight: DEFAULT_MMR_RELEVANCE_WEIGHT,
             relevance_floor: None,
             arena_mode: ArenaMode::Disabled,
         },
@@ -1643,6 +1651,7 @@ fn determinism_regression_fixture_verifies_loaded_replay_hashes() -> Result<(), 
             output_redaction_enabled: true,
             redaction_level: RedactionLevel::Strict,
             lod_budget_shares: None,
+            mmr_relevance_weight: DEFAULT_MMR_RELEVANCE_WEIGHT,
             relevance_floor: None,
             arena_mode: ArenaMode::Disabled,
         },
@@ -2476,6 +2485,7 @@ fn determinism_preflight_event_replays_loaded_fixtures_and_flags_stale() -> Resu
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
         lod_budget_shares: None,
+        mmr_relevance_weight: DEFAULT_MMR_RELEVANCE_WEIGHT,
         relevance_floor: None,
         arena_mode: ArenaMode::Disabled,
     };
@@ -2544,6 +2554,7 @@ fn determinism_preflight_event_rejects_replay_hash_drift_before_sampling() -> Re
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
         lod_budget_shares: None,
+        mmr_relevance_weight: DEFAULT_MMR_RELEVANCE_WEIGHT,
         relevance_floor: None,
         arena_mode: ArenaMode::Disabled,
     };

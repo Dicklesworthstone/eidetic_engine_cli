@@ -381,3 +381,355 @@ fn pack_request_identity_resolves_workspace_aliases_with_unpublished_indexes() {
     );
     assert!(!canonical.resolve_index_dir().exists());
 }
+
+
+#[test]
+fn global_tombstones_survive_live_rebuilds_in_search_and_pack() {
+    if isolate_global_store(
+        "global_tombstones_survive_live_rebuilds_in_search_and_pack",
+        "EE_TEST_GLOBAL_TOMBSTONE_RETRIEVAL",
+    ) {
+        return;
+    }
+    let fixture = Fixture::new();
+    let reference = Utc::now();
+    let created = reference - chrono::Duration::days(1);
+    fixture.memory_with_content(900, 1.0, 1.0, created, "Unrelated workspace instructions.");
+    include_global(&fixture, true);
+    let global = GlobalQualityFixture::new(
+        crate::core::global_store::default_global_store_paths_from_env().unwrap(),
+    );
+    let retired = global.memory(901, created);
+    let sealed = global.memory(902, created);
+    let expired = global.memory(903, created);
+    let held = global.memory(904, created);
+    let superseded = global.memory(905, created);
+    for id in [&retired, &sealed, &expired, &held, &superseded] {
+        global.db.tombstone_memory(id).unwrap();
+    }
+    global.db.execute_raw(&format!(
+        "UPDATE memories SET kind = 'failure', content = 'qualityquasar historical runbook retains prior deployment commands and evidence pointers.' WHERE id = '{retired}'"
+    )).unwrap();
+    global
+        .db
+        .set_memory_typed_fields_json(&retired, Some(r#"{"family":"historical-release"}"#))
+        .unwrap();
+    global
+        .db
+        .insert_memory_seal(
+            &sealed,
+            &crate::models::memory_seal_commitment(BODY.as_bytes()),
+            &created.to_rfc3339(),
+        )
+        .unwrap();
+    let expiry = (reference - chrono::Duration::hours(1)).to_rfc3339();
+    global.db.execute_raw(&format!(
+        "UPDATE memories SET valid_to = '{expiry}' WHERE id = '{expired}'"
+    )).unwrap();
+    global
+        .db
+        .restore_imported_memory_supersession(
+            &superseded,
+            &(reference - chrono::Duration::minutes(1)).to_rfc3339(),
+        )
+        .unwrap();
+    global
+        .db
+        .insert_feedback_quarantine(
+            "fq_00000000000000000000000904",
+            &crate::db::CreateFeedbackQuarantineInput {
+                workspace_id: global.workspace.clone(),
+                source_id: "historical-review-fixture".to_owned(),
+                target_type: "memory".to_owned(),
+                target_id: held.clone(),
+                signal: "harmful".to_owned(),
+                weight: 1.0,
+                source_type: "outcome_observed".to_owned(),
+                proposed_event_id: None,
+                recorded_at: created.to_rfc3339(),
+                reason: "Review is pending.".to_owned(),
+                event_reason: None,
+                evidence_json: None,
+                session_id: None,
+                raw_event_hash: format!("blake3:{}", "a".repeat(64)),
+            },
+        )
+        .unwrap();
+    let _local_embedder = fixture.publish_index();
+    let _global_embedder =
+        crate::core::index::install_test_hash_workspace_embedder(&global.workspace);
+    let rebuild = crate::core::index::IndexRebuildOptions {
+        workspace_path: global.paths.root.clone(),
+        database_path: Some(global.paths.database_path.clone()),
+        index_dir: Some(global.paths.index_dir.clone()),
+        dry_run: false,
+    };
+    let options = SearchOptions {
+        as_of: Some(reference),
+        memory_scope: MemoryScope::Global,
+        ..fixture.options()
+    };
+    let historical = SearchOptions {
+        include_tombstoned: true,
+        ..options.clone()
+    };
+    let mut expected = BTreeSet::new();
+    for mixed in [false, true] {
+        if mixed {
+            expected.insert(global.memory(906, created));
+        }
+        let rebuilt = crate::core::index::rebuild_index(&rebuild).unwrap();
+        assert!(rebuilt.errors.is_empty());
+        assert_eq!(
+            crate::core::index::index_generation_is_verified_empty(&global.paths.index_dir)
+                .unwrap(),
+            !mixed
+        );
+        let database_before = std::fs::read(&global.paths.database_path).unwrap();
+        let metadata_path = global.paths.index_dir.join("meta.json");
+        let metadata_before = std::fs::read(&metadata_path).unwrap();
+        let default = run_search_unaudited(&options).unwrap();
+        assert_eq!(
+            default
+                .results
+                .iter()
+                .map(|hit| hit.doc_id.clone())
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+
+        let handoff = run_pack_search(&historical).unwrap();
+        assert!(handoff.can_reuse_for_pack());
+        assert!(handoff.snapshot_matches(&historical, &fixture.db));
+        let mut expected_historical = expected.clone();
+        expected_historical.insert(retired.clone());
+        for report in [run_search_unaudited(&historical).unwrap(), handoff.report] {
+            assert_eq!(report.status, SearchStatus::Success);
+            assert_eq!(report.results.len(), expected_historical.len());
+            assert_eq!(
+                report
+                    .results
+                    .iter()
+                    .map(|hit| hit.doc_id.clone())
+                    .collect::<BTreeSet<_>>(),
+                expected_historical
+            );
+            let hit = report
+                .results
+                .iter()
+                .find(|hit| hit.doc_id == retired)
+                .unwrap();
+            assert_eq!(hit.source, ScoreSource::Lexical);
+            let metadata = hit.metadata.as_ref().unwrap();
+            assert_eq!(
+                metadata["storeLane"],
+                crate::core::global_store::GLOBAL_PROVENANCE_LANE
+            );
+            assert_eq!(metadata["tombstoned"], true);
+            assert!(metadata["tombstoned_at"].as_str().is_some());
+            assert_eq!(metadata["provenanceUri"], "manual://global-feedback-quality");
+            let public = report.data_json();
+            let retired_result = public["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|result| result["docId"] == retired)
+                .unwrap();
+            assert_eq!(retired_result["tombstoned"], true);
+            assert!(retired_result["tombstonedAt"].is_string());
+            assert!(report.degraded.iter().any(|entry| {
+                entry.code == "search_tombstone_snapshot_lexical"
+                    && entry.message.contains("user-global")
+            }));
+        }
+        let filtered = run_inspection_search_with_filters(
+            &historical,
+            Some("failure"),
+            &[TypedMemoryFieldFilter::parse("family=historical-release").unwrap()],
+        )
+        .unwrap();
+        assert_eq!(filtered.results.len(), 1);
+        assert_eq!(filtered.results[0].doc_id, retired);
+        let rejected = run_inspection_search_with_filters(
+            &historical,
+            Some("failure"),
+            &[TypedMemoryFieldFilter::parse("family=other-release").unwrap()],
+        )
+        .unwrap();
+        assert!(rejected.results.is_empty());
+
+        let mut pack_options = native_handoff_pack_options(&fixture, reference);
+        pack_options.memory_scope = MemoryScope::Global;
+        pack_options.include_tombstoned = true;
+        pack_options.relevance_floor = Some(0.0);
+        let pack =
+            crate::core::context::run_context_pack_with_performance(&pack_options, "pack").unwrap();
+        let item = pack
+            .response
+            .data
+            .pack
+            .items
+            .iter()
+            .find(|item| item.memory_id.to_string() == retired)
+            .unwrap();
+        assert!(item.tombstoned_at.is_some());
+        assert!(pack.response.data.pack.items.iter().all(|item| {
+            let id = item.memory_id.to_string();
+            ![&sealed, &expired, &held, &superseded].contains(&&id)
+        }));
+        assert_eq!(
+            std::fs::read(&global.paths.database_path).unwrap(),
+            database_before
+        );
+        assert_eq!(std::fs::read(&metadata_path).unwrap(), metadata_before);
+    }
+    let with_expired = run_search_unaudited(&SearchOptions {
+        include_expired: true,
+        ..historical.clone()
+    })
+    .unwrap();
+    assert!(with_expired.results.iter().any(|hit| hit.doc_id == expired));
+    assert!(
+        with_expired
+            .results
+            .iter()
+            .all(|hit| ![&sealed, &held, &superseded].contains(&&hit.doc_id))
+    );
+    let before_supersession = run_search_unaudited(&SearchOptions {
+        as_of: Some(reference - chrono::Duration::minutes(2)),
+        ..historical.clone()
+    })
+    .unwrap();
+    assert!(
+        before_supersession
+            .results
+            .iter()
+            .any(|hit| hit.doc_id == superseded)
+    );
+    assert!(
+        before_supersession
+            .results
+            .iter()
+            .all(|hit| ![&sealed, &held].contains(&&hit.doc_id))
+    );
+
+    include_global(&fixture, false);
+    let excluded = run_search_unaudited(&historical).unwrap();
+    assert!(excluded.results.is_empty());
+    assert!(
+        excluded
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "global_lane_disabled")
+    );
+    include_global(&fixture, true);
+    std::fs::write(global.paths.index_dir.join("meta.json"), b"invalid index metadata").unwrap();
+    let corrupt = run_search_unaudited(&historical).unwrap();
+    assert!(corrupt.results.is_empty());
+    assert!(
+        corrupt
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "global_index_unavailable")
+    );
+    assert!(
+        !corrupt
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "search_tombstone_snapshot_lexical")
+    );
+}
+
+#[test]
+fn global_tombstone_supplement_respects_modes_duplicates_and_source_budgets() {
+    let fixture = Fixture::new();
+    let id = fixture.memory(921, 1.0, 1.0, Utc::now() - chrono::Duration::days(1));
+    fixture.db.tombstone_memory(&id).unwrap();
+    let retired = fixture.db.get_memory(&id).unwrap().unwrap();
+    let live_hit = SearchHit {
+        doc_id: MemoryId::from_uuid(uuid::Uuid::from_u128(922)).to_string(),
+        score: 0.8,
+        source: ScoreSource::Lexical,
+        fast_score: None,
+        quality_score: None,
+        lexical_score: Some(0.8),
+        rerank_score: None,
+        metadata: None,
+        explanation: None,
+    };
+    let options = SearchOptions {
+        speed: SpeedMode::Default,
+        include_tombstoned: true,
+        ..fixture.options()
+    };
+    let run = |options: &SearchOptions, memories: &[StoredMemory], mut hits: Vec<SearchHit>| {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let mut degraded = Vec::new();
+            supplement_global_tombstone_hits(&cx, options, memories, &mut hits, &mut degraded).await;
+            (hits, degraded)
+        })
+        .unwrap()
+    };
+    for (source_mode, strict_source_mode, include_tombstoned) in [
+        (SearchSourceMode::LexicalOnly, false, false),
+        (SearchSourceMode::SemanticOnly, false, true),
+        (SearchSourceMode::SemanticOnly, true, true),
+        (SearchSourceMode::Hybrid, true, true),
+    ] {
+        let (hits, degraded) = run(
+            &SearchOptions {
+                source_mode,
+                strict_source_mode,
+                include_tombstoned,
+                ..options.clone()
+            },
+            std::slice::from_ref(&retired),
+            vec![live_hit.clone()],
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].doc_id, live_hit.doc_id);
+        assert!(degraded.is_empty());
+    }
+    for source_mode in [SearchSourceMode::LexicalOnly, SearchSourceMode::Hybrid] {
+        let (hits, degraded) = run(
+            &SearchOptions {
+                source_mode,
+                ..options.clone()
+            },
+            std::slice::from_ref(&retired),
+            vec![live_hit.clone()],
+        );
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits.iter().filter(|hit| hit.doc_id == id).count(), 1);
+        assert!(hits.iter().all(|hit| hit.source == ScoreSource::Lexical));
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "search_tombstone_snapshot_lexical");
+        let (repeated, degraded) = run(&options, std::slice::from_ref(&retired), hits);
+        assert_eq!(repeated.len(), 2);
+        assert!(degraded.is_empty());
+    }
+    let (no_match, degraded) = run(
+        &SearchOptions {
+            query: "absentarchiveterm".to_owned(),
+            ..options.clone()
+        },
+        std::slice::from_ref(&retired),
+        vec![live_hit.clone()],
+    );
+    assert_eq!(no_match.len(), 1);
+    assert!(degraded.is_empty());
+
+    let mut oversized = retired.clone();
+    oversized.content = "x".repeat(SEARCH_LIVE_SNAPSHOT_MAX_BODY_BYTES as usize + 1);
+    let (hits, degraded) = run(&options, &[oversized], vec![live_hit.clone()]);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].doc_id, live_hit.doc_id);
+    assert_eq!(degraded.len(), 1);
+    assert_eq!(degraded[0].code, "search_tombstone_snapshot_unavailable");
+    let rows = vec![retired; SEARCH_LIVE_SNAPSHOT_MAX_DOCUMENTS as usize + 1];
+    let (hits, degraded) = run(&options, &rows, vec![live_hit.clone()]);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].doc_id, live_hit.doc_id);
+    assert_eq!(degraded.len(), 1);
+    assert_eq!(degraded[0].code, "search_tombstone_snapshot_unavailable");
+}

@@ -29,7 +29,7 @@ use crate::config::{
     GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY,
     GRAPH_PPR_ALPHA_KEY, GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY,
     GRAPH_WITNESSES_RETENTION_DAYS_KEY, MEMORY_INCLUDE_GLOBAL_KEY, MEMORY_PARTICIPATE_KEY,
-    PACK_CANDIDATE_POOL_KEY, PathExpander, SCORING_CANDIDATE_MULTIPLIER_KEY,
+    PACK_CANDIDATE_POOL_KEY, PACK_MMR_LAMBDA_KEY, PathExpander, SCORING_CANDIDATE_MULTIPLIER_KEY,
     SCORING_CONFIDENCE_FLOOR_KEY, SCORING_ESTABLISHED_MULTIPLIER_KEY,
     SCORING_HARMFUL_PENALTY_FLOOR_KEY, SCORING_HARMFUL_PENALTY_PER_HIT_KEY,
     SCORING_RECENCY_TAU_DAYS_KEY, SCORING_SCOPE_MATCH_BONUS_KEY, SCORING_UTILITY_FLOOR_KEY,
@@ -508,6 +508,28 @@ pub(crate) fn resolve_pack_candidate_pool(
         .transpose()
 }
 
+/// Resolve the relevance/diversity tradeoff once for each pack, including
+/// daemon and library requests. The shared default preserves the selector's
+/// historical weight when neither the user nor workspace config sets it.
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn resolve_pack_mmr_relevance_weight(
+    workspace_root: &Path,
+) -> Result<f32, ConfigSurfaceError> {
+    let weight = merged_workspace_config(workspace_root)?
+        .values
+        .pack
+        .mmr_lambda
+        .unwrap_or_else(|| f64::from(crate::config::DEFAULT_PACK_MMR_LAMBDA));
+    if !weight.is_finite() || !(0.0..=1.0).contains(&weight) {
+        return Err(ConfigSurfaceError::InvalidValue {
+            key: PACK_MMR_LAMBDA_KEY,
+            value: weight.to_string(),
+            expected: "a finite number in the range 0.0..=1.0",
+        });
+    }
+    Ok(weight as f32)
+}
+
 fn read_project_config(
     options: &ConfigSurfaceOptions,
     expander: &PathExpander,
@@ -957,6 +979,11 @@ fn config_key_spec(key: &str) -> Option<GraphKeySpec> {
             path: &["pack", "candidate_pool"],
             kind: GraphValueKind::PositiveU32,
         }),
+        PACK_MMR_LAMBDA_KEY => Some(GraphKeySpec {
+            key: PACK_MMR_LAMBDA_KEY,
+            path: &["pack", "mmr_lambda"],
+            kind: GraphValueKind::UnitFloat,
+        }),
         SEARCH_DEFAULT_SPEED_KEY => Some(GraphKeySpec {
             key: SEARCH_DEFAULT_SPEED_KEY,
             path: &["search", "default_speed"],
@@ -1397,6 +1424,85 @@ mod tests {
         let after = fs::read_to_string(temp.path().join(".ee/config.toml"))
             .map_err(|error| error.to_string())?;
         assert_eq!(before, after);
+        Ok(())
+    }
+
+    #[test]
+    fn mmr_lambda_set_round_trips_and_rejects_invalid_writes() -> TestResult {
+        let temp = workspace()?;
+        let options = options(temp.path());
+        let path = temp.path().join(".ee/config.toml");
+        let preview = set_config(&options, "pack.mmr_lambda", "0.5", true)
+            .map_err(|error| error.to_string())?;
+        assert!(preview.would_write && !preview.applied);
+        assert!(!path.exists());
+        for value in ["0.0", "0.5", "0.75", "1.0"] {
+            set_config(&options, "pack.mmr_lambda", value, false)
+                .map_err(|error| error.to_string())?;
+            let shown = get_config(&options, "pack.mmr_lambda")
+                .map_err(|error| error.to_string())?;
+            assert_eq!(shown.source, "project");
+            let expected = value.parse::<f32>().map_err(|error| error.to_string())?;
+            assert_eq!(
+                super::resolve_pack_mmr_relevance_weight(temp.path())
+                    .map_err(|error| error.to_string())?,
+                expected
+            );
+            assert_eq!(
+                shown.value.parse::<f32>().map_err(|error| error.to_string())?,
+                expected
+            );
+        }
+        let before = fs::read(&path).map_err(|error| error.to_string())?;
+        for invalid in ["-0.1", "1.1", "NaN", "inf", "-inf", "abc", ""] {
+            for dry_run in [true, false] {
+                assert!(set_config(&options, "pack.mmr_lambda", invalid, dry_run).is_err());
+                assert_eq!(fs::read(&path).map_err(|error| error.to_string())?, before);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mmr_lambda_uses_the_historical_selector_default_and_config_precedence() -> TestResult {
+        let temp = workspace()?;
+        let root = temp.path().join("workspace");
+        let user_home = temp.path().join("home");
+        fs::create_dir_all(root.join(".ee")).map_err(|error| error.to_string())?;
+        fs::create_dir_all(user_home.join(".config/ee")).map_err(|error| error.to_string())?;
+        let environment = BTreeMap::from([(
+            if cfg!(windows) { "USERPROFILE" } else { "HOME" }.to_owned(),
+            OsString::from(user_home.as_os_str()),
+        )]);
+        let options = options(&root);
+        let default = merged_config_with_environment(&options, &environment)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            default.values.pack.mmr_lambda,
+            Some(f64::from(crate::pack::DEFAULT_MMR_RELEVANCE_WEIGHT))
+        );
+        assert_eq!(
+            default.source(crate::config::PACK_MMR_LAMBDA_KEY),
+            Some(ConfigValueSource::Default)
+        );
+        fs::write(user_home.join(".config/ee/config.toml"), "[pack]\nmmr_lambda = 0.25\n")
+            .map_err(|error| error.to_string())?;
+        let user = merged_config_with_environment(&options, &environment)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(user.values.pack.mmr_lambda, Some(0.25));
+        assert_eq!(
+            user.source(crate::config::PACK_MMR_LAMBDA_KEY),
+            Some(ConfigValueSource::User)
+        );
+        fs::write(root.join(".ee/config.toml"), "[pack]\nmmr_lambda = 0.5\n")
+            .map_err(|error| error.to_string())?;
+        let project = merged_config_with_environment(&options, &environment)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(project.values.pack.mmr_lambda, Some(0.5));
+        assert_eq!(
+            project.source(crate::config::PACK_MMR_LAMBDA_KEY),
+            Some(ConfigValueSource::Project)
+        );
         Ok(())
     }
 

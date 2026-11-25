@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "search_tombstone_snapshot_unavailable",
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.92",
+    "epic_letter": "D"
+  },
+  "surfaces": [
+    "search",
+    "context",
+    "pack"
+  ],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "An explicit include-tombstoned request cannot execute its supplemental source-archive lexical retrieval because the complete retired corpus exceeds 4096 documents or 16 MiB of body/projected content, or the lexical backend/source snapshot is unavailable. The supplement returns no partial corpus, and admitted live index matches remain available with this explicit warning. In the separately stored user-global lane, the supplement runs only after healthy index and source admission; missing, stale or corrupt historical global indexes retain global_index_unavailable instead.",
+    "setup_commands": [
+      "# In an isolated store with a healthy live index, create more than 4096 admitted matching tombstones, or a retired corpus exceeding the 16-MiB source retrieval bound.",
+      "# Keep a matching live record indexed to verify the failed historical supplement does not discard already admitted live results."
+    ],
+    "invocation": "ee search historicalmemorycanary --include-tombstoned --source-mode lexical-only --json"
+  },
+  "expected_emission": {
+    "code": "search_tombstone_snapshot_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "Supplemental historical lexical retrieval was unavailable"
+    ]
+  }
+}

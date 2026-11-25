@@ -1864,6 +1864,7 @@ pub(crate) fn admit_recent_context_memories_with_connection(
             include_coverage_fill: options.output_options.include_coverage_fill,
             include_anti_pattern_first: true,
             relevance_floor: options.relevance_floor,
+            mmr_relevance_weight: resolved_mmr_relevance_weight(options)?,
             output_redaction_enabled,
             lod_budget_shares: if options.no_lod {
                 None
@@ -2616,6 +2617,11 @@ fn resolved_candidate_pool(options: &ContextPackOptions) -> Result<Option<u32>, 
         options.candidate_pool,
     )
     .map_err(|error| ContextPackError::Search(SearchError::Configuration(error.to_string())))
+}
+
+fn resolved_mmr_relevance_weight(options: &ContextPackOptions) -> Result<f32, ContextPackError> {
+    crate::core::config_surface::resolve_pack_mmr_relevance_weight(&options.workspace_path)
+        .map_err(|error| ContextPackError::Search(SearchError::Configuration(error.to_string())))
 }
 
 struct RuntimeProfileCappedRequest {
@@ -3671,7 +3677,10 @@ async fn run_context_pack_attempt(
     // L2 reuses assembly/rendering; retrieval and source admission still run.
     // Capture graph/admission/LOD controls once and reuse those exact values
     // below; equal selected items do not imply equal selection policies.
-    let selection_settings = ContextSelectionSettings::resolve(options);
+    let selection_settings = ContextSelectionSettings::resolve(options)?;
+    if let Some(probe) = control.why_not {
+        probe.observe_mmr_relevance_weight(selection_settings.mmr_relevance_weight);
+    }
     request.effective_config_policy = Some(context_effective_config_policy(
         options,
         &effective_filters,
@@ -4376,6 +4385,7 @@ async fn run_context_pack_attempt(
             include_coverage_fill: options.output_options.include_coverage_fill,
             include_anti_pattern_first: true,
             relevance_floor: options.relevance_floor,
+            mmr_relevance_weight: selection_settings.mmr_relevance_weight,
             output_redaction_enabled,
             lod_budget_shares: selection_settings.lod_budget_shares,
             // bd-1prrl.7.3: arena mode is plumbed through the
@@ -10796,6 +10806,7 @@ fn compute_pack_effective_config_digest(request: &ContextRequest) -> String {
 /// remains a degradation; it is never mistaken for a configuration value.
 #[derive(Clone, Debug)]
 struct ContextSelectionSettings {
+    mmr_relevance_weight: f32,
     memory_tier_admission: Result<bool, String>,
     ppr_enabled: Result<bool, String>,
     ppr_weight: f32,
@@ -10806,14 +10817,15 @@ struct ContextSelectionSettings {
 }
 
 impl ContextSelectionSettings {
-    fn resolve(options: &ContextPackOptions) -> Self {
+    fn resolve(options: &ContextPackOptions) -> Result<Self, ContextPackError> {
         let workspace = &options.workspace_path;
         let configured_ppr = if options.ppr_weight.is_some() {
             Ok(None)
         } else {
             configured_context_ppr_weight(workspace)
         };
-        Self {
+        Ok(Self {
+            mmr_relevance_weight: resolved_mmr_relevance_weight(options)?,
             memory_tier_admission: context_memory_tier_admission_enabled(workspace),
             ppr_enabled: context_ppr_feature_enabled(workspace),
             ppr_weight: effective_context_ppr_weight(
@@ -10831,7 +10843,7 @@ impl ContextSelectionSettings {
                     .flatten()
                     .or(crate::pack::PackAssemblyOptions::default().lod_budget_shares)
             },
-        }
+        })
     }
 }
 
@@ -10932,6 +10944,15 @@ fn context_effective_config_policy(
             0.0
         },
     );
+    // The historical selector always used 0.75. Omit that default's marker
+    // so existing packs retain their identity; every effective override binds
+    // S6 and the L2 key even if it happens to select the same items. Facility
+    // location has its own objective and does not consume the MMR weight.
+    if options.profile != Some(ContextPackProfile::Submodular)
+        && settings.mmr_relevance_weight != crate::pack::DEFAULT_MMR_RELEVANCE_WEIGHT
+    {
+        hash_policy_f32(&mut hasher, "pack.mmr_lambda", settings.mmr_relevance_weight);
+    }
     if search.rerank_configured_mode == crate::config::SearchRerankMode::Auto {
         hash_labeled_count(&mut hasher, "rerank.top_k", search.rerank_configured_top_k);
     }

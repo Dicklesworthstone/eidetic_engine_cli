@@ -15790,17 +15790,20 @@ pub fn unrelated_context() -> u64 {{
         options.coordination_snapshot_path = None;
         let search = ppr_search_report(Vec::new());
         let (mut request, draft) = pack_hash_v2_fixture(Vec::new())?;
-        let hash = |options: &super::ContextPackOptions| {
+        let hash = |options: &super::ContextPackOptions|
+         -> Result<super::PackHashComponents, String> {
+            let settings = super::ContextSelectionSettings::resolve(options)
+                .map_err(|error| error.to_string())?;
             let mut request = request.clone();
             request.effective_config_policy = Some(super::context_effective_config_policy(
                 options,
                 &super::context_effective_filters(options),
-                &super::ContextSelectionSettings::resolve(options),
+                &settings,
                 &search,
                 None,
                 true,
             ));
-            super::compute_pack_hash_components(
+            Ok(super::compute_pack_hash_components(
                 &request,
                 &draft,
                 &[],
@@ -15808,9 +15811,9 @@ pub fn unrelated_context() -> u64 {{
                 None,
                 None,
                 None,
-            )
+            ))
         };
-        let original = hash(&options);
+        let original = hash(&options)?;
         let cases: &[(&str, fn(&mut super::ContextPackOptions))] = &[
             ("speed", |o| o.speed = crate::search::SpeedMode::Instant),
             ("source", |o| {
@@ -15864,7 +15867,7 @@ pub fn unrelated_context() -> u64 {{
         for (name, mutate) in cases {
             let mut variant = options.clone();
             mutate(&mut variant);
-            let changed = hash(&variant);
+            let changed = hash(&variant)?;
             assert_eq!(
                 original.digests.differing_components(&changed.digests),
                 ["effectiveConfig"],
@@ -15875,9 +15878,9 @@ pub fn unrelated_context() -> u64 {{
         let mut independent_cutoff = options.clone();
         independent_cutoff.as_of = Some(query_time("2026-05-01T00:00:01Z"));
         independent_cutoff.filters.temporal.as_of = Some(query_time("2026-05-01T00:00:00.123Z"));
-        let first_cutoff = hash(&independent_cutoff);
+        let first_cutoff = hash(&independent_cutoff)?;
         independent_cutoff.filters.temporal.as_of = Some(query_time("2026-05-01T00:00:00.124Z"));
-        let second_cutoff = hash(&independent_cutoff);
+        let second_cutoff = hash(&independent_cutoff)?;
         assert_eq!(
             first_cutoff
                 .digests
@@ -15925,7 +15928,8 @@ pub fn unrelated_context() -> u64 {{
         }];
         options.changed_symbols = vec!["Parser::parse()".to_owned(), "Engine".to_owned()];
         let search = ppr_search_report(Vec::new());
-        let settings = super::ContextSelectionSettings::resolve(&options);
+        let settings = super::ContextSelectionSettings::resolve(&options)
+            .map_err(|error| error.to_string())?;
         let digest = |options: &super::ContextPackOptions,
                       settings: &super::ContextSelectionSettings,
                       search: &SearchReport| {
@@ -15981,6 +15985,111 @@ pub fn unrelated_context() -> u64 {{
         Ok(())
     }
 
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn configured_mmr_weight_reaches_pack_selection_and_request_identity() -> TestResult {
+        let (mut options, _workspace, source, _guard) = daemon_pack_retrieval_fixture()?;
+        options.as_of = Some(Utc::now());
+        options.no_lod = true;
+        options.output_options.include_coverage_fill = false;
+        let config_path = options.workspace_path.join(".ee/config.toml");
+        let configure = |weight: &str| {
+            std::fs::write(
+                &config_path,
+                format!("[pack]\nmmr_lambda = {weight}\n[memory]\ninclude_global = false\n"),
+            )
+            .map_err(|error| error.to_string())
+        };
+        configure("0.75")?;
+        let original = super::run_context_pack(&options).map_err(|error| error.to_string())?;
+        configure("0.5")?;
+        let changed = super::run_context_pack(&options).map_err(|error| error.to_string())?;
+        let memory_id = MemoryId::from_str(&source).map_err(|error| error.to_string())?;
+        let gain = |response: &crate::pack::ContextResponse| {
+            response
+                .data
+                .pack
+                .selection_audit
+                .steps
+                .iter()
+                .find(|step| step.memory_id == memory_id)
+                .map(|step| step.marginal_gain)
+                .ok_or_else(|| "the fixture memory must reach the real selector".to_owned())
+        };
+        assert!(gain(&original)? > gain(&changed)?);
+        assert!((gain(&original)? * 2.0 - gain(&changed)? * 3.0).abs() < 0.000_01);
+        assert_eq!(
+            original
+                .data
+                .pack
+                .items
+                .iter()
+                .map(|item| item.memory_id)
+                .collect::<Vec<_>>(),
+            changed
+                .data
+                .pack
+                .items
+                .iter()
+                .map(|item| item.memory_id)
+                .collect::<Vec<_>>()
+        );
+        assert_ne!(
+            original.data.request.effective_config_policy,
+            changed.data.request.effective_config_policy
+        );
+        assert_ne!(
+            original.data.pack.hash.as_ref().ok_or("original pack hash")?,
+            changed.data.pack.hash.as_ref().ok_or("changed pack hash")?
+        );
+        // A subsequent request reads the edited value, including invalid
+        // values, rather than replaying a cached pack or falling back silently.
+        configure("1.5")?;
+        assert!(matches!(
+            super::run_context_pack(&options),
+            Err(super::ContextPackError::Search(
+                crate::core::search::SearchError::Configuration(_)
+            ))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn mmr_policy_preserves_default_identity_and_does_not_affect_facility_location() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut options = context_options_with_coordination_snapshot(PathBuf::new());
+        options.workspace_path = directory.path().to_owned();
+        options.coordination_snapshot_path = None;
+        let mut settings = super::ContextSelectionSettings::resolve(&options)
+            .map_err(|error| error.to_string())?;
+        settings.mmr_relevance_weight = crate::pack::DEFAULT_MMR_RELEVANCE_WEIGHT;
+        let search = ppr_search_report(Vec::new());
+        let digest =
+            |options: &super::ContextPackOptions, settings: &super::ContextSelectionSettings| {
+                super::context_effective_config_policy(
+                    options,
+                    &options.filters,
+                    settings,
+                    &search,
+                    None,
+                    true,
+                )
+            };
+        let default = digest(&options, &settings);
+        let mut custom = settings.clone();
+        custom.mmr_relevance_weight = 0.5;
+        assert_ne!(default, digest(&options, &custom));
+        custom.mmr_relevance_weight = 0.75;
+        assert_eq!(default, digest(&options, &custom));
+        custom.mmr_relevance_weight = 0.0;
+        let zero = digest(&options, &custom);
+        custom.mmr_relevance_weight = -0.0;
+        assert_eq!(zero, digest(&options, &custom));
+        options.profile = Some(ContextPackProfile::Submodular);
+        assert_eq!(digest(&options, &settings), digest(&options, &custom));
+        Ok(())
+    }
+
     #[test]
     fn pack_hash_v6_binds_captured_graph_lod_and_fusion_policy() -> TestResult {
         let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -15988,7 +16097,8 @@ pub fn unrelated_context() -> u64 {{
         options.workspace_path = directory.path().to_owned();
         options.coordination_snapshot_path = None;
         let search = ppr_search_report(Vec::new());
-        let settings = super::ContextSelectionSettings::resolve(&options);
+        let settings = super::ContextSelectionSettings::resolve(&options)
+            .map_err(|error| error.to_string())?;
         let digest =
             |settings: &super::ContextSelectionSettings, search: &SearchReport, weights| {
                 super::context_effective_config_policy(
@@ -16002,6 +16112,9 @@ pub fn unrelated_context() -> u64 {{
             };
         let original = digest(&settings, &search, None);
         let mut variants = Vec::new();
+        let mut mmr = settings.clone();
+        mmr.mmr_relevance_weight = 0.5;
+        variants.push(mmr);
         let mut tier = settings.clone();
         tier.memory_tier_admission = Ok(true);
         variants.push(tier);

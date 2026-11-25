@@ -38,7 +38,7 @@ pub const SUBSYSTEM: &str = "pack";
 pub const PACK_COMMAND: &str = "pack";
 pub const DEFAULT_CONTEXT_MAX_TOKENS: u32 = 4_000;
 pub const DEFAULT_CANDIDATE_POOL: u32 = 64;
-pub const DEFAULT_MMR_RELEVANCE_WEIGHT: f32 = 0.75;
+pub const DEFAULT_MMR_RELEVANCE_WEIGHT: f32 = crate::config::DEFAULT_PACK_MMR_LAMBDA;
 pub const FACILITY_LOCATION_RELEVANCE_WEIGHT: f32 = 0.70;
 pub const FACILITY_LOCATION_UTILITY_WEIGHT: f32 = 0.30;
 pub const FACILITY_LOCATION_EPSILON: f32 = 0.000_001;
@@ -497,6 +497,11 @@ impl Default for PackLodBudgetShares {
 pub struct PackAssemblyOptions {
     pub include_coverage_fill: bool,
     pub include_anti_pattern_first: bool,
+    /// Relevance weight for MMR selection; the remaining weight penalizes redundancy.
+    /// Values must be finite and in `0.0..=1.0`. At zero, only candidates with
+    /// no similarity to already-selected items enter the strict MMR phase.
+    /// The submodular profile retains its separate facility-location objective.
+    pub mmr_relevance_weight: f32,
     /// Caller override applied to every candidate before pack selection.
     ///
     /// Values must be finite and in `0.0..=1.0`; the boundary is inclusive.
@@ -527,6 +532,7 @@ impl Default for PackAssemblyOptions {
         Self {
             include_coverage_fill: true,
             include_anti_pattern_first: true,
+            mmr_relevance_weight: DEFAULT_MMR_RELEVANCE_WEIGHT,
             relevance_floor: None,
             output_redaction_enabled: true,
             redaction_level: RedactionLevel::Minimal,
@@ -537,6 +543,15 @@ impl Default for PackAssemblyOptions {
 }
 
 impl PackAssemblyOptions {
+    pub(crate) fn validate_mmr_relevance_weight(self) -> Result<(), PackValidationError> {
+        if !self.mmr_relevance_weight.is_finite()
+            || !(0.0..=1.0).contains(&self.mmr_relevance_weight)
+        {
+            return Err(PackValidationError::InvalidMmrRelevanceWeight);
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_relevance_floor(self) -> Result<(), PackValidationError> {
         if self
             .relevance_floor
@@ -3128,6 +3143,7 @@ fn explain_why_not_selected_inner(
 ) -> Result<WhyNotSelectedReport, PackValidationError> {
     let task = trim_required(input.task, PackValidationError::EmptyQuery)?;
     input.options.validate_relevance_floor()?;
+    input.options.validate_mmr_relevance_weight()?;
     let target = input.target;
     let target_memory_id = target.memory_id;
     let target_present = input
@@ -3172,7 +3188,7 @@ fn explain_why_not_selected_inner(
     let reason_source = why_not_reason_source(&primary_reason);
     let stage = why_not_stage(target_present, selected, omission, &exclusions, &degraded);
     let token_frontier = why_not_token_frontier(input.budget, &target, draft.as_ref(), omission);
-    let scores = why_not_scores(&target, last_included);
+    let scores = why_not_scores(&target, last_included, input.options.mmr_relevance_weight);
     let score_delta = scores
         .last_included_composite
         .map(|last| round_metric(scores.target_composite - last));
@@ -3545,10 +3561,13 @@ fn why_not_token_frontier(
 fn why_not_scores(
     target: &PackCandidate,
     last_included: Option<&PackDraftItem>,
+    mmr_relevance_weight: f32,
 ) -> WhyNotSelectionScoreReport {
-    let target_composite = why_not_candidate_score(target.relevance, target.utility);
-    let last_included_composite =
-        last_included.map(|item| why_not_candidate_score(item.relevance, item.utility));
+    let target_composite =
+        why_not_candidate_score(target.relevance, target.utility, mmr_relevance_weight);
+    let last_included_composite = last_included.map(|item| {
+        why_not_candidate_score(item.relevance, item.utility, mmr_relevance_weight)
+    });
     WhyNotSelectionScoreReport {
         target_relevance: round_metric(target.relevance.into_inner()),
         target_utility: round_metric(target.utility.into_inner()),
@@ -3558,10 +3577,14 @@ fn why_not_scores(
     }
 }
 
-fn why_not_candidate_score(relevance: UnitScore, utility: UnitScore) -> f32 {
+fn why_not_candidate_score(
+    relevance: UnitScore,
+    utility: UnitScore,
+    mmr_relevance_weight: f32,
+) -> f32 {
     round_metric(
-        (DEFAULT_MMR_RELEVANCE_WEIGHT * relevance.into_inner())
-            + ((1.0 - DEFAULT_MMR_RELEVANCE_WEIGHT) * utility.into_inner()),
+        (mmr_relevance_weight * relevance.into_inner())
+            + ((1.0 - mmr_relevance_weight) * utility.into_inner()),
     )
 }
 
@@ -6915,6 +6938,7 @@ fn assemble_draft_with_profile_and_options_seeded_inner(
     mut workspace: Option<&mut PackArenaWorkspace>,
 ) -> Result<PackDraft, PackValidationError> {
     options.validate_relevance_floor()?;
+    options.validate_mmr_relevance_weight()?;
     // bd-1prrl.7.3: open the arena scope before assembly so the
     // RAII guard's drop runs before the returned `PackDraft` is
     // observed by callers. Workspace reuse requires an explicit
@@ -7110,6 +7134,7 @@ fn assemble_mmr_draft(
         && let Some(candidate_index) = anti_pattern_first_mmr_candidate_index(
             &candidates,
             options.effective_relevance_floor(),
+            options.mmr_relevance_weight,
             &scratch.max_selected_similarities,
             used_tokens,
             budget,
@@ -7122,8 +7147,11 @@ fn assemble_mmr_draft(
             .max_selected_similarities
             .swap_remove(candidate_index);
         let selection = candidates.swap_remove(candidate_index);
-        let marginal_gain =
-            strict_mmr_marginal_gain_from_similarity(&selection, selected_max_similarity);
+        let marginal_gain = strict_mmr_marginal_gain_from_similarity(
+            &selection,
+            selected_max_similarity,
+            options.mmr_relevance_weight,
+        );
         let section_used = section_usage.tokens_for(selection.candidate.section);
 
         if let Some(plan) = pack_lod_candidate_plan(
@@ -7201,8 +7229,11 @@ fn assemble_mmr_draft(
     }
 
     while !candidates.is_empty() {
-        let candidate_index =
-            select_next_candidate_index(&candidates, &scratch.max_selected_similarities);
+        let candidate_index = select_next_candidate_index(
+            &candidates,
+            &scratch.max_selected_similarities,
+            options.mmr_relevance_weight,
+        );
         // bd-1igvf: swap_remove is O(1) where Vec::remove is O(n); selection order
         // is determined by score with a memory_id tiebreaker in
         // [`select_next_candidate_index`], so vec position does not influence which
@@ -7213,9 +7244,16 @@ fn assemble_mmr_draft(
             .max_selected_similarities
             .swap_remove(candidate_index);
         let selection = candidates.swap_remove(candidate_index);
-        let marginal_gain =
-            strict_mmr_marginal_gain_from_similarity(&selection, selected_max_similarity);
-        if marginal_gain <= 0.0 {
+        let marginal_gain = strict_mmr_marginal_gain_from_similarity(
+            &selection,
+            selected_max_similarity,
+            options.mmr_relevance_weight,
+        );
+        if !mmr_gain_is_admissible(
+            marginal_gain,
+            selected_max_similarity,
+            options.mmr_relevance_weight,
+        ) {
             scratch.coverage_fill_candidates.push(selection);
             continue;
         }
@@ -7375,8 +7413,11 @@ fn assemble_mmr_draft(
                         next_rank = next_rank
                             .checked_add(1)
                             .ok_or(PackValidationError::CandidateRankOverflow)?;
-                        let marginal_gain =
-                            strict_mmr_marginal_gain(&selection, &scratch.selected_signatures);
+                        let marginal_gain = strict_mmr_marginal_gain(
+                            &selection,
+                            &scratch.selected_signatures,
+                            options.mmr_relevance_weight,
+                        );
                         scratch.draft.steps.push(PackSelectionStep {
                             rank,
                             memory_id: candidate.memory_id,
@@ -7528,6 +7569,7 @@ fn assemble_mmr_draft_reusing_workspace(
         && let Some(candidate_index) = anti_pattern_first_mmr_candidate_index(
             &candidates,
             options.effective_relevance_floor(),
+            options.mmr_relevance_weight,
             &scratch.max_selected_similarities,
             used_tokens,
             budget,
@@ -7540,8 +7582,11 @@ fn assemble_mmr_draft_reusing_workspace(
             .max_selected_similarities
             .swap_remove(candidate_index);
         let selection = candidates.swap_remove(candidate_index);
-        let marginal_gain =
-            strict_mmr_marginal_gain_from_similarity(&selection, selected_max_similarity);
+        let marginal_gain = strict_mmr_marginal_gain_from_similarity(
+            &selection,
+            selected_max_similarity,
+            options.mmr_relevance_weight,
+        );
         let section_used = section_usage.tokens_for(selection.candidate.section);
 
         if let Some(plan) = pack_lod_candidate_plan(
@@ -7619,15 +7664,25 @@ fn assemble_mmr_draft_reusing_workspace(
     }
 
     while !candidates.is_empty() {
-        let candidate_index =
-            select_next_candidate_index(&candidates, &scratch.max_selected_similarities);
+        let candidate_index = select_next_candidate_index(
+            &candidates,
+            &scratch.max_selected_similarities,
+            options.mmr_relevance_weight,
+        );
         let selected_max_similarity = scratch
             .max_selected_similarities
             .swap_remove(candidate_index);
         let selection = candidates.swap_remove(candidate_index);
-        let marginal_gain =
-            strict_mmr_marginal_gain_from_similarity(&selection, selected_max_similarity);
-        if marginal_gain <= 0.0 {
+        let marginal_gain = strict_mmr_marginal_gain_from_similarity(
+            &selection,
+            selected_max_similarity,
+            options.mmr_relevance_weight,
+        );
+        if !mmr_gain_is_admissible(
+            marginal_gain,
+            selected_max_similarity,
+            options.mmr_relevance_weight,
+        ) {
             scratch.coverage_fill_candidates.push(selection);
             continue;
         }
@@ -7777,8 +7832,11 @@ fn assemble_mmr_draft_reusing_workspace(
                         next_rank = next_rank
                             .checked_add(1)
                             .ok_or(PackValidationError::CandidateRankOverflow)?;
-                        let marginal_gain =
-                            strict_mmr_marginal_gain(&selection, &scratch.selected_signatures);
+                        let marginal_gain = strict_mmr_marginal_gain(
+                            &selection,
+                            &scratch.selected_signatures,
+                            options.mmr_relevance_weight,
+                        );
                         scratch.draft.steps.push(PackSelectionStep {
                             rank,
                             memory_id: candidate.memory_id,
@@ -8526,6 +8584,7 @@ const fn selection_phase_contributes_to_objective(
 fn anti_pattern_first_mmr_candidate_index(
     candidates: &[MmrCandidate],
     relevance_floor: f32,
+    mmr_relevance_weight: f32,
     max_selected_similarities: &[f32],
     used_tokens: u32,
     budget: TokenBudget,
@@ -8539,11 +8598,13 @@ fn anti_pattern_first_mmr_candidate_index(
         if !is_anti_pattern_first_candidate(&selection.candidate, relevance_floor) {
             continue;
         }
-        if strict_mmr_marginal_gain_from_similarity(
+        let max_similarity = max_selected_similarities[candidate_index];
+        let marginal_gain = strict_mmr_marginal_gain_from_similarity(
             selection,
-            max_selected_similarities[candidate_index],
-        ) <= 0.0
-        {
+            max_similarity,
+            mmr_relevance_weight,
+        );
+        if !mmr_gain_is_admissible(marginal_gain, max_similarity, mmr_relevance_weight) {
             continue;
         }
         if pack_lod_candidate_plan(
@@ -8948,15 +9009,20 @@ impl FacilitySelectionQueue {
 fn select_next_candidate_index(
     candidates: &[MmrCandidate],
     max_selected_similarities: &[f32],
+    mmr_relevance_weight: f32,
 ) -> usize {
     debug_assert_eq!(candidates.len(), max_selected_similarities.len());
     let mut best_index = 0_usize;
-    let mut best_score =
-        strict_mmr_marginal_gain_from_similarity(&candidates[0], max_selected_similarities[0]);
+    let mut best_score = strict_mmr_marginal_gain_from_similarity(
+        &candidates[0],
+        max_selected_similarities[0],
+        mmr_relevance_weight,
+    );
     for (candidate_index, candidate) in candidates.iter().enumerate().skip(1) {
         let score = strict_mmr_marginal_gain_from_similarity(
             candidate,
             max_selected_similarities[candidate_index],
+            mmr_relevance_weight,
         );
         let ordering = best_score.total_cmp(&score).then_with(|| {
             compare_candidates(&candidate.candidate, &candidates[best_index].candidate)
@@ -8969,19 +9035,38 @@ fn select_next_candidate_index(
     best_index
 }
 
-fn strict_mmr_marginal_gain(candidate: &MmrCandidate, selected: &[CandidateSignature]) -> f32 {
+fn strict_mmr_marginal_gain(
+    candidate: &MmrCandidate,
+    selected: &[CandidateSignature],
+    mmr_relevance_weight: f32,
+) -> f32 {
     let max_similarity = max_selected_similarity(&candidate.signature, selected);
-    strict_mmr_marginal_gain_from_similarity(candidate, max_similarity)
+    strict_mmr_marginal_gain_from_similarity(candidate, max_similarity, mmr_relevance_weight)
 }
 
-fn strict_mmr_marginal_gain_from_similarity(candidate: &MmrCandidate, max_similarity: f32) -> f32 {
+fn strict_mmr_marginal_gain_from_similarity(
+    candidate: &MmrCandidate,
+    max_similarity: f32,
+    mmr_relevance_weight: f32,
+) -> f32 {
     if max_similarity >= 1.0 {
         0.0
     } else {
         let relevance_score = candidate.candidate.relevance.into_inner();
-        (DEFAULT_MMR_RELEVANCE_WEIGHT * relevance_score)
-            - ((1.0 - DEFAULT_MMR_RELEVANCE_WEIGHT) * max_similarity)
+        (mmr_relevance_weight * relevance_score)
+            - ((1.0 - mmr_relevance_weight) * max_similarity)
     }
+}
+
+fn mmr_gain_is_admissible(
+    marginal_gain: f32,
+    max_similarity: f32,
+    mmr_relevance_weight: f32,
+) -> bool {
+    // With pure diversity, a novel item has zero gain, including the first
+    // item in an empty pack. Keep that usable endpoint without admitting
+    // negative gains or the zero assigned to exact duplicates above.
+    marginal_gain > 0.0 || (mmr_relevance_weight == 0.0 && max_similarity == 0.0)
 }
 
 fn max_selected_similarity(candidate: &CandidateSignature, selected: &[CandidateSignature]) -> f32 {
@@ -9742,6 +9827,7 @@ pub enum PackValidationError {
     ZeroCandidatePool,
     ZeroMaxResults,
     InvalidRelevanceFloor,
+    InvalidMmrRelevanceWeight,
     EmptyCandidateContent {
         memory_id: MemoryId,
     },
@@ -9779,6 +9865,9 @@ impl fmt::Display for PackValidationError {
             Self::ZeroMaxResults => formatter.write_str("context max results must be non-zero"),
             Self::InvalidRelevanceFloor => {
                 formatter.write_str("pack relevance floor must be finite and in 0.0..=1.0")
+            }
+            Self::InvalidMmrRelevanceWeight => {
+                formatter.write_str("pack MMR relevance weight must be finite and in 0.0..=1.0")
             }
             Self::EmptyCandidateContent { memory_id } => {
                 write!(formatter, "pack candidate `{memory_id}` has empty content")
@@ -14242,6 +14331,336 @@ mod tests {
         )
     }
 
+
+    fn mmr_weight_candidates() -> Result<Vec<PackCandidate>, String> {
+        Ok(vec![
+            candidate_with_content(1, 1.0, 0.5, 10, "alpha beta gamma delta")?,
+            candidate_with_content(2, 0.9, 0.5, 10, "alpha beta gamma epsilon")?,
+            candidate_with_content(3, 0.6, 0.5, 10, "ocean purple horizon tulip")?,
+            candidate_with_content(4, 0.95, 0.5, 10, "alpha beta gamma delta")?,
+        ])
+    }
+
+    #[test]
+    fn caller_mmr_weight_changes_selection_and_audit_across_arena_modes() -> TestResult {
+        let budget = TokenBudget::new(1_000).map_err(|error| error.to_string())?;
+        let determinism = Deterministic::from_seed(64);
+        let mut workspace = arena_workspace();
+        // Reuse the same scratch while the weight changes, including both endpoints.
+        for weight in [0.25, 1.0, 0.0, 0.75] {
+            let options = PackAssemblyOptions {
+                mmr_relevance_weight: weight,
+                include_coverage_fill: false,
+                ..classic_pack_options()
+            };
+            let baseline = assemble_draft_with_profile_and_options(
+                ContextPackProfile::Balanced,
+                "prepare release",
+                budget,
+                mmr_weight_candidates()?,
+                options,
+            )
+            .map_err(|error| error.to_string())?;
+            let expected_ids = if weight <= 0.25 {
+                vec![memory_id(1), memory_id(3)]
+            } else {
+                vec![memory_id(1), memory_id(2), memory_id(3)]
+            };
+            assert_eq!(
+                baseline.items.iter().map(|item| item.memory_id).collect::<Vec<_>>(),
+                expected_ids,
+            );
+            assert!(baseline.items.iter().all(|item| {
+                item.selected_in == PackSelectionPhase::StrictMmr
+            }));
+            assert!(baseline.omitted.iter().all(|omission| {
+                omission.reason == PackOmissionReason::RedundantCandidate
+            }));
+            ensure_close(
+                baseline.selection_audit.steps[0].marginal_gain,
+                weight,
+                "first candidate uses the caller MMR weight",
+            )?;
+            let second_gain = if weight <= 0.25 {
+                weight * 0.6
+            } else {
+                weight * 0.9 - (1.0 - weight) * 0.6
+            };
+            ensure_close(
+                baseline.selection_audit.steps[1].marginal_gain,
+                second_gain,
+                "next candidate audit uses the same weighted objective as selection",
+            )?;
+
+            for arena_mode in [
+                super::ArenaMode::RequestScoped,
+                super::ArenaMode::WorkspaceReuse,
+            ] {
+                let draft = assemble_draft_with_profile_and_options_seeded_in_workspace(
+                    ContextPackProfile::Balanced,
+                    "prepare release",
+                    budget,
+                    mmr_weight_candidates()?,
+                    PackAssemblyOptions { arena_mode, ..options },
+                    &determinism,
+                    &mut workspace,
+                )
+                .map_err(|error| error.to_string())?;
+                assert_packs_equal_across_arena_mode(&baseline, &draft, "caller MMR weight")?;
+                assert_eq!(
+                    baseline.selection_audit.total_objective_value,
+                    draft.selection_audit.total_objective_value,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn caller_mmr_weight_preserves_default_selection_and_coverage_fill() -> TestResult {
+        assert_eq!(PackAssemblyOptions::default().mmr_relevance_weight, 0.75);
+        let budget = TokenBudget::new(1_000).map_err(|error| error.to_string())?;
+        for include_coverage_fill in [false, true] {
+            let options = PackAssemblyOptions {
+                include_coverage_fill,
+                ..classic_pack_options()
+            };
+            let default_draft = assemble_draft_with_profile_and_options(
+                ContextPackProfile::Balanced,
+                "prepare release",
+                budget,
+                mmr_weight_candidates()?,
+                options,
+            )
+            .map_err(|error| error.to_string())?;
+            let explicit_draft = assemble_draft_with_profile_and_options(
+                ContextPackProfile::Balanced,
+                "prepare release",
+                budget,
+                mmr_weight_candidates()?,
+                PackAssemblyOptions { mmr_relevance_weight: 0.75, ..options },
+            )
+            .map_err(|error| error.to_string())?;
+            assert_packs_equal_across_arena_mode(
+                &default_draft,
+                &explicit_draft,
+                "explicit historical MMR weight",
+            )?;
+            let expected = if include_coverage_fill {
+                vec![memory_id(1), memory_id(2), memory_id(3), memory_id(4)]
+            } else {
+                vec![memory_id(1), memory_id(2), memory_id(3)]
+            };
+            assert_eq!(
+                default_draft.items.iter().map(|item| item.memory_id).collect::<Vec<_>>(),
+                expected,
+            );
+            if include_coverage_fill {
+                assert_eq!(default_draft.items[3].selected_in, PackSelectionPhase::CoverageFill);
+                ensure_close(
+                    default_draft.selection_audit.steps[3].marginal_gain,
+                    0.0,
+                    "exact duplicate remains a coverage-fill item",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn caller_mmr_weight_applies_to_coverage_fill_audit() -> TestResult {
+        let budget = TokenBudget::new(1_000).map_err(|error| error.to_string())?;
+        for arena_mode in [
+            super::ArenaMode::Disabled,
+            super::ArenaMode::WorkspaceReuse,
+        ] {
+            let draft = assemble_draft_with_profile_and_options_seeded_in_workspace(
+                ContextPackProfile::Balanced,
+                "prepare release",
+                budget,
+                mmr_weight_candidates()?,
+                PackAssemblyOptions {
+                    mmr_relevance_weight: 0.25,
+                    arena_mode,
+                    ..classic_pack_options()
+                },
+                &Deterministic::from_seed(64),
+                &mut arena_workspace(),
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(draft.items.len(), 4);
+            let item = draft.items.iter().find(|item| item.memory_id == memory_id(2))
+                .ok_or_else(|| "expected overlapping coverage-fill candidate".to_owned())?;
+            assert_eq!(item.selected_in, PackSelectionPhase::CoverageFill);
+            let step = draft.selection_audit.steps.iter()
+                .find(|step| step.memory_id == memory_id(2))
+                .ok_or_else(|| "expected overlapping candidate audit".to_owned())?;
+            ensure_close(step.marginal_gain, -0.225, "coverage-fill weighted redundancy gain")?;
+            ensure_close(
+                draft.selection_audit.total_objective_value,
+                0.4,
+                "coverage fill does not inflate strict MMR objective",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn caller_mmr_weight_applies_to_reserved_anti_pattern_including_zero() -> TestResult {
+        let budget = TokenBudget::new(1_000).map_err(|error| error.to_string())?;
+        for weight in [0.0, 0.25, 1.0] {
+            for arena_mode in [
+                super::ArenaMode::Disabled,
+                super::ArenaMode::WorkspaceReuse,
+            ] {
+                let draft = assemble_draft_with_profile_and_options_seeded_in_workspace(
+                    ContextPackProfile::Balanced,
+                    "prepare release",
+                    budget,
+                    vec![
+                        candidate_with_content(1, 1.0, 0.5, 10, "alpha beta gamma delta")?,
+                        candidate_in_section(
+                            10, PackSection::Failures, 0.8, 0.5, 10, "Avoid costly regressions.",
+                        )?,
+                        candidate_in_section(
+                            11, PackSection::Failures, 0.7, 0.5, 10, "Avoid costly regressions.",
+                        )?,
+                    ],
+                    PackAssemblyOptions {
+                        mmr_relevance_weight: weight,
+                        include_coverage_fill: false,
+                        arena_mode,
+                        ..classic_pack_options()
+                    },
+                    &Deterministic::from_seed(64),
+                    &mut arena_workspace(),
+                )
+                .map_err(|error| error.to_string())?;
+                assert_eq!(draft.items.len(), 2);
+                assert_eq!(draft.items[0].memory_id, memory_id(10));
+                assert_eq!(draft.items[0].selected_in, PackSelectionPhase::AntiPatternFirst);
+                ensure_close(
+                    draft.selection_audit.steps[0].marginal_gain,
+                    weight * 0.8,
+                    "reserved anti-pattern audit uses caller weight",
+                )?;
+                assert_eq!(draft.omitted.len(), 1);
+                assert_eq!(draft.omitted[0].memory_id, memory_id(11));
+                assert_eq!(draft.omitted[0].reason, PackOmissionReason::RedundantCandidate);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn caller_mmr_weight_does_not_change_facility_location_objective() -> TestResult {
+        let budget = TokenBudget::new(1_000).map_err(|error| error.to_string())?;
+        let baseline = assemble_draft_with_profile_and_options(
+            ContextPackProfile::Submodular,
+            "prepare release",
+            budget,
+            mmr_weight_candidates()?,
+            classic_pack_options(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut workspace = arena_workspace();
+        for weight in [0.0, 0.25, 1.0] {
+            for arena_mode in [
+                super::ArenaMode::Disabled,
+                super::ArenaMode::WorkspaceReuse,
+            ] {
+                let draft = assemble_draft_with_profile_and_options_seeded_in_workspace(
+                    ContextPackProfile::Submodular,
+                    "prepare release",
+                    budget,
+                    mmr_weight_candidates()?,
+                    PackAssemblyOptions {
+                        mmr_relevance_weight: weight,
+                        arena_mode,
+                        ..classic_pack_options()
+                    },
+                    &Deterministic::from_seed(64),
+                    &mut workspace,
+                )
+                .map_err(|error| error.to_string())?;
+                assert_packs_equal_across_arena_mode(&baseline, &draft, "facility ignores MMR weight")?;
+                assert_eq!(
+                    baseline.selection_audit.total_objective_value,
+                    draft.selection_audit.total_objective_value,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn caller_mmr_weight_rejects_invalid_values_before_selection_or_explanation() -> TestResult {
+        let budget = TokenBudget::new(1_000).map_err(|error| error.to_string())?;
+        let target = candidate(1, 0.8, 0.5, 10)?;
+        let valid_draft = assemble_draft("prepare release", budget, vec![target.clone()])
+            .map_err(|error| error.to_string())?;
+        for weight in [-0.1, 1.1, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for profile in [ContextPackProfile::Balanced, ContextPackProfile::Submodular] {
+                let options = PackAssemblyOptions {
+                    mmr_relevance_weight: weight,
+                    ..classic_pack_options()
+                };
+                let result = assemble_draft_with_profile_and_options(
+                    profile, "prepare release", budget, Vec::<PackCandidate>::new(), options,
+                );
+                assert!(matches!(result, Err(PackValidationError::InvalidMmrRelevanceWeight)));
+                // An absent target does not assemble a draft, so validate it at the
+                // explanation entry point as well as the normal selection path.
+                let input = super::WhyNotSelectedInput::new(
+                    "prepare release", target.clone(), budget, profile, Vec::new(),
+                ).with_options(options);
+                assert!(matches!(
+                    super::explain_why_not_selected(input),
+                    Err(PackValidationError::InvalidMmrRelevanceWeight),
+                ));
+                let input = super::WhyNotSelectedInput::new(
+                    "prepare release", target.clone(), budget, profile, vec![target.clone()],
+                ).with_options(options);
+                assert!(matches!(
+                    super::explain_why_not_selected_from_draft(input, valid_draft.clone()),
+                    Err(PackValidationError::InvalidMmrRelevanceWeight),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn why_not_selected_uses_caller_mmr_weight_for_score_comparison() -> TestResult {
+        let budget = TokenBudget::new(1_000).map_err(|error| error.to_string())?;
+        for (weight, selected, target_score, last_score) in [
+            (0.25, false, 0.6, 0.525),
+            (1.0, true, 0.9, 0.6),
+        ] {
+            let target = candidate_with_content(2, 0.9, 0.5, 10, "alpha beta gamma epsilon")?;
+            let report = super::explain_why_not_selected(
+                super::WhyNotSelectedInput::new(
+                    "prepare release", target, budget, ContextPackProfile::Balanced,
+                    mmr_weight_candidates()?,
+                ).with_options(PackAssemblyOptions {
+                    mmr_relevance_weight: weight,
+                    include_coverage_fill: false,
+                    ..classic_pack_options()
+                }),
+            ).map_err(|error| error.to_string())?;
+            assert_eq!(report.selected, selected);
+            ensure_close(report.scores.target_composite, target_score, "target weighted score")?;
+            ensure_close(
+                report.scores.last_included_composite
+                    .ok_or_else(|| "missing last selected score".to_owned())?,
+                last_score,
+                "last selected weighted score",
+            )?;
+            assert_eq!(report.scores.last_included_memory_id, Some(memory_id(3).to_string()));
+        }
+        Ok(())
+    }
+
     #[test]
     fn anti_pattern_first_reserves_failure_slice_under_tight_budget() -> TestResult {
         let budget = TokenBudget::new(50).map_err(|error| format!("budget rejected: {error:?}"))?;
@@ -15739,18 +16158,34 @@ mod tests {
                 super::strict_mmr_marginal_gain_from_similarity(
                     candidate,
                     cached_similarities[index],
+                    super::DEFAULT_MMR_RELEVANCE_WEIGHT,
                 ),
-                super::strict_mmr_marginal_gain(candidate, &selected_signatures),
+                super::strict_mmr_marginal_gain(
+                    candidate,
+                    &selected_signatures,
+                    super::DEFAULT_MMR_RELEVANCE_WEIGHT,
+                ),
                 "cached marginal gain matches full selected scan",
             )?;
         }
 
-        let cached_index = super::select_next_candidate_index(&candidates, &cached_similarities);
+        let cached_index = super::select_next_candidate_index(
+            &candidates,
+            &cached_similarities,
+            super::DEFAULT_MMR_RELEVANCE_WEIGHT,
+        );
         let mut full_scan_index = 0_usize;
-        let mut full_scan_score =
-            super::strict_mmr_marginal_gain(&candidates[0], &selected_signatures);
+        let mut full_scan_score = super::strict_mmr_marginal_gain(
+            &candidates[0],
+            &selected_signatures,
+            super::DEFAULT_MMR_RELEVANCE_WEIGHT,
+        );
         for (candidate_index, candidate) in candidates.iter().enumerate().skip(1) {
-            let score = super::strict_mmr_marginal_gain(candidate, &selected_signatures);
+            let score = super::strict_mmr_marginal_gain(
+                candidate,
+                &selected_signatures,
+                super::DEFAULT_MMR_RELEVANCE_WEIGHT,
+            );
             let ordering = full_scan_score.total_cmp(&score).then_with(|| {
                 super::compare_candidates(
                     &candidate.candidate,

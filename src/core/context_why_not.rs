@@ -163,6 +163,9 @@ fn memory_report(
     )
     .with_options(crate::pack::PackAssemblyOptions {
         relevance_floor: options.relevance_floor,
+        mmr_relevance_weight: observation
+            .mmr_relevance_weight
+            .unwrap_or(crate::pack::DEFAULT_MMR_RELEVANCE_WEIGHT),
         ..crate::pack::PackAssemblyOptions::default()
     })
     .with_exclusions(exclusions)
@@ -416,6 +419,7 @@ impl OmissionCause {
 
 #[derive(Default)]
 struct WhyNotObservation {
+    mmr_relevance_weight: Option<f32>,
     exists: bool,
     retrieved: bool,
     reached_candidates: bool,
@@ -672,6 +676,10 @@ impl WhyNotSelectionProbe {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn observe_mmr_relevance_weight(&self, weight: f32) {
+        self.with_state(|state| state.mmr_relevance_weight = Some(weight));
     }
 
     pub(super) fn observe_search(&self, search: &SearchReport) {

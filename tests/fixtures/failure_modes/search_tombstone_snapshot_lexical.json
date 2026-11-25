@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "search_tombstone_snapshot_lexical",
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.92",
+    "epic_letter": "D"
+  },
+  "surfaces": [
+    "search",
+    "context",
+    "pack"
+  ],
+  "severity": "low",
+  "repair_present": false,
+  "trigger": {
+    "description": "An explicit include-tombstoned request supplements admitted live index matches with retired source rows scored by in-memory Frankensearch lexical retrieval. The historical archive is read from the pinned source snapshot, including the separately stored user-global lane after its healthy live index has omitted tombstones. Workspace ownership, seals, pending review, revision cutoffs, kind/typed filters and visibility gates still apply. Strict hybrid and semantic-only requests do not acquire lexical supplementation. No source or persisted index is changed.",
+    "setup_commands": [
+      "# In an isolated store, create and tombstone a matching memory, then rebuild its live index so the retired record is no longer indexed.",
+      "# Exercise a workspace memory and a user-global memory with global participation enabled; the healthy global generation may be empty or contain unrelated live memories."
+    ],
+    "invocation": "ee search historicalmemorycanary --include-tombstoned --source-mode lexical-only --json"
+  },
+  "expected_emission": {
+    "code": "search_tombstone_snapshot_lexical",
+    "severity": "low",
+    "message_contains": [
+      "supplemental tombstone candidates",
+      "Frankensearch lexical retrieval",
+      "source archive"
+    ]
+  }
+}
