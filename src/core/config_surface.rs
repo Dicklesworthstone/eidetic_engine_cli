@@ -530,6 +530,135 @@ pub(crate) fn resolve_pack_mmr_relevance_weight(
     Ok(weight as f32)
 }
 
+/// The pack token budget for one request: an explicit value wins, otherwise
+/// the merged `pack.default_max_tokens` (environment, project, user, then the
+/// built-in 4000, which equals `DEFAULT_CONTEXT_MAX_TOKENS`). Until this was
+/// wired only the opt-in adaptive-budget path read the key, and only from the
+/// project file, so `ee config explain` reported it active while ordinary packs
+/// used 4000 whatever it said (bd-advertised-defaults-not-read-nh9xk).
+pub(crate) fn resolve_pack_max_tokens(
+    workspace_root: &Path,
+    explicit: Option<u32>,
+) -> Result<Option<u32>, ConfigSurfaceError> {
+    if explicit.is_some() {
+        return Ok(explicit);
+    }
+    pack_max_tokens_from(&merged_workspace_config(workspace_root)?)
+}
+
+fn pack_max_tokens_from(
+    merged: &crate::config::MergedConfig,
+) -> Result<Option<u32>, ConfigSurfaceError> {
+    merged
+        .values
+        .pack
+        .default_max_tokens
+        .map(|tokens| positive_u32(tokens, crate::config::PACK_DEFAULT_MAX_TOKENS_KEY))
+        .transpose()
+}
+
+/// The pack profile for one request: an explicit value wins, otherwise the
+/// merged `pack.default_profile` (environment, project, user, then the
+/// built-in `balanced`). The config layer stores the name as a free string, so
+/// an unknown name is refused here, under the key that holds it.
+pub(crate) fn resolve_pack_profile(
+    workspace_root: &Path,
+    explicit: Option<crate::pack::ContextPackProfile>,
+) -> Result<Option<crate::pack::ContextPackProfile>, ConfigSurfaceError> {
+    if explicit.is_some() {
+        return Ok(explicit);
+    }
+    pack_profile_from(&merged_workspace_config(workspace_root)?)
+}
+
+fn pack_profile_from(
+    merged: &crate::config::MergedConfig,
+) -> Result<Option<crate::pack::ContextPackProfile>, ConfigSurfaceError> {
+    merged
+        .values
+        .pack
+        .default_profile
+        .as_deref()
+        .map(|name| {
+            crate::pack::ContextPackProfile::parse(name).ok_or_else(|| {
+                ConfigSurfaceError::InvalidValue {
+                    key: crate::config::PACK_DEFAULT_PROFILE_KEY,
+                    value: name.to_owned(),
+                    expected: "one of compact, balanced, grounding, orientation, thorough, or submodular",
+                }
+            })
+        })
+        .transpose()
+}
+
+/// Harmful-feedback rate limits for one `ee outcome` call: each explicit flag
+/// wins, otherwise the merged `[feedback]` value (environment, project, user,
+/// then the built-in 5 events per source in a 3600-second window). The flags
+/// used to default to those constants in clap, so no config layer was read.
+pub(crate) fn resolve_harmful_feedback_limits(
+    workspace_root: &Path,
+    per_source_per_hour: Option<u32>,
+    burst_window_seconds: Option<u32>,
+) -> Result<(u32, u32), ConfigSurfaceError> {
+    if let (Some(limit), Some(window)) = (per_source_per_hour, burst_window_seconds) {
+        return Ok((limit, window));
+    }
+    harmful_feedback_limits_from(
+        &merged_workspace_config(workspace_root)?,
+        per_source_per_hour,
+        burst_window_seconds,
+    )
+}
+
+fn harmful_feedback_limits_from(
+    merged: &crate::config::MergedConfig,
+    per_source_per_hour: Option<u32>,
+    burst_window_seconds: Option<u32>,
+) -> Result<(u32, u32), ConfigSurfaceError> {
+    let feedback = &merged.values.feedback;
+    let limit = match per_source_per_hour {
+        Some(limit) => limit,
+        None => feedback
+            .harmful_per_source_per_hour
+            .map(|limit| {
+                positive_u32(
+                    limit,
+                    crate::config::FEEDBACK_HARMFUL_PER_SOURCE_PER_HOUR_KEY,
+                )
+            })
+            .transpose()?
+            .unwrap_or(crate::core::outcome::DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR),
+    };
+    let window = match burst_window_seconds {
+        Some(window) => window,
+        None => feedback
+            .harmful_burst_window_seconds
+            .map(|window| {
+                positive_u32(
+                    window,
+                    crate::config::FEEDBACK_HARMFUL_BURST_WINDOW_SECONDS_KEY,
+                )
+            })
+            .transpose()?
+            .unwrap_or(crate::core::outcome::DEFAULT_HARMFUL_BURST_WINDOW_SECONDS),
+    };
+    Ok((limit, window))
+}
+
+/// A positive `u32` from a `u64` config value. The config layer accepts any
+/// `u64`, and a zero or an overflow caught further down would be reported
+/// under a CLI flag's name rather than the key that actually holds it.
+fn positive_u32(value: u64, key: &'static str) -> Result<u32, ConfigSurfaceError> {
+    u32::try_from(value)
+        .ok()
+        .filter(|converted| *converted > 0)
+        .ok_or(ConfigSurfaceError::InvalidValue {
+            key,
+            value: value.to_string(),
+            expected: "an integer in the range 1..=4294967295",
+        })
+}
+
 fn read_project_config(
     options: &ConfigSurfaceOptions,
     expander: &PathExpander,
@@ -1373,6 +1502,10 @@ fn set_toml_value(document: &mut DocumentMut, path: &[&str], value: TomlScalar) 
 #[cfg(test)]
 #[path = "config_candidate_pool_tests.rs"]
 mod config_candidate_pool_tests;
+
+#[cfg(test)]
+#[path = "config_advertised_defaults_tests.rs"]
+mod config_advertised_defaults_tests;
 
 #[cfg(test)]
 mod tests {

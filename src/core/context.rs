@@ -2624,6 +2624,26 @@ fn resolved_mmr_relevance_weight(options: &ContextPackOptions) -> Result<f32, Co
         .map_err(|error| ContextPackError::Search(SearchError::Configuration(error.to_string())))
 }
 
+/// An omitted budget follows `pack.default_max_tokens` through every config
+/// layer. `options.max_tokens` stays the caller's explicit request: adaptive
+/// budgeting and the L2 key both need to tell an explicit budget from a
+/// default one.
+fn resolved_max_tokens(options: &ContextPackOptions) -> Result<Option<u32>, ContextPackError> {
+    crate::core::config_surface::resolve_pack_max_tokens(
+        &options.workspace_path,
+        options.max_tokens,
+    )
+    .map_err(|error| ContextPackError::Search(SearchError::Configuration(error.to_string())))
+}
+
+/// An omitted profile follows `pack.default_profile` through every config layer.
+fn resolved_profile(
+    options: &ContextPackOptions,
+) -> Result<Option<ContextPackProfile>, ContextPackError> {
+    crate::core::config_surface::resolve_pack_profile(&options.workspace_path, options.profile)
+        .map_err(|error| ContextPackError::Search(SearchError::Configuration(error.to_string())))
+}
+
 struct RuntimeProfileCappedRequest {
     request: ContextRequest,
     effective_max_tokens: u32,
@@ -2639,8 +2659,8 @@ fn context_request_from_options_with_runtime_profile(
     bead_affinity::validate_request(options)?;
     let mut request = ContextRequest::new(ContextRequestInput {
         query: options.query.clone(),
-        profile: options.profile,
-        max_tokens: options.max_tokens,
+        profile: resolved_profile(options)?,
+        max_tokens: resolved_max_tokens(options)?,
         candidate_pool: resolved_candidate_pool(options)?,
         max_results: options.max_results,
         sections: Vec::new(),
@@ -3683,6 +3703,7 @@ async fn run_context_pack_attempt(
     }
     request.effective_config_policy = Some(context_effective_config_policy(
         options,
+        request.profile,
         &effective_filters,
         &selection_settings,
         &search_report,
@@ -10852,6 +10873,7 @@ impl ContextSelectionSettings {
 /// Changing an input that selected no different items still changes S6.
 fn context_effective_config_policy(
     options: &ContextPackOptions,
+    profile: ContextPackProfile,
     filters: &crate::models::QueryFilters,
     settings: &ContextSelectionSettings,
     search: &SearchReport,
@@ -10948,7 +10970,8 @@ fn context_effective_config_policy(
     // so existing packs retain their identity; every effective override binds
     // S6 and the L2 key even if it happens to select the same items. Facility
     // location has its own objective and does not consume the MMR weight.
-    if options.profile != Some(ContextPackProfile::Submodular)
+    // `profile` is the resolved one: a configured default can be submodular.
+    if profile != ContextPackProfile::Submodular
         && settings.mmr_relevance_weight != crate::pack::DEFAULT_MMR_RELEVANCE_WEIGHT
     {
         hash_policy_f32(
@@ -12685,11 +12708,10 @@ fn adaptive_budget_decision_for_context(
     if !config.pack.adaptive_budget.unwrap_or(false) {
         return Ok(None);
     }
-    let configured_max_tokens = config
-        .pack
-        .default_max_tokens
-        .and_then(|tokens| u32::try_from(tokens).ok())
-        .unwrap_or_else(|| request.budget.max_tokens());
+    // The request budget already holds `pack.default_max_tokens` merged across
+    // every layer. Re-reading the project file here ranked it above the
+    // environment and skipped the user layer.
+    let configured_max_tokens = request.budget.max_tokens();
     let (effective_max_tokens, _) = runtime_profile.cap_pack_max_tokens(configured_max_tokens);
     let retrieval_scores = search_report
         .results

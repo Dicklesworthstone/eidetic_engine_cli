@@ -210,10 +210,10 @@ use crate::core::orient::{
     orient_primer_value,
 };
 use crate::core::outcome::{
-    CliCancelReason, DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
-    OutcomeQuarantineListOptions, OutcomeQuarantineListReport, OutcomeQuarantineReviewOptions,
-    OutcomeQuarantineReviewReport, OutcomeRecordOptions, cancel_kind_code, cancel_message,
-    list_feedback_quarantine, record_outcome, review_feedback_quarantine,
+    CliCancelReason, OutcomeQuarantineListOptions, OutcomeQuarantineListReport,
+    OutcomeQuarantineReviewOptions, OutcomeQuarantineReviewReport, OutcomeRecordOptions,
+    cancel_kind_code, cancel_message, list_feedback_quarantine, record_outcome,
+    review_feedback_quarantine,
 };
 use crate::core::perf_forensics::{
     BUDGET_CHECK_SCHEMA_V1, BudgetCheckReport, COMPARE_RESULT_SCHEMA_V1, CompareReport,
@@ -3356,8 +3356,9 @@ pub struct ContextArgs {
     pub strict_source_mode: bool,
 
     /// Context profile: compact, balanced, grounding, orientation, thorough, or submodular.
-    #[arg(long, short = 'p', default_value = "balanced")]
-    pub profile: String,
+    /// Omitted, it follows `pack.default_profile` (balanced unless configured).
+    #[arg(long, short = 'p')]
+    pub profile: Option<String>,
 
     /// Personalized PageRank blend weight for context ranking, from 0.0 to 1.0.
     #[arg(long = "ppr-weight", value_name = "WEIGHT", value_parser = parse_ppr_weight_arg)]
@@ -11493,12 +11494,14 @@ pub struct OutcomeArgs {
     pub dry_run: bool,
 
     /// Maximum harmful events from one source in the burst window before quarantine.
-    #[arg(long, default_value_t = DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR)]
-    pub harmful_per_source_per_hour: u32,
+    /// Omitted, it follows `feedback.harmful_per_source_per_hour` (5 unless configured).
+    #[arg(long)]
+    pub harmful_per_source_per_hour: Option<u32>,
 
     /// Burst window for harmful feedback rate limiting.
-    #[arg(long, default_value_t = DEFAULT_HARMFUL_BURST_WINDOW_SECONDS)]
-    pub harmful_burst_window_seconds: u32,
+    /// Omitted, it follows `feedback.harmful_burst_window_seconds` (3600 unless configured).
+    #[arg(long)]
+    pub harmful_burst_window_seconds: Option<u32>,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -29496,6 +29499,20 @@ fn task_lens_catalog_for_workspace(workspace_root: &Path) -> Result<TaskLensCata
     })
 }
 
+/// `ee outcome`'s harmful-feedback limits: each flag wins, otherwise the
+/// merged `[feedback]` config, so `EE_HARMFUL_*` and the config keys take effect.
+fn outcome_harmful_feedback_limits(
+    workspace_root: &Path,
+    args: &OutcomeArgs,
+) -> Result<(u32, u32), DomainError> {
+    crate::core::config_surface::resolve_harmful_feedback_limits(
+        workspace_root,
+        args.harmful_per_source_per_hour,
+        args.harmful_burst_window_seconds,
+    )
+    .map_err(config_surface_error_to_domain)
+}
+
 /// GH #49: the CLI resolves the pool through the same core resolver the
 /// context engine uses, before anything (the pack id, the lens overlay, the
 /// daemon handoff) is derived from it.
@@ -44537,7 +44554,13 @@ where
             stderr,
         );
     }
-    let profile = match parse_context_profile(&args.profile) {
+    // An omitted profile stays `None`, so the pack follows `pack.default_profile`.
+    let profile = match args
+        .profile
+        .as_deref()
+        .map(parse_context_profile)
+        .transpose()
+    {
         Ok(profile) => profile,
         Err(message) => {
             let domain_error = DomainError::Usage {
@@ -44593,7 +44616,7 @@ where
         speed: args.speed,
         source_mode: args.source_mode,
         strict_source_mode: args.strict_source_mode,
-        profile: Some(profile),
+        profile,
         max_tokens: args.max_tokens,
         candidate_pool: Some(candidate_pool),
         max_results: args.max_results,
@@ -48019,13 +48042,9 @@ where
                     .and_then(|overlay| overlay.strict_source_mode)
                     .unwrap_or(false),
             stream: args.stream,
-            profile: args
-                .profile
-                .clone()
-                .or_else(|| {
-                    lens_overlay.and_then(|overlay| overlay.context_profile.as_ref().cloned())
-                })
-                .unwrap_or_else(|| "balanced".to_string()),
+            profile: args.profile.clone().or_else(|| {
+                lens_overlay.and_then(|overlay| overlay.context_profile.as_ref().cloned())
+            }),
             ppr_weight: None,
             changed_symbols: Vec::new(),
             changed_symbols_from_git: false,
@@ -53241,13 +53260,18 @@ where
         .database
         .clone()
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    let (harmful_per_source_per_hour, harmful_burst_window_seconds) =
+        match outcome_harmful_feedback_limits(&workspace_path, args) {
+            Ok(limits) => limits,
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+        };
     let options = crate::core::outcome::OutcomeBatchOptions {
         database_path: &database_path,
         actor: args.actor.clone(),
         agent_name: crate::core::memory_scope::current_agent_name(),
         dry_run: args.dry_run,
-        harmful_per_source_per_hour: args.harmful_per_source_per_hour,
-        harmful_burst_window_seconds: args.harmful_burst_window_seconds,
+        harmful_per_source_per_hour,
+        harmful_burst_window_seconds,
         prompt_injection_guard: crate::core::config_surface::get_config(
             &crate::core::config_surface::ConfigSurfaceOptions {
                 workspace_root: workspace_path.clone(),
@@ -53397,6 +53421,11 @@ where
             Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
         }
     }
+    let (harmful_per_source_per_hour, harmful_burst_window_seconds) =
+        match outcome_harmful_feedback_limits(&workspace_path, args) {
+            Ok(limits) => limits,
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+        };
     let options = OutcomeRecordOptions {
         database_path: &database_path,
         target_type,
@@ -53413,8 +53442,8 @@ where
         actor: args.actor.clone(),
         agent_name: crate::core::memory_scope::current_agent_name(),
         dry_run: args.dry_run,
-        harmful_per_source_per_hour: args.harmful_per_source_per_hour,
-        harmful_burst_window_seconds: args.harmful_burst_window_seconds,
+        harmful_per_source_per_hour,
+        harmful_burst_window_seconds,
         prompt_injection_guard: crate::core::config_surface::get_config(
             &crate::core::config_surface::ConfigSurfaceOptions {
                 workspace_root: workspace_path.clone(),
@@ -53503,8 +53532,8 @@ where
         || parent.event_id.is_some()
         || parent.target_type != "memory"
         || parent.source_type != "outcome_observed"
-        || parent.harmful_per_source_per_hour != DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR
-        || parent.harmful_burst_window_seconds != DEFAULT_HARMFUL_BURST_WINDOW_SECONDS
+        || parent.harmful_per_source_per_hour.is_some()
+        || parent.harmful_burst_window_seconds.is_some()
     {
         return write_domain_error(
             &usage("harvest cannot be combined with single-target or batch outcome flags"),

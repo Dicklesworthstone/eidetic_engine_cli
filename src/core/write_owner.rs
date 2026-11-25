@@ -1448,10 +1448,20 @@ impl WriteGroupCommitAccumulator {
 #[must_use]
 pub fn write_group_commit_telemetry(workspace_path: Option<&Path>) -> WriteGroupCommitTelemetry {
     let config = workspace_path
-        .and_then(crate::config::workspace_config)
-        .map(|config| WriteHotPathConfig::from_write_config(&config.write))
+        .map(write_hot_path_config)
         .unwrap_or_default();
     write_group_commit_telemetry_for_config(workspace_path, config.enabled)
+}
+
+/// `[write]` merged across every layer (environment, project, user, built-in).
+/// The project file alone ignored `EE_WRITE_GROUP_COMMIT_*` and the user
+/// config, and lacked the built-in bounds, so `group_commit_enabled = true` on
+/// its own resolved to disabled (bd-advertised-defaults-not-read-nh9xk). An
+/// unreadable config keeps the per-write path, as before.
+fn write_hot_path_config(workspace_path: &Path) -> WriteHotPathConfig {
+    crate::core::config_surface::merged_workspace_config(workspace_path)
+        .map(|merged| WriteHotPathConfig::from_write_config(&merged.values.write))
+        .unwrap_or_default()
 }
 
 /// Reset process-local group-commit telemetry for integration tests.
@@ -1477,9 +1487,7 @@ pub fn run_one_shot_write_intake<T, F>(
 where
     F: FnOnce() -> Result<T, DomainError>,
 {
-    let config = crate::config::workspace_config(workspace_path)
-        .map(|config| WriteHotPathConfig::from_write_config(&config.write))
-        .unwrap_or_default();
+    let config = write_hot_path_config(workspace_path);
     let payload_bytes = operation.estimated_payload_bytes();
     let fallback = if !config.enabled {
         WriteGroupCommitFallbackReason::Disabled
@@ -5167,6 +5175,26 @@ mod tests {
             invalid.group_commit_max_us,
             DEFAULT_WRITE_HOT_PATH_V2_GROUP_COMMIT_MAX_US
         );
+    }
+
+    // bd-advertised-defaults-not-read-nh9xk: read from the project file alone,
+    // this one-line opt-in had no bounds and resolved to disabled.
+    #[test]
+    fn write_hot_path_config_takes_built_in_bounds_when_only_the_switch_is_set()
+    -> Result<(), String> {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(workspace.path().join(".ee")).map_err(|error| error.to_string())?;
+        std::fs::write(
+            workspace.path().join(".ee/config.toml"),
+            "[write]\ngroup_commit_enabled = true\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let resolved = write_hot_path_config(workspace.path());
+        assert!(resolved.enabled);
+        assert_eq!(resolved.group_commit_max_rows, 64);
+        assert_eq!(resolved.group_commit_max_us, 2_000);
+        assert_eq!(resolved.max_inflight_bytes, 4_194_304);
+        Ok(())
     }
 
     #[test]

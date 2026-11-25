@@ -15797,6 +15797,7 @@ pub fn unrelated_context() -> u64 {{
                 let mut request = request.clone();
                 request.effective_config_policy = Some(super::context_effective_config_policy(
                     options,
+                    options.profile.unwrap_or(ContextPackProfile::Balanced),
                     &super::context_effective_filters(options),
                     &settings,
                     &search,
@@ -15935,6 +15936,7 @@ pub fn unrelated_context() -> u64 {{
                       search: &SearchReport| {
             super::context_effective_config_policy(
                 options,
+                options.profile.unwrap_or(ContextPackProfile::Balanced),
                 &super::context_effective_filters(options),
                 settings,
                 search,
@@ -16059,6 +16061,53 @@ pub fn unrelated_context() -> u64 {{
         Ok(())
     }
 
+    // bd-advertised-defaults-not-read-nh9xk: with neither flag given, the
+    // configured profile and budget reach the request, and explicit values
+    // still win. Both keys used to be ignored, so every such pack was balanced
+    // with 4000 tokens whatever the config said. 2500 sits under the smallest
+    // runtime-profile cap (3000), so no host can cap it.
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn configured_pack_defaults_reach_the_request_when_flags_are_omitted() -> TestResult {
+        let (mut options, _workspace, _source, _guard) = daemon_pack_retrieval_fixture()?;
+        options.as_of = Some(Utc::now());
+        options.profile = None;
+        options.max_tokens = None;
+        let config_path = options.workspace_path.join(".ee/config.toml");
+        std::fs::write(
+            &config_path,
+            "[pack]\ndefault_profile = \"thorough\"\ndefault_max_tokens = 2500\n[memory]\ninclude_global = false\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let configured = super::run_context_pack(&options).map_err(|error| error.to_string())?;
+        assert_eq!(
+            configured.data.request.profile,
+            ContextPackProfile::Thorough
+        );
+        assert_eq!(configured.data.request.budget.max_tokens(), 2500);
+
+        options.profile = Some(ContextPackProfile::Compact);
+        options.max_tokens = Some(1200);
+        let explicit = super::run_context_pack(&options).map_err(|error| error.to_string())?;
+        assert_eq!(explicit.data.request.profile, ContextPackProfile::Compact);
+        assert_eq!(explicit.data.request.budget.max_tokens(), 1200);
+
+        // A name the selector does not know is refused, never read as balanced.
+        options.profile = None;
+        std::fs::write(
+            &config_path,
+            "[pack]\ndefault_profile = \"verbose\"\n[memory]\ninclude_global = false\n",
+        )
+        .map_err(|error| error.to_string())?;
+        assert!(matches!(
+            super::run_context_pack(&options),
+            Err(super::ContextPackError::Search(
+                crate::core::search::SearchError::Configuration(_)
+            ))
+        ));
+        Ok(())
+    }
+
     #[test]
     fn mmr_policy_preserves_default_identity_and_does_not_affect_facility_location() -> TestResult {
         let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -16073,6 +16122,7 @@ pub fn unrelated_context() -> u64 {{
                       settings: &super::ContextSelectionSettings| {
             super::context_effective_config_policy(
                 options,
+                options.profile.unwrap_or(ContextPackProfile::Balanced),
                 &options.filters,
                 settings,
                 &search,
@@ -16108,6 +16158,7 @@ pub fn unrelated_context() -> u64 {{
             |settings: &super::ContextSelectionSettings, search: &SearchReport, weights| {
                 super::context_effective_config_policy(
                     &options,
+                    options.profile.unwrap_or(ContextPackProfile::Balanced),
                     &options.filters,
                     settings,
                     search,
