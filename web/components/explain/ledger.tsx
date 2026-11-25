@@ -216,7 +216,7 @@ export function NegativeLedger() {
 /** What the latest session did, in words, for the live region and for a reader who skims. */
 function describe(shown: number, none: readonly Session[], ee: readonly Session[]): string {
   if (shown === 0) {
-    return `Session 0 of ${SESSIONS}. Both sides search the same hidden landscape with the same agent, which makes ${ATTEMPTS_PER_SESSION} attempts a session and favours whatever looks most promising.`;
+    return `Session 0 of ${SESSIONS}. Both sides search the same hidden landscape with the same agent, which makes ${ATTEMPTS_PER_SESSION} attempts a session and favors whatever looks most promising.`;
   }
   const left = none[shown - 1];
   const right = ee[shown - 1];

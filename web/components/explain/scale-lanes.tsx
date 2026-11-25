@@ -172,7 +172,7 @@ export const RUNGS: readonly Rung[] = [
         source: "src/core/global_promotion.rs · PROMOTABLE_TRUST_CLASSES",
       },
       {
-        text: "Global rows compete in every pack and are always labelled. Those that do not overlap a workspace row take at most 15% of the pack's token budget.",
+        text: "Global rows compete in every pack and are always labeled. Those that do not overlap a workspace row take at most 15% of the pack's token budget.",
         source: "src/core/global_store.rs · DEFAULT_GLOBAL_FAN_IN_BASIS_POINTS · src/core/context.rs",
       },
       {
@@ -1208,7 +1208,7 @@ function Everywhere({ W, H, wide, time, animate }: SceneProps) {
             ↑ promote-global: copied, with a link back
           </text>
           <text x={W / 2} y={H - 28} textAnchor="middle" fontSize={10.5} fill={SLATE}>
-            ↓ read into every pack, labelled, ≤ 15%
+            ↓ read into every pack, labeled, ≤ 15%
           </text>
         </g>
       )}
@@ -1454,7 +1454,7 @@ const CAPTIONS: readonly { key: string; text: string }[] = [
   },
   {
     key: "team",
-    text: "Signed events pass from member to member. Each one that reaches you becomes a row in your own store, labelled with its sender.",
+    text: "Signed events pass from member to member. Each one that reaches you becomes a row in your own store, labeled with its sender.",
   },
   {
     key: "everywhere",

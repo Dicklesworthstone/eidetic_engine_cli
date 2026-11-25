@@ -198,7 +198,7 @@ export function PackPipeline() {
   return (
     <DemoFrame
       eyebrow="Pack assembly · the trace, in order"
-      title="The twelve stages of ee pack, in order."
+      title="Twelve of ee pack's timed stages, in order."
       basis="diagram"
       source={
         <>

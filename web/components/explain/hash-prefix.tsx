@@ -284,7 +284,7 @@ export function HashPrefix() {
     >
       <p className="max-w-3xl text-[15px] leading-relaxed text-slate-300">
         A pack&apos;s hash is a BLAKE3 digest of ten component digests (nine when the pack leaves out its skipped
-        list), each over labelled fields. The first version fed a provenance&apos;s uri and note as raw adjacent
+        list), each over labeled fields. The first version fed a provenance&apos;s uri and note as raw adjacent
         bytes, so two different packs could get the same hash. Edit the fields below; the digests are BLAKE3,
         computed in your browser.
       </p>
@@ -296,7 +296,7 @@ export function HashPrefix() {
           onChange={setMode}
           options={[
             { value: "flat", label: "v1 · flat feed", tone: "wrong" },
-            { value: "labeled", label: "v7 · labelled, length-prefixed", tone: "rule" },
+            { value: "labeled", label: "v7 · labeled, length-prefixed", tone: "rule" },
           ]}
         />
         <span className="font-mono text-[11px] text-slate-500">

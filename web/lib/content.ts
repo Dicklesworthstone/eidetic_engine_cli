@@ -90,12 +90,12 @@ export const chapters: Chapter[] = [
     short: "Memory",
     title: "Typed memories with [half-lives].",
     thesis:
-      "A scratch note is useful for a day and a procedural rule for a year. ee stores typed memories at four levels, each with its own half-life. A memory that goes stale is demoted, then tombstoned: it leaves retrieval, an audit entry records the change, and nothing is deleted silently.",
+      "A scratch note is useful for a day and a procedural rule for a year. ee stores typed memories at four levels, each with its own half-life. When the decay pass runs (ee maintenance run --include-decay), a stale memory is demoted, then tombstoned: it leaves retrieval, an audit entry records the change, and the row is kept.",
     colour: "#fbbf24",
     share: {
       title: "Typed memories with half-lives",
       description:
-        "ee stores typed memories at four levels, each with its own half-life. A stale memory is demoted, then tombstoned with an audit entry; nothing is deleted silently.",
+        "ee stores typed memories at four levels, each with its own half-life. Its decay pass demotes a stale memory, then tombstones it with an audit entry, and keeps the row.",
       kicker: "Chapter 02 · Memory",
       headline: "Typed memories",
       accent: "with half-lives.",
@@ -104,7 +104,7 @@ export const chapters: Chapter[] = [
     point: {
       claim: "Stale material fades on a schedule",
       detail:
-        "Working notes have a half-life of a day, procedural rules a year. A memory that stops being useful is demoted, then dropped from retrieval with an audit entry.",
+        "Working notes have a half-life of a day, procedural rules a year. When the decay pass runs, a memory that stopped being useful is demoted, then dropped from retrieval with an audit entry.",
     },
     sections: [
       { id: "decay", label: "Half-lives" },
@@ -124,7 +124,7 @@ export const chapters: Chapter[] = [
     share: {
       title: "How ee builds a context pack",
       description:
-        "A fixed twelve-stage pipeline selects memories for the task, fits them to a token budget, removes near-duplicates with MMR and hashes the result, so the same inputs give the same pack. Build one in your browser.",
+        "A fixed pipeline of timed stages selects memories for the task, fits them to a token budget, removes near-duplicates with MMR and hashes the result, so the same inputs give the same pack. Build one in your browser.",
       kicker: "Chapter 03 · The pack",
       headline: "How ee builds",
       accent: "a pack.",
@@ -181,7 +181,7 @@ export const chapters: Chapter[] = [
     short: "Scale",
     title: "For work that runs for [weeks].",
     thesis:
-      "A lot of real work takes more than one session: a performance hunt that runs for a month, an incident that keeps recurring, a research question you return to every week. ee calls these campaigns. Each attempt is recorded as evidence, a repeated family of failures can be proposed as a rule, unused material decays, and the pack each session reads stays within the same budget as the store grows.",
+      "A lot of real work takes more than one session: a performance hunt that runs for a month, an incident that keeps recurring, a research question you return to every week. ee calls these campaigns. Each attempt is recorded as evidence, a repeated family of failures can be proposed as a rule, the decay pass retires unused material, and the pack each session reads stays within the same budget as the store grows.",
     colour: "#fb923c",
     share: {
       title: "For work that runs for weeks",
@@ -190,10 +190,10 @@ export const chapters: Chapter[] = [
       kicker: "Chapter 05 · Campaigns",
       headline: "Work that runs",
       accent: "for weeks.",
-      line: "Each failed attempt is recorded once, a family of failures can become a rule, and week 26's pack is no larger than week 1's.",
+      line: "Each failed attempt is recorded with its cause, a family of failures can become a rule, and week 26's pack is no larger than week 1's.",
     },
     point: {
-      claim: "Each failed attempt is recorded once",
+      claim: "Failed attempts are kept with their cause",
       detail:
         "On work that runs for weeks, each failure is stored with its cause and family, and repeated failures in one family can become a rule that steers later sessions away from it.",
     },
@@ -212,21 +212,21 @@ export const chapters: Chapter[] = [
     short: "Agents",
     title: "Output an agent can [act on].",
     thesis:
-      "Most of ee's callers are agents, so its interface is designed for them. Every command answers in one versioned JSON envelope with a typed exit code. Anything that ran in a reduced mode is listed under degraded with a code and a repair command, errors carry a ranked recovery plan, and the documentation is a set of commands that return JSON.",
+      "Most of ee's callers are agents, so its interface is designed for them. With --json, every command answers in one versioned JSON envelope with a typed exit code. Anything that ran in a reduced mode is listed under degraded with a code and, where ee knows one, a repair. Errors carry a ranked recovery plan when ee has one, and the documentation is a set of commands that return JSON.",
     colour: "#a3e635",
     share: {
       title: "Output an agent can act on",
       description:
-        "One versioned JSON envelope, typed exit codes, degraded states listed by code, errors with a ranked recovery plan, and 32 agent recipes with jq selectors.",
+        "One versioned JSON envelope, typed exit codes, degraded states listed by code, ranked recovery steps where ee knows them, and 32 agent recipes with jq selectors.",
       kicker: "Chapter 06 · For agents",
       headline: "Output an agent",
       accent: "can act on.",
-      line: "Every response is versioned JSON with a typed exit code, and every error names its repair command, the command's risk class and whether a human must approve it.",
+      line: "With --json, every response is versioned JSON with a typed exit code. Where ee knows the fix, an error names the command, its risk class and whether a person must approve it.",
     },
     point: {
-      claim: "Every response is machine-readable",
+      claim: "Responses are versioned JSON",
       detail:
-        "Each command answers in versioned JSON with a typed exit code. An error names the command that fixes it, how risky that command is, and whether a person has to approve it.",
+        "With --json, each command answers in versioned JSON with a typed exit code. Where ee knows the fix, an error names the command, how risky it is, and whether a person has to approve it.",
     },
     sections: [
       { id: "session", label: "A session, end to end" },
@@ -242,12 +242,12 @@ export const chapters: Chapter[] = [
     short: "Graph",
     title: "Memories form a [graph].",
     thesis:
-      "A rule supports a decision, a failure derives from a session, one fact contradicts another. ee stores those links and runs graph algorithms over them to find the memories many others depend on, the ones that are the only connection between two topics, and the ones whose being wrong would cut a topic off.",
+      "A rule supports a decision, a failure derives from a session, one fact contradicts another. ee stores those links and runs graph algorithms over them to find the memories many others depend on, and the ones that are a topic's only connection to the rest, where one wrong memory cuts the topic off.",
     colour: "#34d399",
     share: {
       title: "Memories form a graph",
       description:
-        "ee links memories and runs graph algorithms over the links: PageRank, HITS, articulation points, Louvain communities and Gomory-Hu proximity, each one a CLI command with deterministic JSON.",
+        "ee links memories and runs graph algorithms over the links: PageRank, HITS, articulation points and Louvain communities, each a CLI command with deterministic JSON, and Gomory-Hu proximity behind a feature flag.",
       kicker: "Chapter 07 · Graph",
       headline: "Memories form a",
       accent: "graph.",
@@ -271,12 +271,12 @@ export const chapters: Chapter[] = [
     short: "Proof",
     title: "Evidence, limits and [install].",
     thesis:
-      "A wrong memory misleads every session that reads it, so ee is held to strict rules: dependencies the build refuses, a fixture for every degraded state, a versioned schema for every command, and a published list of what does not work yet. The chapter ends with the install commands.",
+      "A wrong memory misleads every session that reads it, so ee is held to strict rules: a check that refuses banned dependencies, 630 failure-mode fixtures, 280 versioned JSON schemas, and a published list of what does not work yet. The chapter ends with the install commands.",
     colour: "#e879f9",
     share: {
       title: "Evidence, limits and install",
       description:
-        "ee compared with the alternatives, what still works when a part is missing, the dependencies the build refuses, the current limitations, and the install commands.",
+        "ee compared with the alternatives, what still works when a part is missing, the dependencies its checks refuse, the current limitations, and the install commands.",
       kicker: "Chapter 08 · Proof",
       headline: "Evidence, limits",
       accent: "and install.",
@@ -321,12 +321,12 @@ export const heroStats = [
   {
     label: "Failure modes",
     value: "630",
-    note: "Each degraded state has a fixture that triggers it and the repair it names.",
+    note: "Each fixture triggers a degraded state and records the code it reports, and the repair where there is one.",
   },
   {
     label: "JSON contracts",
     value: "280",
-    note: "Versioned schemas: every machine-facing command answers in stable JSON.",
+    note: "Versioned schemas for the JSON that ee's commands return.",
   },
   {
     label: "Cloud APIs needed",
@@ -345,7 +345,7 @@ export const firstCommands = [
   {
     step: "Teach it a rule",
     command: 'ee remember "Run cargo fmt --check before tagging a release." \\\n  --workspace . --level procedural --kind rule --json',
-    note: "Secrets are redacted before anything is written. The rule starts at the trust class its source earns.",
+    note: "Text that looks like a secret is refused (exit 7) with where it matched. A memory you write this way is trusted as human_explicit.",
   },
   {
     step: "Hand the next session a pack",
@@ -370,7 +370,7 @@ export const memoryKinds = [
   { kind: "anti-pattern", level: "procedural", fields: ["trigger", "blast_radius", "safer_alternative"], example: "trigger: git rebase on main · safer: merge" },
   { kind: "decision", level: "semantic", fields: ["options", "chosen", "rationale", "supersedes", "revisit_by"], example: "chosen: Asupersync · rationale: no Tokio" },
   { kind: "convention", level: "semantic", fields: ["scope", "pattern"], example: "scope: tests/*.rs · pattern: allow header after //!" },
-  { kind: "command", level: "procedural", fields: ["command", "when_to_use", "exit_meaning"], example: "exit_meaning: 124 is a timeout, not a red" },
+  { kind: "command", level: "procedural", fields: ["command", "when_to_use", "exit_meaning"], example: "exit_meaning: 124 means the command timed out" },
   { kind: "failure", level: "episodic", fields: ["cause", "regression_surface", "reverted_at_sha", "family"], example: "family: rustc E0277 · cause: missing bound" },
 ] as const;
 
@@ -386,7 +386,7 @@ export const memoryLevels = [
 export const sixQuestions = [
   { q: "Why selected?", a: "Score components for each stage of the pipeline." },
   { q: "What supports it?", a: "Provenance URIs back to the session, file or command." },
-  { q: "How fresh?", a: "The recency term, from its level's half-life." },
+  { q: "How fresh?", a: "The recency term: a 30-day time constant, floored at 0.5, the same for every level." },
   { q: "How reliable?", a: "Confidence, evidence count, and the weight of harmful feedback." },
   { q: "What scores mattered?", a: "The final score, its kind, a normalized relevance, and the raw breakdown." },
   { q: "What would change it?", a: "A counterfactual hint, when there is one." },
@@ -394,10 +394,10 @@ export const sixQuestions = [
 
 /** README "Comparison". "yes" / "no" / a word. */
 export const comparison = {
-  columns: ["ee", "Vector DB", "MCP memory server", "CLAUDE.md / notes"],
+  columns: ["ee", "Vector DB (Chroma, Qdrant)", "MCP memory server", "CLAUDE.md / notes"],
   rows: [
     { feature: "Local-first by default", cells: ["yes", "varies", "varies", "yes"] },
-    { feature: "Hybrid lexical + semantic retrieval", cells: ["yes", "vector only", "partial", "no"] },
+    { feature: "Hybrid lexical + semantic retrieval", cells: ["yes", "varies", "partial", "no"] },
     { feature: "Provenance for every item", cells: ["yes", "no", "partial", "manual"] },
     { feature: "Procedural rules that decay", cells: ["yes", "no", "no", "no"] },
     { feature: "Anti-patterns and harmful feedback", cells: ["yes", "no", "no", "manual"] },
@@ -405,8 +405,8 @@ export const comparison = {
     { feature: "Graph analytics over memories", cells: ["yes", "no", "no", "no"] },
     { feature: "Deterministic JSON output", cells: ["yes", "varies", "varies", "n/a"] },
     { feature: "Imports past agent sessions", cells: ["yes", "manual ETL", "no", "manual"] },
-    { feature: "Works with no daemon running", cells: ["yes", "no", "no", "yes"] },
-    { feature: "Single-binary install", cells: ["yes", "no", "no", "n/a"] },
+    { feature: "Works with no daemon running", cells: ["yes", "varies", "no", "yes"] },
+    { feature: "Single-binary install", cells: ["yes", "varies", "no", "n/a"] },
     { feature: "Audit log of curation", cells: ["yes", "no", "no", "git only"] },
   ],
 } as const;
@@ -415,7 +415,6 @@ export const comparison = {
 export const forbidden = [
   { no: "Tokio, async-std, smol", instead: "Asupersync", why: "Structured concurrency, cancellation as a value, deterministic lab tests." },
   { no: "rusqlite, SQLx, Diesel", instead: "FrankenSQLite + SQLModel", why: "One Rust storage stack with MVCC, owned end to end." },
-  { no: "Hand-rolled BM25, RRF, vectors", instead: "Frankensearch", why: "Hybrid search is implemented once, in one crate." },
   { no: "petgraph", instead: "FrankenNetworkX", why: "Graph algorithms with NetworkX semantics, in Rust." },
   { no: "hyper, axum, reqwest", instead: "No HTTP in the core", why: "Memory does not need a network to work." },
 ] as const;
@@ -423,7 +422,7 @@ export const forbidden = [
 /** Counts behind the "rules" section, taken at COUNTED. */
 export const rigor = [
   { value: "1.44M", label: "lines of Rust in src/", note: "771 files; another 443k lines of tests." },
-  { value: "91", label: "architecture decisions", note: "Numbered ADRs in docs/adr, each with status and date." },
+  { value: "91", label: "architecture decisions", note: "Numbered ADRs in docs/adr, each with a status." },
   { value: "133", label: "forward-only migrations", note: "No down-migrations: back up, then move forward." },
   { value: "14,486", label: "commits", note: "Since the first one, 2026-04-29." },
 ] as const;
@@ -434,8 +433,8 @@ export const releases = [
   { version: "0.13", date: "2026-07-30", what: "A user-global memory lane beside each workspace." },
   { version: "0.14", date: "2026-08-18", what: "Team confederation: signed, hash-chained sharing between stores." },
   { version: "0.15", date: "2026-09-12", what: "Published on crates.io." },
-  { version: "0.16", date: "2026-09-27", what: "ee ask: direct answers with citations." },
-  { version: "0.17", date: "2026-10-02", what: "Quality ranking and the knowledge skyline." },
+  { version: "0.16", date: "2026-09-27", what: "ee ask answers from procedural rules and imported session evidence." },
+  { version: "0.17", date: "2026-10-02", what: "Retrieval quality ranking, and a Pareto-frontier knowledge skyline." },
   { version: "0.18", date: "2026-10-14", what: "Failure-to-fix recall from imported sessions." },
   { version: "0.19", date: "2026-11-21", what: "Keyed CASS commitments, warm daemon packs, Go/Rust/Vitest/Jest error recall, cargo audit 12 → 0." },
 ] as const;
@@ -444,27 +443,27 @@ export const releases = [
 export const limitations = [
   {
     title: "Personalized PageRank is unavailable",
-    text: "The pinned graph library has no deterministic personalized PageRank yet, so that ranking signal and Pack DNA's PPR neighbours report graph_ppr_upstream_unavailable and fall back. Every other graph surface works.",
+    text: "The pinned graph library has no deterministic personalized PageRank yet, so that ranking signal and Pack DNA's PPR neighbors are unavailable; both report graph_ppr_upstream_unavailable and fall back. PageRank, HITS, Louvain and articulation points are unaffected.",
   },
   {
-    title: "Graph ranking features are opt-in",
-    text: "The graph commands are built in, but every graph.feature.* flag that lets graph structure move a pack's ranking defaults to off.",
+    title: "Most graph views are opt-in",
+    text: "Every graph.feature.* flag defaults to off, so ee proximity, ee why --causal-explain, ee health --robot-insights, the knowledge skyline and Pack DNA report graph_feature_disabled until you run ee config set graph.feature.<name>.enabled true. PageRank, HITS, Louvain and articulation points need no flag.",
   },
   {
-    title: "Determinism is per machine, for now",
-    text: "Same inputs give the same pack hash. Cross-process and cross-host determinism gates are not established by the current hash contract (ADR 0087).",
+    title: "Determinism is per platform, and not yet gated across hosts",
+    text: "The pack hash binds the target architecture, OS and enabled features, so the same inputs give the same hash on the same platform. Tie-breaks still compare raw f32, and no gate yet checks determinism across processes or hosts (ADR 0087).",
   },
   {
     title: "Heavy write swarms need a write owner",
     text: "Many agents can read at once. FrankenSQLite is single-process MVCC, so heavy concurrent writing goes through job locks or the optional daemon.",
   },
   {
-    title: "Release signatures, not SLSA provenance",
+    title: "Releases are signed but carry no SLSA provenance",
     text: "Current releases ship SHA-256 sums and minisign signatures. There are no Sigstore bundles or SLSA provenance, so --require-provenance fails by design.",
   },
   {
     title: "Some performance gates are unproven",
-    text: "A warm daemon measured 708 ms against 3,155 ms for the same pack on one worker; the 10,000-memory, 2x median gate is still unverified.",
+    text: "Since v0.16.0, a read-only pack through a warm daemon measured 708 ms against 3,155 ms for the same pack built locally, on one worker; the 10,000-memory, 2x median gate is still unverified.",
   },
 ] as const;
 
@@ -479,9 +478,9 @@ export const install = [
 
 /** README "Agent Harness Integration". */
 export const harnesses = [
-  { name: "Claude Code", command: "ee hook claude-code --install --workspace . --json", note: "Managed SessionStart and pre-edit hooks inject recall and orientation. They never intercept or deny a command." },
+  { name: "Claude Code", command: "ee hook claude-code --install --workspace . --json", note: "Four managed hooks: orientation at session start, recall before an edit, a journal entry when a Bash command fails, and capture suggestions at the end. They fail open and never deny a command." },
   { name: "Codex", command: "ee hook codex --install --workspace . --json", note: "Codex shells out, so every ee command works as is; ee pack --json drops straight into a message." },
-  { name: "MCP", command: "ee mcp manifest --json", note: "Tools such as ee_context, ee_search and ee_remember mirror the CLI's contracts exactly." },
+  { name: "MCP", command: "ee mcp manifest --json", note: "The stdio adapter needs a build with --features mcp; without it the manifest reports the adapter as disabled. Its tools, such as ee_context, ee_search and ee_remember, follow the CLI's contracts." },
   { name: "Anything with a shell", command: 'ee pack "<task>" --workspace . --format markdown', note: "Scripts and people get the same commands and the same JSON as the agents." },
 ] as const;
 
@@ -503,8 +502,8 @@ export const curationSteps = [
 
 export const guards = [
   {
-    title: "Secrets never reach the disk",
-    text: "API keys, JWTs, passwords, private and SSH keys, AWS secrets and OAuth tokens are replaced with stable placeholders before storage. Five redaction levels, from none to paranoid, govern every export.",
+    title: "ee remember refuses secrets",
+    text: "Text that looks like an API key, JWT, password, private or SSH key, AWS secret or OAuth token is refused with exit 7, and the error says where it matched. --allow-secret-mention stores it anyway and writes an audit entry. Commands that export take a redaction level from none to paranoid.",
   },
   {
     title: "Stored instructions are screened",
@@ -512,27 +511,32 @@ export const guards = [
   },
   {
     title: "Preflight only advises",
-    text: "ee preflight looks up the risk history of a command before you run it. It reports what it finds and exits 0; it does not block the command, and no ee hook denies one.",
+    text: "ee preflight looks up the risk history of a command before you run it. It reports what it finds, and the risk it finds does not change its exit code; it does not block the command, and no ee hook denies one.",
   },
   {
     title: "Imported evidence is committed",
-    text: "Lines imported from past sessions carry keyed BLAKE3 commitments under the store's root key, so evidence can be checked without keeping raw digests of it.",
+    text: "Session lines imported since v0.19.0 carry keyed BLAKE3 commitments under the store's root key, so evidence can be checked without keeping raw digests of it.",
   },
 ] as const;
 
-/** README "Graph" and "Graph-derived insights": what each tool answers, and the command. */
-export const graphTools = [
-  { name: "PageRank", answers: "Which memories does everything else lean on?", command: "ee graph pagerank --limit 10" },
-  { name: "HITS", answers: "Which memories are hubs that point at good ones, and which are the authorities?", command: "ee graph hits --limit 10" },
-  { name: "Articulation points", answers: "Which single memory, if wrong, cuts a topic off from the rest?", command: "ee graph articulation" },
-  { name: "Gomory-Hu proximity", answers: "How tightly are two memories bound, and through what?", command: "ee proximity <memory-a> <memory-b> --json" },
-  { name: "Louvain communities", answers: "Which memories form a topic, whatever their tags say?", command: "ee graph louvain" },
-  { name: "k-core and k-truss", answers: "Where is the knowledge dense, and where is it thin?", command: "ee health --robot-insights --json" },
-  { name: "Causal paths", answers: "What chain of events led to this failure?", command: "ee why <memory-id> --causal-explain --json" },
-  { name: "Link prediction", answers: "Which links are missing? Proposed, never written silently.", command: "ee graph suggest-links --propose" },
-  { name: "Pack DNA", answers: "Why does this pack look the way it does: dominators, communities, ego graphs.", command: 'ee pack "<task>" --explain --json' },
-  { name: "Knowledge skyline", answers: "The store's posture across layers, communities, trust, age and support.", command: "ee insights --section knowledgeSkyline --json" },
-] as const;
+/**
+ * README "Graph" and "Graph-derived insights": what each tool answers, the command, and the config flag it needs,
+ * if any. Every graph.feature.* flag defaults to off (src/config/merge.rs), and until it is on, its tool reports
+ * graph_feature_disabled.
+ */
+export const graphTools: readonly { name: string; answers: string; command: string; flag: string | null }[] = [
+  { name: "PageRank", answers: "Which memories does everything else lean on?", command: "ee graph pagerank --limit 10", flag: null },
+  { name: "HITS", answers: "Which memories are hubs that point at good ones, and which are the authorities?", command: "ee graph hits --limit 10", flag: null },
+  { name: "Articulation points", answers: "Which single memory, if wrong, cuts a topic off from the rest?", command: "ee graph articulation", flag: null },
+  { name: "Louvain communities", answers: "Which memories form a topic, whatever their tags say?", command: "ee graph louvain", flag: null },
+  { name: "k-core", answers: "Where is the knowledge dense, and where is it thin?", command: "ee graph k-core --json", flag: null },
+  { name: "Link prediction", answers: "Which links are missing? Proposed, never written silently.", command: "ee graph suggest-links --propose", flag: null },
+  { name: "Gomory-Hu proximity", answers: "How tightly are two memories bound, and through what?", command: "ee proximity <memory-a> <memory-b> --json", flag: "graph.feature.proximity.enabled" },
+  { name: "k-truss and contradiction clusters", answers: "Which groups of memories hold together, and where do contradictions cluster?", command: "ee health --robot-insights --json", flag: "graph.feature.structural_health.enabled" },
+  { name: "Causal paths", answers: "What chain of events led to this failure?", command: "ee why <memory-id> --causal-explain --json", flag: "graph.feature.causal_explain.enabled" },
+  { name: "Pack DNA", answers: "Why does this pack look the way it does: dominators, communities, ego graphs.", command: 'ee pack "<task>" --explain --json', flag: "graph.feature.pack_dna.enabled" },
+  { name: "Knowledge skyline", answers: "The store's posture across layers, communities, trust, age and support.", command: "ee insights --section knowledgeSkyline --json", flag: "graph.feature.skyline.enabled" },
+];
 
 /**
  * README "Beyond Coding": the same memory model outside software. The source URIs are the
@@ -542,7 +546,7 @@ export const domains = [
   { name: "Investment research", unit: "a position", memories: "Thesis revisions, valuation methods, failed screens, peer sets", uris: ["sec-filing://", "earnings-call://", "analyst-note://"], workspace: "./positions/AAPL-long" },
   { name: "Legal work", unit: "a matter", memories: "Case rules, drafting conventions, negotiation outcomes, due-diligence steps", uris: ["case://", "pacer://", "westlaw://"], workspace: "./matters/smith-v-jones" },
   { name: "Security and incident response", unit: "an incident", memories: "IOCs, TTPs, response playbooks, detection-rule outcomes", uris: ["cve://", "mitre://", "incident://"], workspace: "./incidents/2026-11-phish" },
-  { name: "Marketing analysis", unit: "a programme", memories: "Campaign retrospectives, A/B results, channel rules, segmentation methods", uris: ["ga4://", "mixpanel://", "campaign://"], workspace: "./growth/q4-launch" },
+  { name: "Marketing analysis", unit: "a program", memories: "Campaign retrospectives, A/B results, channel rules, segmentation methods", uris: ["ga4://", "mixpanel://", "campaign://"], workspace: "./growth/q4-launch" },
   { name: "Product management", unit: "a product line", memories: "User research, launch retrospectives, personas, prioritization rules", uris: ["interview://", "linear://", "notion://"], workspace: "./product/onboarding" },
   { name: "Medicine or clinical operations", unit: "a protocol", memories: "Guideline facts, near misses, differential-diagnosis procedures", uris: ["pubmed://", "guideline://", "emr://"], workspace: "./clinic/sepsis-pathway" },
   { name: "Sales and account work", unit: "an account", memories: "Call notes, objection patterns, account maps, qualification playbooks", uris: ["crm://", "salesforce://", "gong://"], workspace: "./deals/2026-q3-acme" },

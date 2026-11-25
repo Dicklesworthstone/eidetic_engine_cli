@@ -213,7 +213,7 @@ export function MarkdownVsMemory() {
           notices a stale lesson with chance {fixed(EE_CATCH_PER_WEEK * 100, 2)}% a week (a revision, a harmful outcome, the
           contradiction guard, decay) · MMR similarity {SIMILARITY.sameFact} for two copies of a lesson,{" "}
           {SIMILARITY.sameTopic} within a topic, {SIMILARITY.other} otherwise · an ee item&apos;s id, why, trust and
-          provenance lines about {RECEIPT_TOKENS} tokens · not modelled: section quotas, the preview and link-only tiers,
+          provenance lines about {RECEIPT_TOKENS} tokens · not modeled: section quotas, the preview and link-only tiers,
           the query-relative relevance cutoff, the memory-tier boost, and the helpful/harmful outcome bias (at most ±0.05, AGENT_PROFILE_BIAS_CAP in
           src/models/context_profile.rs). ee&apos;s side: src/pack/mod.rs ·
           DEFAULT_CONTEXT_MAX_TOKENS 4,000 (counted on each memory&apos;s own text) · DEFAULT_MMR_RELEVANCE_WEIGHT 0.75 ·

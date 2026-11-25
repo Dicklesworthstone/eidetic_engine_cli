@@ -34,9 +34,9 @@ function HeroWords() {
         cloud service or API key.
       </p>
       <p className="mt-4 max-w-[37rem] text-[15px] leading-relaxed text-slate-400">
-        <span className="font-semibold text-slate-200">New in {siteConfig.version}:</span> fixes are recalled by error
-        fingerprint in Go, Vitest and Jest output as well as rustc, and the optional warm daemon returns the same pack,
-        with the same hash, in 708 ms where a cold run took 3,155 ms on one test machine.{" "}
+        <span className="font-semibold text-slate-200">New in {siteConfig.version}:</span> fix recall now reads Go
+        terminal failures, Rust syntax errors and Vitest and Jest reports, and each retrieval response says whether the
+        optional daemon or the local process served it, without changing the pack&apos;s hash.{" "}
         <a className={link} href={siteConfig.changelog}>
           What changed
         </a>
@@ -63,11 +63,11 @@ function HeroWords() {
         </a>
       </div>
       <p className="mt-6 text-sm text-slate-500">
-        Open source on{" "}
+        The source is on{" "}
         <a className={link} href={siteConfig.github}>
           GitHub
         </a>
-        . Every figure on this site names where it comes from.
+        . Counts come from the repository at a named commit, and each explainer says what it is drawn from.
       </p>
     </>
   );
@@ -142,16 +142,17 @@ export default function Home() {
                   or not.
                 </p>
                 <p>
-                  ee replaces that file with a local database. Agents add to it as they work, with{" "}
+                  ee keeps those lessons in a local database instead. Agents add to it as they work, with{" "}
                   <Cmd className="whitespace-nowrap">ee remember</Cmd> and <Cmd className="whitespace-nowrap">ee outcome</Cmd>, and ee can import the sessions they have already
                   recorded. When a task starts, <Cmd className="whitespace-nowrap">ee pack</Cmd> returns the memories that match it, fitted to a token
                   budget, with each item&apos;s source, score and trust level. However large the store grows, the pack
                   stays within the budget you set.
                 </p>
                 <p>
-                  It is a single Rust binary that keeps its data in the repository&apos;s <Cmd>.ee</Cmd> directory and
-                  needs no cloud service or API key. Claude Code, Codex, MCP clients and shell scripts call the same
-                  commands and get the same JSON.
+                  It is a single Rust binary that keeps each workspace&apos;s store in its <Cmd>.ee</Cmd> directory,
+                  and a user-global store under <Cmd>~/.local/share/ee</Cmd>, and needs no cloud service or API key.
+                  Claude Code, Codex, shell scripts and, in a build with the <Cmd>mcp</Cmd> feature, MCP clients call
+                  the same commands and get the same JSON with <Cmd>--json</Cmd>.
                 </p>
               </div>
             </div>

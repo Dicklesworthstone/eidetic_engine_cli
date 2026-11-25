@@ -656,7 +656,7 @@ export function GraphLens() {
                   </li>
                 ))}
               </ol>
-              <p className="mt-2 text-[11px] text-slate-500">Tap a memory to see its neighbourhood.</p>
+              <p className="mt-2 text-[11px] text-slate-500">Tap a memory to see its neighborhood.</p>
             </div>
           )}
         </div>

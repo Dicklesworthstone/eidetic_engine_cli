@@ -110,7 +110,8 @@ function Amnesiac() {
             Most agent memory today is a markdown file that the harness loads whole at the start of every session. It
             grows with every lesson, nothing in it marks a line as stale, and every line costs tokens in every session
             whether the task needs it or not. A vector store keeps the size down by returning only the closest matches,
-            but it cannot tell a stale or repeated chunk from a current one. Move through the weeks to compare all three.
+            but on its own it ranks by similarity and does not track whether a chunk is stale or repeated. Move through
+            the weeks to compare all three.
           </>
         }
       >
@@ -180,8 +181,8 @@ function MemoryChapter() {
         kicker={
           <>
             A memory&apos;s freshness halves on a schedule set by what it is: a day for working notes, a year for a
-            procedural rule. Freshness times confidence times utility decides when it is demoted and when it is
-            tombstoned, with an audit entry either way.
+            procedural rule. When the decay pass runs (<Cmd>ee maintenance run --include-decay</Cmd>), freshness times
+            confidence times utility decides whether it is demoted or tombstoned, with an audit entry either way.
           </>
         }
       >
@@ -276,12 +277,12 @@ function PackChapter() {
         index={sectionIndex("pack", "pipeline")}
         layout="wide"
         eyebrow="ee pack, stage by stage"
-        title="Twelve timed [stages]."
+        title="A pipeline of timed [stages]."
         kicker={
           <>
-            <Cmd>ee pack</Cmd> runs a fixed pipeline rather than a single top-k query. It validates the request,
-            retrieves with lexical and semantic search fused by rank, resolves and admits candidates, selects under
-            quotas, assembles the pack with provenance, and reports each stage&apos;s time and every degradation.
+            <Cmd>ee pack</Cmd> runs a fixed pipeline. It validates the request, retrieves with lexical and semantic
+            search fused by rank, resolves and admits candidates, selects under quotas, and assembles the pack with
+            provenance. It reports every degradation, and <Cmd>--explain-performance</Cmd> adds each stage&apos;s time.
           </>
         }
       >
@@ -371,9 +372,11 @@ function LearningChapter() {
         title="A posterior for every [memory]."
         kicker={
           <>
-            A memory&apos;s starting trust depends on its source: 0.85 when a person types it, 0.50 when an agent
-            asserts it, 0.45 for a line imported from a session. Outcomes then update a Beta posterior, and the trust
-            class changes only when the 90% interval crosses a threshold. Use the buttons to record outcomes.
+            A memory&apos;s trust class comes from how it was written: <Cmd>human_explicit</Cmd> for an ordinary{" "}
+            <Cmd>ee remember</Cmd>, <Cmd>agent_assertion</Cmd> for a registered agent&apos;s attempt-family write,{" "}
+            <Cmd>cass_evidence</Cmd> for a line imported from a session. Outcomes update a Beta posterior that starts
+            from the Jeffreys prior, and the class changes only when the 90% interval crosses a threshold. Use the
+            buttons to record outcomes.
           </>
         }
       >
@@ -389,8 +392,8 @@ function LearningChapter() {
         kicker={
           <>
             ee imports your past agent sessions through cass, finds the failures that were fixed and verified, and keeps
-            each as a short incident card keyed by the error&apos;s fingerprint. The next time that error class appears,
-            in any session, the fix comes back with its provenance.
+            each as a short incident card keyed by the error&apos;s fingerprint. When that error class appears again,{" "}
+            <Cmd>ee diagnose-error</Cmd> or <Cmd>ee pack --error-log</Cmd> returns the fix with its provenance.
           </>
         }
       >
@@ -401,12 +404,13 @@ function LearningChapter() {
         id="curate"
         index={sectionIndex("learn", "curate")}
         eyebrow="No silent memory mutation"
-        title="Changes go through [review]."
+        title="Proposed changes go through [review]."
         kicker={
           <>
-            Every promotion, merge, replacement and tombstone starts as a candidate that can be reviewed, and applying it
-            writes an audit entry. The steward process proposes changes to procedural memory but does not apply them
-            itself. Turning a session journal into candidates does not use an LLM.
+            Changes ee proposes start as candidates that can be reviewed, and applying one writes an audit entry. A
+            person can also tombstone a memory directly, and the decay pass demotes and tombstones on its own when run
+            with <Cmd>--include-decay</Cmd>; both are audited. Turning a session journal into candidates does not use
+            an LLM.
           </>
         }
       >
@@ -440,9 +444,9 @@ function LearningChapter() {
         title="Checks on the way in and [out]."
         kicker={
           <>
-            Anything written to the store can reach every later session. ee strips secrets before it stores a memory,
-            screens stored memories for injected instructions before it packs them, and only advises on commands: no ee
-            check can stop the agent from running one.{" "}
+            Anything written to the store can reach every later session. ee refuses to store a memory that contains a
+            secret, screens stored memories for injected instructions before it packs them, and only advises on
+            commands: no ee check can stop the agent from running one.{" "}
             <a className={link} href={siteConfig.trustModel}>
               The trust model
             </a>
@@ -465,8 +469,11 @@ function LearningChapter() {
           <code>
             <span className="text-slate-500">$ </span>ee remember &quot;DATABASE_URL=postgres://user:hunter2@host/db&quot;
             {"\n"}
-            <span className="text-slate-500"># stored as: </span>
-            <span className="text-sky-200">&quot;DATABASE_URL=postgres://user:***REDACTED:password***@host/db&quot;</span>
+            <span className="text-slate-500"># refused: exit 7, </span>
+            <span className="text-sky-200">policy_denied</span>
+            <span className="text-slate-500">, detectedPattern </span>
+            <span className="text-sky-200">database_url</span>
+            <span className="text-slate-500">; nothing is written</span>
           </code>
         </pre>
       </Section>
@@ -502,9 +509,9 @@ function CampaignsChapter() {
         title="A ledger of failed [attempts]."
         kicker={
           <>
-            In a long optimisation or research campaign most attempts fail, and each one cost time. A failure recorded
-            with its family and cause keeps later sessions from trying it again, and enough failures in one family can
-            become an anti-pattern rule that rules out that whole region.
+            In a long optimization or research campaign most attempts fail, and each one costs time. A failure recorded
+            with its family and cause warns later sessions before they repeat it, and after review, repeated failures in
+            one family can become an anti-pattern rule for that family.
           </>
         }
       >
@@ -583,9 +590,9 @@ function CampaignsChapter() {
         title="From one agent to a [team]."
         kicker={
           <>
-            The same store serves one agent on one repository, a swarm of agents working at once, a small team sharing
-            what each member learns, and a user-global lane across every workspace you open. When two lanes disagree,
-            the conflict is recorded rather than settled silently.
+            One store serves one agent on one repository or a swarm of agents working at once. A small team can link
+            their stores to share what each member learns, and a user-global lane follows you across every workspace you
+            open. When two lanes disagree, ee records the conflict.
           </>
         }
       >
@@ -625,9 +632,9 @@ function AgentsChapter() {
         title="Errors that say what to do [next]."
         kicker={
           <>
-            An error message written for a person leaves an agent guessing. An ee error states what broke, how serious it
-            is, the command that repairs it, whether that command is safe to run unattended, and whether a person has to
-            approve it first.
+            An error message written for a person leaves an agent guessing. An ee error states what broke and how serious
+            it is, and where ee knows the repair, it names the command, whether it is safe to run unattended, and whether
+            a person has to approve it first.
           </>
         }
       >
@@ -676,8 +683,9 @@ function AgentsChapter() {
         <div className="panel mt-4 rounded-2xl p-5 sm:p-6">
           <MicroLabel className="text-slate-400">Five postures</MicroLabel>
           <p className="mt-3 text-[14.5px] leading-relaxed text-slate-300">
-            <Cmd>ee status</Cmd> and <Cmd>ee doctor</Cmd> report one of five postures rather than a yes or no, so an
-            agent can tell a store that is still warming up from one that needs a repair and one it must not touch.
+            <Cmd>ee status</Cmd> reports one of five postures, so an agent can tell a store that is still warming up
+            from one that needs a repair and one it must not touch. <Cmd>ee doctor</Cmd> uses three of them: ok,
+            degraded_recoverable and blocked.
           </p>
           <ol className="mt-4 flex flex-wrap items-center gap-1.5 font-mono text-[11.5px]">
             {postures.map((posture, at) => (
@@ -729,9 +737,9 @@ function GraphChapter() {
         title="Each algorithm answers a [question]."
         kicker={
           <>
-            Each one is a command with deterministic JSON output. Graph views help explain and navigate memory, but a
-            memory&apos;s own provenance stays the record of where it came from, and the features that let graph
-            structure change a pack&apos;s ranking are off by default.
+            Each one is a command with deterministic JSON output. The first six work as installed; the rest name the
+            config flag that turns them on, because every graph feature flag is off by default. Graph views help
+            explain and navigate memory, but a memory&apos;s own provenance stays the record of where it came from.
           </>
         }
       >
@@ -742,6 +750,11 @@ function GraphChapter() {
               <div className="min-w-0">
                 <p className="text-[14.5px] leading-snug text-slate-300">{tool.answers}</p>
                 <p className="mt-1.5 font-mono text-[11.5px] break-words text-emerald-200/80">{tool.command}</p>
+                {tool.flag ? (
+                  <p className="mt-1 font-mono text-[11px] break-words text-slate-500">
+                    needs ee config set {tool.flag} true
+                  </p>
+                ) : null}
               </div>
             </li>
           ))}
@@ -793,11 +806,12 @@ function ProofChapter() {
         id="rigor"
         index={sectionIndex("proof", "rigor")}
         eyebrow="Hard requirements"
-        title="Dependencies the build [refuses]."
+        title="Dependencies the checks [refuse]."
         kicker={
           <>
-            Each line below is a dependency that fails the build, and what ee uses instead. Together they keep ee a single
-            binary with its own runtime and storage stack and no HTTP code in the core.
+            Each line below is a dependency that fails ee&apos;s forbidden-dependency check, and what ee uses instead.
+            Together they keep ee a single binary with its own runtime and storage stack and no HTTP code in the core.
+            Hybrid search comes from one crate, Frankensearch, by convention; no check enforces that one.
           </>
         }
       >
@@ -878,7 +892,7 @@ function ProofChapter() {
         index={sectionIndex("proof", "status")}
         eyebrow="Limitations"
         title="What is not [done yet]."
-        kicker={<>These are the limitations the README lists as of {siteConfig.version}.</>}
+        kicker={<>Drawn from the README, the ADRs and the CHANGELOG, as of {siteConfig.version}.</>}
       >
         <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {limitations.map((item, at) => (

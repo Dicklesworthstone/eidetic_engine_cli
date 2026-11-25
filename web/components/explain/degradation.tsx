@@ -133,7 +133,7 @@ const CAPABILITIES: readonly { name: string; judge: (off: Off) => { state: State
   },
   {
     name: "Provenance and the JSON contract",
-    judge: () => ({ state: "ok", note: "on every response" }),
+    judge: () => ({ state: "ok", note: "on every --json response" }),
   },
 ];
 

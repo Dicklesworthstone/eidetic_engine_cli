@@ -15,8 +15,8 @@ export function SiteFooter({ installHref = "#install" }: { installHref?: string 
               <RecallTitle text="Give your agents a long-term [memory]." />
             </p>
             <p className="mt-6 max-w-2xl text-[15px] leading-relaxed text-slate-400">
-              ee is open source under the MIT license with an OpenAI/Anthropic rider. Its decision records, JSON schemas
-              and failure-mode fixtures are all in the repository.
+              ee is released under the MIT license with an OpenAI/Anthropic rider. Its decision records, JSON schemas and
+              failure-mode fixtures are all in the repository.
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
               <a
@@ -48,7 +48,7 @@ export function SiteFooter({ installHref = "#install" }: { installHref?: string 
         </div>
         <p className="mt-16 flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-white/[0.06] pt-6 font-mono text-[11px] text-slate-500">
           <span>{siteConfig.name} · ee</span>
-          <span>Every figure on this site names its source</span>
+          <span>Counts taken from the repository</span>
           <span>
             Counted at {COUNTED.commit}, {COUNTED.date}
           </span>

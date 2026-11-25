@@ -221,8 +221,8 @@ const PERF: Domain = {
     { id: "p-r2", section: "rules", level: "procedural", kind: "rule", trust: "agent_assertion", upgrade: { day: w(9, 1), to: "agent_validated" }, source: "bench-run://oltp-mixed/variance-study", text: "Run oltp-mixed three times and report the median: one run's noise is ±4%.", tokens: 70, from: w(6, 4) },
     { id: "p-r3", section: "rules", level: "procedural", kind: "rule", trust: "agent_assertion", source: "flamegraph://runs/0412/cpu.svg", text: "Profile the release build with debug symbols; debug builds misrank the hot path.", tokens: 75, from: w(12, 2) },
     { id: "p-r4", section: "rules", level: "procedural", kind: "rule", trust: "agent_validated", source: "bench-run://alloc/arena-sweep", text: "Size the page arena at 64 KiB per worker.", tokens: 55, from: w(12, 2), until: w(21, 3) },
-    { id: "p-r5", section: "rules", level: "procedural", kind: "rule", trust: "human_explicit", source: "git-sha://5d1e0a7", text: "Every optimisation lands with a median-of-3 bench diff and its revert SHA.", tokens: 70, from: w(23, 2) },
-    { id: "p-d1", section: "decisions", level: "semantic", kind: "decision", trust: "human_explicit", source: "charter://oltp-campaign/v1", text: "Optimise p99 latency for the OLTP mix. Rejected: throughput +20%.", tokens: 80, from: 8, until: 101, revisitBy: 98 },
+    { id: "p-r5", section: "rules", level: "procedural", kind: "rule", trust: "human_explicit", source: "git-sha://5d1e0a7", text: "Every optimization lands with a median-of-3 bench diff and its revert SHA.", tokens: 70, from: w(23, 2) },
+    { id: "p-d1", section: "decisions", level: "semantic", kind: "decision", trust: "human_explicit", source: "charter://oltp-campaign/v1", text: "Optimize p99 latency for the OLTP mix. Rejected: throughput +20%.", tokens: 80, from: 8, until: 101, revisitBy: 98 },
     { id: "p-d2", section: "decisions", level: "semantic", kind: "decision", trust: "human_explicit", source: "design-review://w08/storage", text: "Keep the B-tree. An LSM rewrite was rejected as too much risk for one campaign.", tokens: 85, from: 51, revisitBy: 171 },
     { id: "p-d3", section: "decisions", level: "semantic", kind: "decision", trust: "human_explicit", source: "charter://oltp-campaign/v2", text: "p99 target reaffirmed at 2.0 ms after the revisit; supersedes the first.", tokens: 75, from: 101, revisitBy: 191 },
     { id: "p-f1", section: "failures", level: "episodic", kind: "failure", trust: "cass_evidence", source: "bench-run://prefetch/adaptive-w4", text: "Adaptive prefetch: −3% on small-N reads. Third in family aggressive-prefetch. Reverted at 9af3c21.", tokens: 95, from: w(4, 2) },
@@ -564,7 +564,7 @@ const GROWTH: Domain = {
     { id: "g-e2", section: "evidence", level: "episodic", kind: "fact", trust: "agent_assertion", source: "campaign://launch/2026-w08", text: "Launch week: 48k sends; activation 33.5% against a 31% holdout.", tokens: 80, from: w(8, 3) },
     { id: "g-e3", section: "evidence", level: "episodic", kind: "fact", trust: "agent_assertion", source: "mixpanel://reports/opens-w12", text: "Opens jumped 22 points overnight with clicks flat: opens no longer measure reading.", tokens: 85, from: w(12, 4) },
     { id: "g-e4", section: "evidence", level: "episodic", kind: "fact", trust: "agent_assertion", source: "campaign://launch/2026-w21", text: "Second launch: activation 35.2% against a 31.4% holdout.", tokens: 75, from: w(21, 2) },
-    { id: "g-a1", section: "artifacts", level: "semantic", kind: "artifact", trust: "human_explicit", source: "file://briefs/lifecycle-h2.md", text: "briefs/lifecycle-h2.md: the programme brief.", tokens: 45, from: 0 },
+    { id: "g-a1", section: "artifacts", level: "semantic", kind: "artifact", trust: "human_explicit", source: "file://briefs/lifecycle-h2.md", text: "briefs/lifecycle-h2.md: the program brief.", tokens: 45, from: 0 },
     { id: "g-a2", section: "artifacts", level: "semantic", kind: "artifact", trust: "agent_assertion", source: "file://calc/power.ipynb", text: "calc/power.ipynb: sample size per arm.", tokens: 40, from: w(6, 3) },
   ],
 };
@@ -601,7 +601,7 @@ const LEGAL: Domain = {
       type: "decision",
       title: "Strategy recorded: early mediation",
       detail: "It is chosen over an early motion to dismiss, to be revisited once the expert reports are in.",
-      command: 'ee decide record "case strategy" --chosen "early mediation" --alternative "motion to dismiss" --rationale "cap clause favours a settlement" --revisit-by +112d',
+      command: 'ee decide record "case strategy" --chosen "early mediation" --alternative "motion to dismiss" --rationale "cap clause favors a settlement" --revisit-by +112d',
       rules: 0,
     },
     {
