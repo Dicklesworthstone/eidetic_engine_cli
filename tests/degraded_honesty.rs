@@ -3351,11 +3351,21 @@ fn plan_goal_and_explain_report_catalog_reasoning_without_unavailable_sentinel()
             .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
         let log_json: Value = serde_json::from_str(&log_text)
             .map_err(|error| format!("e2e log must be JSON: {error}"))?;
-        ensure_json_pointer(
-            &log_json,
-            "/degradationCodes",
-            json!([]),
-            &format!("logged {command} degradation code"),
+        // Recipe semantic scoring needs an embedder for the workspace. This one is
+        // uninitialized, so whether one is available depends on the host's model
+        // configuration and cache: a lane worker has none, and plan goal then says
+        // `semantic_search_unavailable` and scores lexically. That is an honest
+        // degradation, not the removed sentinel, and it is the only code accepted.
+        // plan explain reads the catalog only and must report nothing.
+        let logged_codes = log_json
+            .pointer("/degradationCodes")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let honest = logged_codes == json!([])
+            || (command == "plan goal" && logged_codes == json!(["semantic_search_unavailable"]));
+        ensure(
+            honest,
+            format!("logged {command} degradation codes: {logged_codes}"),
         )?;
         ensure_json_pointer(
             &log_json,

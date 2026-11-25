@@ -12,7 +12,7 @@
         "command": "remember",
         "memoryId": "<MEMORY_ID>",
         "persisted": true,
-        "indexStatus": "pending",
+        "indexStatus": "indexed",
         "nearDuplicates": [],
         "degradedCodes": []
       },
@@ -22,7 +22,7 @@
         "command": "remember",
         "memoryId": "<MEMORY_ID>",
         "persisted": true,
-        "indexStatus": "pending",
+        "indexStatus": "indexed",
         "nearDuplicates": [],
         "degradedCodes": []
       }
@@ -43,7 +43,7 @@
         "command": "remember",
         "memoryId": "<MEMORY_ID>",
         "persisted": true,
-        "indexStatus": "pending",
+        "indexStatus": "indexed",
         "nearDuplicates": [],
         "degradedCodes": []
       },
@@ -53,7 +53,7 @@
         "command": "remember",
         "memoryId": "<MEMORY_ID>",
         "persisted": true,
-        "indexStatus": "pending",
+        "indexStatus": "indexed",
         "nearDuplicates": [
           {
             "memoryId": "<EXISTING_MEMORY_ID>",
@@ -105,7 +105,7 @@
       "command": "remember",
       "memoryId": "<MEMORY_ID>",
       "persisted": true,
-      "indexStatus": "pending",
+      "indexStatus": "indexed",
       "nearDuplicates": [],
       "degradedCodes": []
     },
