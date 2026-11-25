@@ -88,7 +88,8 @@ describe("figure 03.1: the stages of ee pack", () => {
 
 describe("figure 03.2: the toy pack builder", () => {
   test("MMR weight, coverage-fill floor and level-of-detail shares", () => {
-    expect(pack).toContain(`pub const DEFAULT_MMR_RELEVANCE_WEIGHT: f32 = ${RELEVANCE_WEIGHT};`);
+    expect(pack).toContain("pub const DEFAULT_MMR_RELEVANCE_WEIGHT: f32 = crate::config::DEFAULT_PACK_MMR_LAMBDA;");
+    expect(source("src/config/merge.rs")).toContain(`pub const DEFAULT_PACK_MMR_LAMBDA: f32 = ${RELEVANCE_WEIGHT};`);
     expect(pack).toContain(`pub const DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR: f32 = ${FLOOR};`);
     const thousands = (bps: number) => `${bps / 1000}_000`;
     expect(pack).toContain(

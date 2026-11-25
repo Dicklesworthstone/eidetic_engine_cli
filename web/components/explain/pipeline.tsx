@@ -109,7 +109,7 @@ export const STAGES: readonly Stage[] = [
   {
     span: "packAssembly",
     name: "Select and render",
-    what: "Chooses items under the profile's section quotas and the token budget, by MMR (0.75 × relevance − 0.25 × redundancy) or, for the submodular profile, facility location; then renders the pack. Every candidate left out is recorded with a reason.",
+    what: "Chooses items under the profile's section quotas and the token budget, by MMR (by default 0.75 × relevance − 0.25 × redundancy; pack.mmr_lambda sets the weight) or, for the submodular profile, facility location; then renders the pack. Every candidate left out is recorded with a reason.",
     status: "always",
     count: 14,
   },
