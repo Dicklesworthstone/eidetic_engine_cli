@@ -2761,13 +2761,13 @@ def _ee_write_json_atomic(path, value, lock=None):
                 os.unlink(pending)
             except OSError:
                 pass
-def already_seen(text, lock_timeout_seconds=0.2):
+def _ee_context_transaction(update, lock_timeout_seconds=0.2, unavailable=False):
     # All ambient surfaces share this transaction; failures may repeat context
     # but must never wait indefinitely or prevent the harness's tool from running.
     # A missing session identity must not suppress context in unrelated runs.
     session = data.get("session_id") or data.get("sessionId")
     if not isinstance(session, str) or not session:
-        return False
+        return unavailable
     try:
         root = _ee_state_root()
         os.makedirs(root, mode=0o700, exist_ok=True)
@@ -2776,15 +2776,15 @@ def already_seen(text, lock_timeout_seconds=0.2):
         safe_flags = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         with os.fdopen(os.open(lock_path, os.O_RDWR | os.O_CREAT | safe_flags, 0o600), "r+b") as lock:
             if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode) or not stat.S_ISREG(os.lstat(lock_path).st_mode):
-                return False
+                return unavailable
             if not _ee_lock_context_state(lock, lock_timeout_seconds):
-                return False
+                return unavailable
             if not os.path.samestat(os.fstat(lock.fileno()), os.lstat(lock_path)):
-                return False
+                return unavailable
             try:
                 with os.fdopen(os.open(path, os.O_RDONLY | safe_flags), "rb") as f:
                     if not stat.S_ISREG(os.fstat(f.fileno()).st_mode) or not stat.S_ISREG(os.lstat(path).st_mode):
-                        return False
+                        return unavailable
                     raw = f.read(262145)
                 seen = json.loads(raw) if len(raw) <= 262144 else {}
             except (FileNotFoundError, ValueError):
@@ -2794,17 +2794,60 @@ def already_seen(text, lock_timeout_seconds=0.2):
             seen = {key: stamp for key, stamp in seen.items() if isinstance(key, str) and len(key) <= 128 and isinstance(stamp, (int, float)) and not isinstance(stamp, bool) and now - 604800 <= stamp <= now + 60} if isinstance(seen, dict) else {}
             workspace = os.path.realpath(data.get("cwd") or os.getcwd())
             scope = hashlib.blake2s(json.dumps([workspace, session], separators=(",", ":")).encode("utf-8"), digest_size=16).hexdigest()
-            key = SURFACE + ":" + scope + ":" + hashlib.blake2s(text.encode("utf-8"), digest_size=16).hexdigest()
-            duplicate = key in seen
-            seen.pop(key, None)
-            if len(seen) >= 1024:
-                seen = dict(sorted(seen.items(), key=lambda item: (item[1], item[0]))[-1023:])
-            seen[key] = now
+            result = update(seen, scope, now)
             _ee_write_json_atomic(path, seen, lock)
-            return duplicate
+            return result
     except Exception:
         # Optional dedup storage must never delay or prevent memory recall.
+        return unavailable
+def _ee_remember_context_key(seen, key, now):
+    seen.pop(key, None)
+    if len(seen) >= 1024:
+        retained = sorted(seen.items(), key=lambda item: (item[1], item[0]))[-1023:]
+        seen.clear()
+        seen.update(retained)
+    seen[key] = now
+def already_seen(text, lock_timeout_seconds=0.2):
+    def claim(seen, scope, now):
+        key = SURFACE + ":" + scope + ":" + hashlib.blake2s(text.encode("utf-8"), digest_size=16).hexdigest()
+        duplicate = key in seen
+        _ee_remember_context_key(seen, key, now)
+        return duplicate
+    return _ee_context_transaction(claim, lock_timeout_seconds)
+def _ee_refresh_ambient_context():
+    event = data.get("hook_event_name") or data.get("hookEventName")
+    resume = data.get("resume")
+    compacted = isinstance(resume, dict) and resume.get("compacted") is True
+    kind = "compact" if event == "CompactionResume" or compacted else data.get("source")
+    if kind not in ("compact", "clear", "resume"):
         return False
+    boundary = None
+    try:
+        transcript = data.get("transcript_path") or data.get("transcriptPath")
+        if isinstance(transcript, str) and transcript and len(transcript.encode("utf-8")) <= 4096:
+            path = os.path.realpath(os.path.join(data.get("cwd") or os.getcwd(), transcript))
+            snapshot = os.stat(path)
+            if stat.S_ISREG(snapshot.st_mode):
+                # Metadata only: never inspect or persist transcript content.
+                identity = [kind, path, snapshot.st_dev, snapshot.st_ino, snapshot.st_size, snapshot.st_mtime_ns]
+                boundary = hashlib.blake2s(json.dumps(identity, separators=(",", ":")).encode("utf-8"), digest_size=16).hexdigest()
+    except Exception:
+        pass
+    def refresh(seen, scope, now):
+        marker = "context_boundary:" + scope + ":" + boundary if boundary else None
+        if marker is not None and marker in seen:
+            _ee_remember_context_key(seen, marker, now)
+            return False
+        prefixes = tuple(surface + ":" + scope + ":" for surface in ("pre_edit_recall", "session_start_orient", "session_end_capture_suggest", "context_boundary"))
+        for key in list(seen):
+            if key.startswith(prefixes):
+                del seen[key]
+        if marker is not None:
+            _ee_remember_context_key(seen, marker, now)
+        # Without a stable boundary identity, replay is safer than mistaking a
+        # new context window for a duplicate event. Ordinary claims still dedup.
+        return boundary is None
+    return _ee_context_transaction(refresh, unavailable=True)
 def _ee_record_invocation(outcome, emitted_bytes=0, degraded_codes=None):
     try:
         root = _ee_state_root()
@@ -2995,6 +3038,7 @@ def ambient_verbosity():
 if not ambient_enabled():
     sys.exit(0)
 VERBOSITY = ambient_verbosity()
+FORCE_REPLAY = _ee_refresh_ambient_context()
 if VERBOSITY == "quiet":
     sys.exit(0)
 BUDGET = VERBOSE_BUDGET if VERBOSITY == "verbose" else DEFAULT_BUDGET
@@ -3027,7 +3071,8 @@ except Exception:
 if not text:
     _ee_record_invocation("empty", degraded_codes=codes)
     sys.exit(0)
-if already_seen(text):
+duplicate = already_seen(text)
+if duplicate and not FORCE_REPLAY:
     _ee_record_invocation("duplicate", degraded_codes=codes)
     sys.exit(0)
 header = f"<!-- ee ambient_context schema={SCHEMA} surface={SURFACE} budgetTokens={BUDGET} omittedBlocks={omitted} verbosity={VERBOSITY} provenance=ee:{SCHEMA} -->"
@@ -3902,6 +3947,8 @@ fn is_legacy_unmanaged_ee_hook_command(command: &str, snippet: &HarnessHookSnipp
     // to remove a user's installed command on upgrade.
     let known: &[&str] = match snippet.id.as_str() {
         "ee-ambient-pre-edit-recall" => &[
+            // Complete wrapper from main before context-window refresh.
+            "338bd928576a96b58901426c1855da253667f8daad94a7871a101ae8e01915c6",
             // v0.10.0–v0.12.0, v0.13.0–v0.14.5, retired v0.13.0 preflight,
             // and v0.15.0–v0.18.0, respectively.
             "490859f62c4b20737581fad39e76ce8b93f98e51453669a910331e4e2e0afe22",
@@ -3910,6 +3957,8 @@ fn is_legacy_unmanaged_ee_hook_command(command: &str, snippet: &HarnessHookSnipp
             "4219e17718541be71bec15cb0c4cb74c0216661853e7d1e507b8075fea3f0014",
         ],
         "ee-journal-bash-failure" => &[
+            // Complete wrapper from main before context-window refresh.
+            "01485b17ef1bbcefa428bc048dcd3713e05423ff4b03e3b78c1cda1239187790",
             "7c0e4b9c603619c8e92bf113db805b914ce0b16d15458db822443ec2acab3fd1",
             "406b9063abb9c6da10afe09224423196ce5be73f42fb8e9d019e164ce84e583c",
             "7d8eb84181d312dd03ecc7cafd893558d7deb6595389ecbc51dfa2e3a1adc0fe",
@@ -3917,10 +3966,14 @@ fn is_legacy_unmanaged_ee_hook_command(command: &str, snippet: &HarnessHookSnipp
             "68a1bf46ddd39b12deeda0841fa83644abd7fa1c7f7ecf429cfe41be9ce1a9c9",
         ],
         "ee-ambient-session-orient" => &[
+            // Complete wrapper from main before context-window refresh.
+            "9dde95a128416af791d1db1c5e2b3782ff6f963adf8a810d89e5ce4a06c24caa",
             "95fc71cc3d89ce5b87015fc83ab36d9a80a2c391f177f20a3fcb2e2d349c337c",
             "4eaf6174f5ac01be0236932cedb45d4d8c47f2889c7678160584c4fa25444e80",
         ],
         "ee-ambient-session-capture-suggest" => &[
+            // Complete wrapper from main before context-window refresh.
+            "7c1ca88b8ae48bdb5f87e274c1db83221aa337e9b90a8b6abbbb5027d0797b62",
             "5ca5423d0b8aefa6ded06fdb263f55ba69287b8eaa41a3f03eb72e02382dccd6",
             "68013e18e5ddd40694c1a3700a5c280449944b4b00157ec1336c9e7e09db20bb",
         ],
@@ -6492,6 +6545,156 @@ for definition in payload["definitions"]:
     invalid_cache.rename(invalid_state / "preserved-directory")
     assert finish(spawn(definition, invalid_state, "shared", "memory"))["seen"] is False
     assert finish(spawn(definition, invalid_state, "shared", "memory"))["seen"] is True
+"####,
+        )
+    }
+
+    #[cfg(unix)]
+    fn run_ambient_context_boundary_probe(probe: &str) -> TestResult {
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        let input = serde_json::json!({
+            "cwd": temp.path(),
+            "scripts": {
+                "orient": format!("{}\n{}", python_invocation_recorder(), session_start_python()),
+                "recall": format!("{}\n{}", python_invocation_recorder(), pre_edit_python()),
+                "capture": format!("{}\n{}", python_invocation_recorder(), session_end_capture_python()),
+            },
+        });
+        let harness = r####"import json, os, pathlib, subprocess, sys, time
+payload = json.load(sys.stdin)
+root = pathlib.Path(payload["cwd"])
+workspace = root / "workspace"
+workspace.mkdir()
+transcript = workspace / "transcript.jsonl"
+transcript.write_text("initial context\n", encoding="utf-8")
+state = root / "shared-state"
+calls = root / "calls.log"
+binary = root / "ee-context-probe"
+binary.write_text("#!" + sys.executable + "\n" + r'''
+import json, os, pathlib, sys
+with pathlib.Path(os.environ["EE_HOOK_TEST_CALLS"]).open("a") as log:
+    log.write("call\n")
+if sys.argv[1] == "capture":
+    data = {"suggestions": [{"proposedFields": {"content": "Preserve the observed recovery", "kind": "fact"}, "confidence": 0.8, "acceptCommand": "ee capture accept candidate-1", "rejectCommand": "ee capture reject candidate-1"}]}
+else:
+    data = {"ambientContext": {"text": "Preserve committed transaction boundaries.", "omittedBlocks": 0}}
+print(json.dumps({"success": True, "data": data, "degraded": []}))
+''', encoding="utf-8")
+binary.chmod(0o700)
+def spawn(surface, event, verbosity="standard", gate=None):
+    env = dict(os.environ, EE_AMBIENT_CONTEXT="true", EE_AMBIENT_CONTEXT_VERBOSITY=verbosity,
+               EE_AMBIENT_CONTEXT_STATE_DIR=str(state), EE_HOOK_TEST_CALLS=str(calls))
+    code = payload["scripts"][surface]
+    if gate is not None:
+        env["EE_HOOK_TEST_GATE"] = str(gate)
+        code = "import os, time\nwhile not os.path.exists(os.environ['EE_HOOK_TEST_GATE']): time.sleep(0.001)\n" + code
+    child = subprocess.Popen([sys.executable, "-c", code, str(binary)], cwd=root,
+                             env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+    child.stdin.write(json.dumps(event))
+    child.stdin.close()
+    child.stdin = None
+    return child
+def finish(child):
+    output, error = child.communicate(timeout=12)
+    assert child.returncode == 0 and not error, (child.returncode, output, error)
+    return json.loads(output) if output else None
+def run(surface, event, verbosity="standard"):
+    return finish(spawn(surface, event, verbosity))
+common = {"cwd": str(workspace), "session_id": "session-one", "transcript_path": "transcript.jsonl"}
+start = dict(common, hook_event_name="SessionStart", source="startup")
+edit = dict(common, hook_event_name="PreToolUse", tool_name="Edit", tool_input={"file_path": "src/lib.rs"})
+capture = dict(common, hook_event_name="Stop")
+def advance(label):
+    with transcript.open("a", encoding="utf-8") as stream:
+        stream.write(label + "\n")
+"####;
+        let output =
+            run_python_hook_state_probe(&format!("{harness}\n{probe}"), &input, temp.path())?;
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ambient_context_boundaries_restore_scoped_claims_and_quiet_recall() -> TestResult {
+        run_ambient_context_boundary_probe(
+            r####"for surface, event in [("orient", start), ("recall", edit), ("capture", capture)]:
+    assert run(surface, event) is not None
+    assert run(surface, event) is None, "ordinary repeats must stay suppressed"
+other_session = dict(edit, session_id="session-two")
+other_workspace = root / "other-workspace"
+other_workspace.mkdir()
+other_edit = dict(edit, cwd=str(other_workspace))
+assert run("recall", other_session) is not None
+assert run("recall", other_edit) is not None
+for index, kind in enumerate(["compact", "compact", "clear", "resume", "normalized"]):
+    advance("boundary-" + str(index))
+    boundary = dict(start, source=kind)
+    if kind == "normalized":
+        boundary = dict(common, hook_event_name="CompactionResume", resume={"compacted": True})
+    assert run("orient", boundary) is not None
+    assert run("orient", boundary) is None, "the same stable boundary must reset only once"
+    for surface, event in [("recall", edit), ("capture", capture)]:
+        assert run(surface, event) is not None, "context lost at compaction must be replayable"
+        assert run(surface, event) is None
+    assert run("orient", boundary) is None
+    assert run("recall", edit) is None, "duplicate lifecycle hooks must not clear fresh edit claims"
+    assert run("recall", other_session) is None, "another session must retain its claims"
+    assert run("recall", other_edit) is None, "another workspace must retain its claims"
+advance("quiet-compact")
+quiet_boundary = dict(start, source="compact")
+before_calls = calls.read_text()
+assert run("orient", quiet_boundary, "quiet") is None
+assert calls.read_text() == before_calls, "quiet must not invoke orientation"
+assert run("recall", edit, "quiet") is not None
+assert run("recall", edit, "quiet") is None
+assert run("orient", quiet_boundary, "quiet") is None
+assert run("recall", edit, "quiet") is None, "duplicate quiet hooks must not clear fresh claims"
+for transcript_path in ["missing.jsonl", str(workspace), "x" * 4097]:
+    boundary = dict(start, source="compact", transcript_path=transcript_path)
+    assert run("orient", boundary) is not None, "unidentified boundaries must fail open"
+    assert run("orient", start) is None, "forced replay must still register its own claim"
+    assert run("recall", edit) is not None
+    assert run("recall", edit) is None
+cache_text = (state / "ambient_context_seen.json").read_text()
+cache = json.loads(cache_text)
+assert len(cache) <= 1024 and len(cache_text.encode("utf-8")) <= 262144
+assert str(transcript) not in cache_text and "session-one" not in cache_text
+"####,
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ambient_context_boundary_serializes_parallel_reset_and_claims() -> TestResult {
+        run_ambient_context_boundary_probe(
+            r####"assert run("orient", start) is not None
+assert run("recall", edit) is not None
+advance("parallel-compact")
+boundary = dict(start, source="compact")
+gate = root / "boundary-ready"
+children = [spawn("orient", boundary, gate=gate) for _ in range(4)]
+gate.touch()
+outputs = [finish(child) for child in children]
+assert sum(output is not None for output in outputs) == 1, outputs
+assert run("orient", boundary) is None
+assert run("recall", edit) is not None
+assert run("recall", edit) is None
+
+# A busy cache must not suppress the fresh context. The best-effort claim
+# after replay also leaves later ordinary startup de-duplication intact.
+import fcntl
+advance("locked-compact")
+with (state / "ambient_context_seen.json.lock").open("a+b") as lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    started = time.monotonic()
+    assert run("orient", boundary) is not None
+    assert time.monotonic() - started < 3
+assert run("orient", boundary) is not None
+assert run("orient", boundary) is None
+assert run("orient", start) is None
 "####,
         )
     }

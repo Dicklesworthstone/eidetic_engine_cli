@@ -1473,7 +1473,7 @@ fn install_reclaims_released_wrappers_without_claiming_user_python() -> TestResu
     let wrappers = fixture["wrappers"].as_array().unwrap();
     assert_eq!(
         wrappers.len(),
-        12,
+        16,
         "exercise every published or prior-main body"
     );
     for target in [HarnessHookTarget::ClaudeCode, HarnessHookTarget::Codex] {
