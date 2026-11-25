@@ -12,6 +12,7 @@
       "profile": "compact",
       "maxTokens": 4000,
       "candidatePool": 10,
+      "recencyReferenceUnixMinute": 29624400,
       "maxResults": 1,
       "memoryScope": "swarm",
       "strictScope": false,
