@@ -1266,11 +1266,12 @@ the closed daemon hot-mode surface.
 | `clustering_no_candidates` | info | bd-17c65.7.5 (G5) |
 | `clustering_no_embeddings` | info | bd-17c65.7.5 (G5) |
 
-#### Miscellaneous (46)
+#### Miscellaneous (47)
 | Code | Severity | Bead |
 |------|----------|------|
 | `action_override_not_actionable` | low | (TBD) |
 | `advisory_memory` | info | (TBD) — advisory-memory presence marker |
+| `backup_code_anchor_freshness_unavailable` | warning | bd-reality-core-convergence-1azkt.88 — authenticated backup lacks canonical freshness history for explicit code anchors; restore retains locators with Suspect freshness |
 | `backup_evidence_admission_reduced` | warning | bd-reality-core-convergence-1azkt.13 — export privacy redaction reduces persisted evidence eligibility; measured source and artifact counts remain distinct |
 | `backup_memory_provenance_unavailable` | warning | bd-reality-core-convergence-1azkt.88 — legacy backup contains memories without authenticated provenance history; restore preserves missing commitments without generating or verifying replacements |
 | `backup_rule_redaction_review_required` | warning | bd-reality-core-convergence-1azkt.88 — redaction changes live native rule instructions or scope; authenticated recovery retains negative history and evidence while requiring fresh review without prior positive authority |

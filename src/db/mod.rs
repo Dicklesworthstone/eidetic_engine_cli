@@ -28182,6 +28182,35 @@ impl DbConnection {
         rows.iter().map(stored_memory_anchor_from_row).collect()
     }
 
+    /// Apply authenticated backup state to an already imported explicit code
+    /// binding. The recovery caller validates the carrier and exact identities.
+    /// Unlike ordinary upsert, this retains historical generations and clocks;
+    /// it does not create a binding or perform a new freshness observation.
+    pub(crate) fn restore_code_anchor_state_for_recovery(
+        &self,
+        anchor: &StoredMemoryAnchor,
+    ) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memory_anchors SET redacted_anchor_value = ?1, confidence = ?2, source = ?3, provenance = ?4, captured_span_hash = ?5, freshness_state = ?6, generation = ?7, created_at = ?8, updated_at = ?9 WHERE memory_id = ?10 AND anchor_kind = ?11 AND anchor_value_hash = ?12 AND EXISTS (SELECT 1 FROM memory_code_anchor_sources WHERE memory_id = ?10 AND anchor_kind = ?11 AND anchor_value_hash = ?12)",
+            &[
+                Value::Text(anchor.redacted_anchor_value.clone()),
+                Value::Float(anchor.confidence),
+                Value::Text(anchor.source.as_str().to_owned()),
+                Value::Text(anchor.provenance.clone()),
+                Value::Text(anchor.captured_span_hash.clone()),
+                Value::Text(anchor.freshness_state.as_str().to_owned()),
+                Value::BigInt(anchor.generation),
+                Value::Text(anchor.created_at.clone()),
+                Value::Text(anchor.updated_at.clone()),
+                Value::Text(anchor.memory_id.clone()),
+                Value::Text(anchor.anchor_kind.as_str().to_owned()),
+                Value::Text(anchor.anchor_value_hash.clone()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
     /// Read selected memories' anchors without loading their bodies or derived
     /// index metadata. Missing and anchor-free memories have no map entry.
     /// The caller owns the snapshot; a failed read never returns a partial map.

@@ -806,6 +806,7 @@ fn provenance_expectation_rejects_incomplete_duplicate_or_substituted_carriers()
                 legacy.chunk_index = 1;
                 legacy.schema = crate::core::backup::TRUST_HISTORY_SCHEMA_V1.to_owned();
                 legacy.memory_provenance = None;
+                legacy.code_anchor_states = None;
                 additional = Some(legacy);
             }
             7 => chunk.memory_provenance = Some(Vec::new()),
@@ -1036,6 +1037,7 @@ fn public_verification_rejects_invalid_provenance_before_any_restore_writes() ->
                 legacy.chunk_index = 1;
                 legacy.schema = crate::core::backup::TRUST_HISTORY_SCHEMA_V1.to_owned();
                 legacy.memory_provenance = None;
+                legacy.code_anchor_states = None;
                 sign_admission_trust_chunk(&mut legacy, &root)?;
                 additional = Some(legacy);
             }
@@ -1164,6 +1166,7 @@ fn public_provenance_admission_accepts_redacted_ids_and_explicit_legacy_history(
         .map_err(|error| error.to_string())?;
         legacy.schema = crate::core::backup::TRUST_HISTORY_SCHEMA_V1.to_owned();
         legacy.memory_provenance = None;
+        legacy.code_anchor_states = None;
         let root = StoreAuthRoot::open(workspace_keys_dir(&fixture.options.workspace_path))
             .map_err(|error| error.to_string())?;
         sign_admission_trust_chunk(&mut legacy, &root)?;
@@ -1179,6 +1182,448 @@ fn public_provenance_admission_accepts_redacted_ids_and_explicit_legacy_history(
                 .any(|entry| { entry.code == "backup_memory_provenance_unavailable" })
         );
         assert!(!options.side_path.exists());
+    }
+    Ok(())
+}
+
+
+fn code_anchor_fixture(level: RedactionLevel, missing: bool) -> Result<Fixture, String> {
+    use crate::models::MemoryAnchorKind::{Path, Symbol};
+
+    provenance_fixture(level, |db| {
+        for (number, kind, locator, freshness) in [
+            (2, Path, "src/current.rs", "current"),
+            (3, Symbol, "History::suspect", "suspect"),
+            (4, Path, "src/stale.rs", "stale"),
+            (7, Symbol, "History::tombstone", "suspect"),
+            (8, Path, "src/superseded.rs", "stale"),
+        ] {
+            let id = provenance_memory_id(number);
+            let surface = crate::models::CreateMemoryAnchorInput::from_stored_code_surface(
+                &id,
+                kind,
+                locator,
+                crate::models::MemoryAnchorSource::Explicit,
+                "recovery fixture",
+            )
+            .ok_or("invalid fixture locator")?;
+            db.attach_memory_code_anchor_sources(&workspace_id(), &id, &[surface])
+                .map_err(|error| error.to_string())?;
+            // Seed independent of the recovery writer, including generation
+            // zero, old clocks, and canonical provenance unlike the binding.
+            db.execute_raw(&format!(
+                "UPDATE memory_anchors SET confidence = 0.375, source = 'remember', provenance = 'api_key=PRIVATE_CODE_ANCHOR_SOURCE', captured_span_hash = '{}', freshness_state = '{freshness}', generation = 0, created_at = '2026-07-01T00:00:00Z', updated_at = '2026-08-01T00:00:00Z' WHERE memory_id = '{id}'",
+                hash_bytes(b"PRIVATE_CAPTURED_CODE_SPAN"),
+            ))
+            .map_err(|error| error.to_string())?;
+        }
+        if missing {
+            db.execute_raw(&format!(
+                "DELETE FROM memory_anchors WHERE memory_id = '{}'",
+                provenance_memory_id(2),
+            ))
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })
+}
+
+fn read_code_anchor_state(
+    db: &DbConnection,
+) -> Result<BTreeMap<BackupCodeAnchorKey, BackupCodeAnchorSnapshot>, String> {
+    let mut states = BTreeMap::new();
+    for memory in db
+        .list_memories(&workspace_id(), None, true)
+        .map_err(|error| error.to_string())?
+    {
+        let anchors = db
+            .list_memory_anchors(&memory.id)
+            .map_err(|error| error.to_string())?;
+        for surface in db
+            .list_memory_code_anchor_sources(&memory.id)
+            .map_err(|error| error.to_string())?
+        {
+            let anchor = anchors
+                .iter()
+                .find(|anchor| {
+                    anchor.anchor_kind == surface.anchor.anchor_kind
+                        && anchor.anchor_value_hash == surface.anchor.anchor_value_hash
+                })
+                .ok_or("canonical fixture anchor missing")?;
+            states.insert(
+                (
+                    memory.id.clone(),
+                    anchor.anchor_kind.as_str().to_owned(),
+                    anchor.anchor_value_hash.clone(),
+                ),
+                BackupCodeAnchorSnapshot::from(anchor),
+            );
+        }
+    }
+    Ok(states)
+}
+
+fn read_code_anchor_chunk(fixture: &Fixture) -> Result<BackupTrustHistory, String> {
+    serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .options
+                .backup_path
+                .join("derived/trust-history/00000000.json"),
+        )
+        .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[test]
+fn explicit_code_anchor_history_survives_restore_and_rebackup() -> TestResult {
+    let fixture = code_anchor_fixture(RedactionLevel::None, false)?;
+    let source = DbConnection::open_file(&fixture.database).map_err(|error| error.to_string())?;
+    let expected = read_code_anchor_state(&source)?;
+    assert_eq!(
+        expected.len(),
+        5,
+        "includes a tombstone and superseded revision"
+    );
+    source.close().map_err(|error| error.to_string())?;
+    let first = restore_backup_to_side_path(&fixture.options).map_err(|error| error.message())?;
+    assert!(
+        !first
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "backup_code_anchor_freshness_unavailable")
+    );
+    let db = DbConnection::open_file(&first.restored_database_path)
+        .map_err(|error| error.to_string())?;
+    assert_eq!(read_code_anchor_state(&db)?, expected);
+    let path_candidates = db
+        .query_anchor_index_path_candidates(&workspace_id(), None, 100)
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        path_candidates
+            .iter()
+            .find(|row| row.memory_id == provenance_memory_id(4))
+            .ok_or("rebuilt stale path is missing")?
+            .freshness_state,
+        crate::models::MemoryAnchorFreshnessState::Stale,
+    );
+    let symbol_candidates = db
+        .query_anchor_index_symbol_candidates(
+            &workspace_id(),
+            &["History::suspect".to_owned()],
+            100,
+        )
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        symbol_candidates
+            .iter()
+            .find(|row| row.memory_id == provenance_memory_id(3))
+            .ok_or("rebuilt suspect symbol is missing")?
+            .freshness_state,
+        crate::models::MemoryAnchorFreshnessState::Suspect,
+    );
+    db.close().map_err(|error| error.to_string())?;
+    let backup = create_backup(&BackupCreateOptions {
+        workspace_path: fixture.options.side_path.clone(),
+        database_path: Some(PathBuf::from(&first.restored_database_path)),
+        output_dir: None,
+        label: None,
+        redaction_level: RedactionLevel::None,
+        include_derived: false,
+        include_graph_cache: false,
+        dry_run: false,
+    })
+    .map_err(|error| error.message())?;
+    let second = restore_backup_to_side_path(&BackupRestoreOptions {
+        workspace_path: fixture.options.side_path,
+        backup_path: PathBuf::from(backup.backup_path),
+        side_path: fixture.root.path().join("anchors-second"),
+        restore_graph_cache: false,
+        dry_run: false,
+    })
+    .map_err(|error| error.message())?;
+    let db = DbConnection::open_file(&second.restored_database_path)
+        .map_err(|error| error.to_string())?;
+    assert_eq!(read_code_anchor_state(&db)?, expected);
+    db.close().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn redacted_code_anchor_history_retains_negative_states_without_private_commitments() -> TestResult {
+    let fixture = code_anchor_fixture(RedactionLevel::Strict, false)?;
+    let chunk = read_code_anchor_chunk(&fixture)?;
+    let encoded = serde_json::to_string(&chunk).map_err(|error| error.to_string())?;
+    assert!(!encoded.contains("PRIVATE_CODE_ANCHOR_SOURCE"));
+    assert!(!encoded.contains(&hash_bytes(b"PRIVATE_CAPTURED_CODE_SPAN")));
+    let restored =
+        restore_backup_to_side_path(&fixture.options).map_err(|error| error.message())?;
+    let db = DbConnection::open_file(&restored.restored_database_path)
+        .map_err(|error| error.to_string())?;
+    let states = read_code_anchor_state(&db)?;
+    assert_eq!(states.len(), 5);
+    for ((memory_id, _, _), state) in states {
+        let negative = if [provenance_memory_id(4), provenance_memory_id(8)].contains(&memory_id) {
+            "stale"
+        } else {
+            "suspect"
+        };
+        assert_eq!(state.freshness_state, negative);
+        assert_eq!(state.confidence, 0.375);
+        assert_eq!(state.generation, 0);
+        assert_eq!(state.created_at, "2026-07-01T00:00:00Z");
+        assert_eq!(state.updated_at, "2026-08-01T00:00:00Z");
+        assert!(!state.provenance.contains("PRIVATE_CODE_ANCHOR_SOURCE"));
+    }
+    db.close().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn missing_canonical_code_anchor_is_explicitly_unavailable_and_restores_suspect() -> TestResult {
+    let fixture = code_anchor_fixture(RedactionLevel::None, true)?;
+    let chunk = read_code_anchor_chunk(&fixture)?;
+    let states = chunk.code_anchor_states.ok_or("missing v3 carrier")?;
+    assert_eq!(states.len(), 5);
+    assert!(
+        states
+            .iter()
+            .any(|row| row.memory_id == provenance_memory_id(2) && row.state.is_none())
+    );
+    for dry_run in [true, false] {
+        let mut options = fixture.options.clone();
+        options.dry_run = dry_run;
+        let report = restore_backup_to_side_path(&options).map_err(|error| error.message())?;
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "backup_code_anchor_freshness_unavailable")
+        );
+        if !dry_run {
+            let db = DbConnection::open_file(&report.restored_database_path)
+                .map_err(|error| error.to_string())?;
+            let states = read_code_anchor_state(&db)?;
+            assert_eq!(states.len(), 5);
+            let state = states
+                .iter()
+                .find(|(key, _)| key.0 == provenance_memory_id(2))
+                .ok_or("missing restored locator")?;
+            assert_eq!(state.1.freshness_state, "suspect");
+            db.close().map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn legacy_anchor_history_keeps_old_wire_authentication_and_reports_suspect_locators() -> TestResult {
+    // Independently spell the shipped v2 shape so new optional fields cannot
+    // silently change the exact bytes authenticated by the older writer.
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LegacyV2<'a> {
+        schema: &'a str,
+        backup_id: &'a str,
+        workspace_id: &'a str,
+        chunk_index: usize,
+        chunk_count: usize,
+        seals: &'a [MemorySeal],
+        quarantines: &'a [StoredTrustQuarantine],
+        certificates: &'a [StoredCertificateRecord],
+        agents: &'a [StoredAgent],
+        memory_provenance: &'a Option<Vec<BackupMemoryProvenance>>,
+        authentication: Option<crate::policy::import_auth::AuthenticatedHeader>,
+    }
+    for schema in ["ee.backup.trust_history.v1", "ee.backup.trust_history.v2"] {
+        let fixture = code_anchor_fixture(RedactionLevel::None, false)?;
+        let mut chunk = read_code_anchor_chunk(&fixture)?;
+        let wire = serde_json::to_vec(&LegacyV2 {
+            schema: "ee.backup.trust_history.v2",
+            backup_id: &chunk.backup_id,
+            workspace_id: &chunk.workspace_id,
+            chunk_index: 0,
+            chunk_count: 1,
+            seals: &chunk.seals,
+            quarantines: &chunk.quarantines,
+            certificates: &chunk.certificates,
+            agents: &chunk.agents,
+            memory_provenance: &chunk.memory_provenance,
+            authentication: None,
+        })
+        .map_err(|error| error.to_string())?;
+        let decoded: BackupTrustHistory =
+            serde_json::from_slice(&wire).map_err(|error| error.to_string())?;
+        assert_eq!(
+            serde_json::to_vec(&decoded).map_err(|error| error.to_string())?,
+            wire
+        );
+        chunk = decoded;
+        chunk.schema = schema.to_owned();
+        if schema.ends_with(".v1") {
+            chunk.memory_provenance = None;
+        }
+        let root = StoreAuthRoot::open(workspace_keys_dir(&fixture.options.workspace_path))
+            .map_err(|error| error.to_string())?;
+        sign_admission_trust_chunk(&mut chunk, &root)?;
+        let (_, mut manifest) =
+            read_backup_manifest(&fixture.options.backup_path).map_err(|error| error.message())?;
+        let inventory = manifest["recoveryInventory"]["tables"]
+            .as_array_mut()
+            .ok_or("missing inventory")?;
+        let anchors = inventory
+            .iter_mut()
+            .find(|row| row["table"] == "memory_anchors")
+            .ok_or("missing anchor inventory")?;
+        anchors["disposition"] = serde_json::json!("derived_rebuildable");
+        anchors["coverage"] = serde_json::json!("rebuild_on_restore");
+        write_admission_archive(&fixture, &manifest, &[chunk], &root)?;
+        for dry_run in [true, false] {
+            let mut options = fixture.options.clone();
+            options.dry_run = dry_run;
+            let report = restore_backup_to_side_path(&options).map_err(|error| error.message())?;
+            assert!(
+                report
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "backup_code_anchor_freshness_unavailable")
+            );
+            assert_eq!(
+                report
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "backup_memory_provenance_unavailable"),
+                schema.ends_with(".v1")
+            );
+            if !dry_run {
+                let db = DbConnection::open_file(&report.restored_database_path)
+                    .map_err(|error| error.to_string())?;
+                let states = read_code_anchor_state(&db)?;
+                assert_eq!(states.len(), 5);
+                assert!(
+                    states
+                        .values()
+                        .all(|state| state.freshness_state == "suspect")
+                );
+                db.close().map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn public_admission_rejects_code_anchor_coverage_or_mac_changes_before_writes() -> TestResult {
+    let fixture = code_anchor_fixture(RedactionLevel::None, false)?;
+    let original = read_code_anchor_chunk(&fixture)?;
+    let (_, manifest) =
+        read_backup_manifest(&fixture.options.backup_path).map_err(|error| error.message())?;
+    let root = StoreAuthRoot::open(workspace_keys_dir(&fixture.options.workspace_path))
+        .map_err(|error| error.to_string())?;
+    for defect in ["missing", "duplicate", "substituted", "tampered_mac"] {
+        let mut chunk = original.clone();
+        let states = chunk.code_anchor_states.as_mut().ok_or("missing states")?;
+        match defect {
+            "missing" => {
+                states.pop().ok_or("empty states")?;
+            }
+            "duplicate" => {
+                states[1] = states[0].clone();
+            }
+            "substituted" => {
+                states[0].anchor_value_hash = hash_bytes(b"wrong binding");
+            }
+            "tampered_mac" => {
+                states[0]
+                    .state
+                    .as_mut()
+                    .ok_or("missing canonical state")?
+                    .confidence = 0.9;
+            }
+            _ => return Err("unhandled anchor defect".to_owned()),
+        }
+        if defect != "tampered_mac" {
+            sign_admission_trust_chunk(&mut chunk, &root)?;
+        }
+        write_admission_archive(&fixture, &manifest, &[chunk], &root)?;
+        let verified = verify_backup(&BackupVerifyOptions {
+            workspace_path: fixture.options.workspace_path.clone(),
+            backup_path: fixture.options.backup_path.clone(),
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(verified.status, "failed", "accepted {defect}");
+        assert!(
+            verified
+                .issues
+                .iter()
+                .any(|issue| issue.code == "trust_history_invalid")
+        );
+        for dry_run in [true, false] {
+            let mut options = fixture.options.clone();
+            options.side_path = fixture
+                .root
+                .path()
+                .join(format!("bad-anchor-{defect}-{dry_run}"));
+            options.dry_run = dry_run;
+            assert!(
+                restore_backup_to_side_path(&options).is_err(),
+                "accepted {defect}"
+            );
+            assert!(!options.side_path.exists());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn both_restore_fences_reject_code_anchor_metadata_changes_without_count_changes() -> TestResult {
+    let fixture = code_anchor_fixture(RedactionLevel::None, false)?;
+    for late in [false, true] {
+        for (field, assignment) in [
+            ("freshness", "freshness_state = 'current'"),
+            ("confidence", "confidence = 0.9"),
+            (
+                "capture",
+                "captured_span_hash = 'blake3:0000000000000000000000000000000000000000000000000000000000000000'",
+            ),
+            ("generation", "generation = 12"),
+            ("source", "source = 'explicit'"),
+            ("provenance", "provenance = 'changed'"),
+            ("created", "created_at = '2026-01-01T00:00:00Z'"),
+            ("updated", "updated_at = '2026-10-01T00:00:00Z'"),
+        ] {
+            let mut options = fixture.options.clone();
+            options.side_path = fixture.root.path().join(format!("anchor-{late}-{field}"));
+            let mut reached = false;
+            let mutate = |path: &std::path::Path| {
+                reached = true;
+                let db = DbConnection::open_file(path).map_err(work_history_error)?;
+                let before = read_code_anchor_state(&db).map_err(work_history_error)?;
+                db.execute_raw(&format!(
+                    "UPDATE memory_anchors SET {assignment} WHERE memory_id = '{}'",
+                    provenance_memory_id(8),
+                ))
+                .map_err(work_history_error)?;
+                let after = read_code_anchor_state(&db).map_err(work_history_error)?;
+                assert_eq!(before.len(), after.len());
+                assert_ne!(before, after);
+                db.close().map_err(work_history_error)
+            };
+            let result = if late {
+                restore_backup_to_side_path_with_recovery_hooks(&options, |_| Ok(()), mutate)
+            } else {
+                restore_backup_to_side_path_with_recovery_hooks(&options, mutate, |_| Ok(()))
+            };
+            let error = result.err().ok_or("published changed anchor state")?;
+            assert!(reached);
+            assert!(
+                error.message().contains("code-anchor state differs"),
+                "{}",
+                error.message()
+            );
+            assert!(!options.side_path.join(WORKSPACE_MARKER).exists());
+        }
     }
     Ok(())
 }
