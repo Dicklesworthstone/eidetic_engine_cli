@@ -6,8 +6,8 @@
 // `recursion_depth_exceeding_limit` lint and therefore fails
 // `clippy -D warnings`. This raises a compiler resource bound; it does not
 // silence the lint, and rustc itself recommends exactly this remedy.
-// The lib-test E0275 of 2026-11-24 is not a depth problem: it failed identically
-// at 512, with no limit suggestion. See `run_context_pack_attempt_boxed`.
+// The lib-test E0275 of 2026-11-24 was not a depth problem: it failed identically
+// at 512, with no limit suggestion. See `source_memory_lexical_hits`.
 #![recursion_limit = "256"]
 #![cfg_attr(target_vendor = "apple", feature(peer_credentials_unix_socket))]
 #![cfg_attr(windows, feature(windows_by_handle))]

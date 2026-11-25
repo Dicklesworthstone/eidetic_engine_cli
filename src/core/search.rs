@@ -15533,9 +15533,8 @@ fn admit_global_memories_for_local_snapshot(
     if memories.is_empty() {
         return false;
     }
-    let verified = connection.is_some_and(|db| {
-        retain_global_memories_without_local_owners(db, memories).is_ok()
-    });
+    let verified = connection
+        .is_some_and(|db| retain_global_memories_without_local_owners(db, memories).is_ok());
     if verified {
         return !memories.is_empty();
     }
@@ -15972,16 +15971,16 @@ async fn supplement_global_tombstone_hits(
         .iter()
         .map(|hit| hit.doc_id.as_str())
         .collect::<BTreeSet<_>>();
-    let mut retired = memories
+    let retired = memories
         .iter()
         .filter(|memory| {
             memory.tombstoned_at.is_some() && !indexed_ids.contains(memory.id.as_str())
         })
-        .peekable();
-    if retired.peek().is_none() {
+        .collect::<Vec<_>>();
+    if retired.is_empty() {
         return;
     }
-    match source_memory_lexical_hits(cx, options, retired).await {
+    match source_memory_lexical_hits(cx, options, &retired).await {
         Ok(historical) if !historical.is_empty() => {
             degraded.push(SearchDegradation {
                 code: "search_tombstone_snapshot_lexical".to_owned(),
@@ -16017,7 +16016,10 @@ async fn retrieve_global_store_live_snapshot(
     trace: &mut SearchPerformanceTrace,
 ) -> Vec<SearchHit> {
     let global_search_start = Instant::now();
-    let result = source_memory_lexical_hits(cx, options, &memories).await;
+    let result = {
+        let memory_refs = memories.iter().collect::<Vec<_>>();
+        source_memory_lexical_hits(cx, options, &memory_refs).await
+    };
     trace.record_elapsed("search::globalRetrieve", global_search_start);
     match result {
         Ok(hits) => {
@@ -16106,7 +16108,8 @@ async fn tombstone_snapshot_hits(
         if memories.is_empty() {
             return Ok(Vec::new());
         }
-        let result = source_memory_lexical_hits(cx, options, &memories).await;
+        let memory_refs = memories.iter().collect::<Vec<_>>();
+        let result = source_memory_lexical_hits(cx, options, &memory_refs).await;
         search_checkpoint(cx)?;
         match result {
             Ok(hits) => Ok(hits),
@@ -16121,10 +16124,18 @@ async fn tombstone_snapshot_hits(
     }
 }
 
-async fn source_memory_lexical_hits<'memory>(
+/// Scores `memories` with an in-memory Frankensearch lexical index.
+///
+/// Keep `memories` a concrete slice. On 2026-11-24 this took
+/// `impl IntoIterator<Item = &'memory StoredMemory>`, and with a closure-filtered
+/// iterator as the argument rustc could no longer prove `Send` for any future
+/// that awaits it (rust-lang/rust#100013: the bound ties two lifetimes that the
+/// auto-trait check erases). The pack future is one of those, so the lib-test
+/// build failed E0275 at the LabRuntime task in `context_test_module.rs`.
+async fn source_memory_lexical_hits(
     cx: &asupersync::Cx,
     options: &SearchOptions,
-    memories: impl IntoIterator<Item = &'memory StoredMemory>,
+    memories: &[&StoredMemory],
 ) -> Result<Vec<SearchHit>, String> {
     #[cfg(not(feature = "lexical-bm25"))]
     {
@@ -16138,7 +16149,7 @@ async fn source_memory_lexical_hits<'memory>(
         let mut documents = Vec::new();
         let mut body_bytes = 0_u64;
         let mut projected_bytes = 0_u64;
-        for memory in memories {
+        for &memory in memories {
             search_checkpoint(cx).map_err(|error| error.to_string())?;
             body_bytes = body_bytes.saturating_add(memory.content.len() as u64);
             if documents.len() >= SEARCH_LIVE_SNAPSHOT_MAX_DOCUMENTS as usize

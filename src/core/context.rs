@@ -2983,43 +2983,6 @@ async fn run_context_pack_with_performance_inner(
     .await
 }
 
-type ContextPackAttemptFuture<'a> = std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = Result<ContextPackPerformanceRun, ContextPackError>>
-            + Send
-            + 'a,
-    >,
->;
-
-/// The local retry inside [`run_context_pack_attempt`], erased to `dyn Future + Send`.
-///
-/// `run_context_pack_attempt` awaits itself once, on a rejected daemon handoff. Boxed as
-/// its own opaque type, proving the pack future `Send` (which a task spawned on a runtime
-/// requires) has to walk that type through its own body. The recursion dates from
-/// 2026-11-02 and compiled until the 2026-11-24 changes to the search futures it awaits;
-/// then the lib-test build failed E0275 at recursion limits 256 and 512 alike, without
-/// rustc's suggestion to raise the limit. The trait object ends the walk.
-fn run_context_pack_attempt_boxed<'a>(
-    options: &'a ContextPackOptions,
-    command: &'static str,
-    determinism: &'a mut Deterministic<Seed>,
-    pack_record_persistence: PackRecordPersistence,
-    control: ContextPackControl<'a>,
-    fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
-    attempt: ContextPackAttempt,
-) -> ContextPackAttemptFuture<'a> {
-    Box::pin(run_context_pack_attempt(
-        options,
-        command,
-        determinism,
-        pack_record_persistence,
-        control,
-        fast_embedder_override,
-        None,
-        attempt,
-    ))
-}
-
 #[allow(clippy::expect_used, clippy::too_many_arguments)]
 async fn run_context_pack_attempt(
     options: &ContextPackOptions,
@@ -3310,19 +3273,20 @@ async fn run_context_pack_attempt(
         drop(validated_handoff_feedback);
         drop(read_snapshot);
         trace.record_elapsed("daemonHandoffRejected", total_start);
-        let mut run = run_context_pack_attempt_boxed(
+        let mut run = Box::pin(run_context_pack_attempt(
             options,
             command,
             determinism,
             pack_record_persistence,
             control,
             fast_embedder_override,
+            None,
             ContextPackAttempt {
                 total_start,
                 embedder_resolved_before,
                 trace,
             },
-        )
+        ))
         .await?;
         push_search_degradations(
             &mut run.response.data.degraded,

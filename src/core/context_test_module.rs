@@ -15807,8 +15807,9 @@ pub fn unrelated_context() -> u64 {{
             } else {
                 let local_hit = local_hit.ok_or("missing local owner")?;
                 assert_eq!(
-                    local_hit.ranking_components_json().ok_or("missing local score")?["inputs"]
-                        ["harmfulCount"],
+                    local_hit
+                        .ranking_components_json()
+                        .ok_or("missing local score")?["inputs"]["harmfulCount"],
                     0,
                 );
             }
