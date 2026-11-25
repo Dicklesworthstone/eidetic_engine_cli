@@ -1,7 +1,8 @@
 // Every word and figure on the home page that is not inside an explainer.
 // Figures are counted from the repository at the commit named in COUNTED, and
 // each one says where it comes from; the explainers in components/explain/
-// cite their own sources on their own faces.
+// name their basis on their faces and cite their sources in each figure's
+// "Sources and assumptions" disclosure.
 
 const REPO = "https://github.com/Dicklesworthstone/eidetic_engine_cli";
 
