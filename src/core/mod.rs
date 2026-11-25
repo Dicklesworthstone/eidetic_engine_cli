@@ -719,7 +719,6 @@ impl StorelessWorkspaceAssessment {
         let candidate_retargets = storeless_workspace_candidate_retargets(&discovery);
         let init_command = format!("ee init {addressed_workspace_argument}");
         let recovery_actions = storeless_workspace_recovery_actions(
-            &addressed_store_path,
             &addressed_workspace_path,
             &addressed_workspace_argument,
             &candidate_retargets,
@@ -837,8 +836,13 @@ fn storeless_workspace_root(database_path: &std::path::Path) -> std::path::PathB
     .to_path_buf()
 }
 
+/// No `EE_DATABASE_PATH` action: workspace commands open `--database`, or
+/// `<workspace>/.ee/ee.db` without it, and do not read that variable, so an
+/// agent that followed the old action changed nothing and hit the same miss
+/// (bd-env-store-override-advertised-not-read-p6iqy). Nor a `--database`
+/// action, since that flag belongs to individual subcommands and not every
+/// caller of this error has it.
 fn storeless_workspace_recovery_actions(
-    addressed_store_path: &str,
     addressed_workspace_path: &str,
     addressed_workspace_argument: &str,
     retargets: &[StorelessWorkspaceRetarget],
@@ -852,19 +856,6 @@ fn storeless_workspace_recovery_actions(
     );
     addressed.example = Some(addressed_workspace_argument.to_owned());
     let mut actions = vec![addressed];
-    if retargets.is_empty() {
-        let mut database = crate::models::RecoveryAction::env(
-            2,
-            "EE_DATABASE_PATH",
-            addressed_store_path,
-            "Re-check the exact addressed database override before initializing a new store.",
-        );
-        database.example = Some(format!(
-            "EE_DATABASE_PATH={}",
-            shell_quote_repair_arg(addressed_store_path)
-        ));
-        actions.push(database);
-    }
     for (index, retarget) in retargets.iter().enumerate() {
         let priority = u8::try_from(index.saturating_add(2)).unwrap_or(u8::MAX - 1);
         let mut action = crate::models::RecoveryAction::flag(

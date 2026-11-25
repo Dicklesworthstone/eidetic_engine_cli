@@ -2130,8 +2130,8 @@ Environment variable overrides:
 
 | Variable | Equivalent |
 |---|---|
-| `EE_DATABASE_PATH` | `[storage].database_path` |
-| `EE_INDEX_DIR`     | `[storage].index_dir` |
+| `EE_DATABASE_PATH` | `[storage].database_path`, parsed but not yet read (see `[storage]` above) |
+| `EE_INDEX_DIR`     | `[storage].index_dir`, parsed but not yet read |
 | `EE_PROFILE`       | `[pack].default_profile` |
 | `EE_MAX_TOKENS`    | `[pack].default_max_tokens` |
 | `EE_AGENT_NAME` | agent identity for outcome attribution and per-agent bias |

@@ -32,22 +32,6 @@
         },
         {
           "priority": 2,
-          "kind": "env",
-          "rationale": "Re-check the exact addressed database override before initializing a new store.",
-          "riskClass": "read_only_probe",
-          "requiresHumanApproval": false,
-          "mutatesExternalState": false,
-          "mutatesTrackerState": false,
-          "privacyClass": "metadata_only",
-          "evidence": [
-            "recovery_kind_without_command"
-          ],
-          "envName": "EE_DATABASE_PATH",
-          "valueHint": "<isolatedRoot>/missing-ee-workspace/.ee/ee.db",
-          "example": "EE_DATABASE_PATH=<isolatedRoot>/missing-ee-workspace/.ee/ee.db"
-        },
-        {
-          "priority": 3,
           "kind": "seed",
           "rationale": "Only initialize when this exact addressed workspace was intentionally chosen for a new store.",
           "riskClass": "mutating_local_repair",

@@ -262,18 +262,23 @@ pub struct PathEntry {
     pub env_override: Option<&'static str>,
 }
 
+/// `env_override` names a variable only when commands read it to resolve the
+/// path. `EE_DATABASE_PATH` and `EE_INDEX_DIR` are registered and feed the
+/// merged `[storage]` config, but workspace commands open `--database` or the
+/// `<workspace>/.ee` default regardless, so neither is listed
+/// (bd-env-store-override-advertised-not-read-p6iqy).
 pub const DEFAULT_PATHS: &[PathEntry] = &[
     PathEntry {
         name: "database",
         default: "<workspace>/.ee/ee.db",
         description: "SQLite database storing memories, sessions, and metadata",
-        env_override: Some(EnvVar::DatabasePath.name()),
+        env_override: None,
     },
     PathEntry {
         name: "index_dir",
         default: "<workspace>/.ee/index/",
         description: "Directory containing search indexes",
-        env_override: Some(EnvVar::IndexDir.name()),
+        env_override: None,
     },
     PathEntry {
         name: "config",
@@ -1635,6 +1640,24 @@ mod tests {
         for path in DEFAULT_PATHS {
             ensure(!path.name.is_empty(), "path name non-empty")?;
             ensure(!path.default.is_empty(), "path default non-empty")?;
+        }
+        Ok(())
+    }
+
+    /// bd-env-store-override-advertised-not-read-p6iqy: workspace commands
+    /// resolve the store from `--database` or `<workspace>/.ee` and read
+    /// neither variable, so listing one as a path override tells agents to set
+    /// something that changes nothing. List it again only with its resolver.
+    #[test]
+    fn default_paths_advertise_no_store_override_commands_ignore() -> TestResult {
+        for path in DEFAULT_PATHS {
+            ensure(
+                !matches!(
+                    path.env_override,
+                    Some(name) if name == EnvVar::DatabasePath.name() || name == EnvVar::IndexDir.name()
+                ),
+                format!("{} advertises an override no command reads", path.name),
+            )?;
         }
         Ok(())
     }

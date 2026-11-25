@@ -253,20 +253,6 @@ export const SITUATIONS: readonly Situation[] = [
             },
             {
               priority: 2,
-              kind: "env",
-              rationale: "Re-check the exact addressed database override before initializing a new store.",
-              riskClass: "read_only_probe",
-              requiresHumanApproval: false,
-              mutatesExternalState: false,
-              mutatesTrackerState: false,
-              privacyClass: "metadata_only",
-              evidence: ["recovery_kind_without_command"],
-              envName: "EE_DATABASE_PATH",
-              valueHint: "/workspace/missing/.ee/ee.db",
-              example: "EE_DATABASE_PATH=/workspace/missing/.ee/ee.db",
-            },
-            {
-              priority: 3,
               kind: "seed",
               rationale: "Only initialize when this exact addressed workspace was intentionally chosen for a new store.",
               riskClass: "mutating_local_repair",
@@ -297,7 +283,7 @@ export const SITUATIONS: readonly Situation[] = [
     reading: {
       envelope: "schema is ee.error.v2, so the command failed and the details are in the error object.",
       broke: "Exit 10 means the addressed workspace has no store; a storage failure would be exit 3. Discovery completed and found no populated store nearby.",
-      plan: "Re-check the workspace path first and the database override second. ee init is last, and only for a store you meant to create.",
+      plan: "Re-check the workspace path first. ee init is last, and only for a store you meant to create.",
       safety: "A read-only probe. The entry is a flag to re-check and carries no command.",
       act: {
         commands: ["--workspace /workspace/missing"],

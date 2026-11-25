@@ -2341,7 +2341,9 @@ impl DomainError {
             // A missing addressed store is not evidence that the caller
             // intended to create a new one. Agents follow recovery actions
             // mechanically, so point at an existing workspace first and
-            // keep state creation last and explicitly conditional.
+            // keep state creation last and explicitly conditional. No
+            // EE_DATABASE_PATH action: workspace commands do not read it
+            // (bd-env-store-override-advertised-not-read-p6iqy).
             Self::Storage { .. } if message.contains("database not found") => {
                 vec![
                 RecoveryAction::flag(
@@ -2350,14 +2352,8 @@ impl DomainError {
                     "<path>",
                     "Re-check the addressed path and point at the intended initialized workspace.",
                 ),
-                RecoveryAction::env(
-                    2,
-                    "EE_DATABASE_PATH",
-                    "<absolute path to ee.db>",
-                    "Override the default <workspace>/.ee/ee.db location when the database lives elsewhere.",
-                ),
                 RecoveryAction {
-                    priority: 3,
+                    priority: 2,
                     kind: RecoveryKind::Seed,
                     rationale: "Only if this path was intentionally chosen for a new store, initialize it explicitly."
                         .to_owned(),
@@ -3044,18 +3040,27 @@ mod tests {
             repair: Some("ee init --workspace .".to_owned()),
         };
         let actions = error.recovery_actions();
-        assert_eq!(actions.len(), 3, "expected 3 options, got {actions:?}");
+        assert_eq!(actions.len(), 2, "expected 2 options, got {actions:?}");
         assert_eq!(actions[0].kind, super::RecoveryKind::Flag);
         assert_eq!(actions[0].priority, 1);
         assert_eq!(actions[0].flag_name.as_deref(), Some("--workspace"));
-        assert_eq!(actions[1].kind, super::RecoveryKind::Env);
-        assert_eq!(actions[1].env_name.as_deref(), Some("EE_DATABASE_PATH"));
-        assert_eq!(actions[2].kind, super::RecoveryKind::Seed);
-        assert_eq!(actions[2].priority, 3);
+        assert_eq!(actions[1].kind, super::RecoveryKind::Seed);
+        assert_eq!(actions[1].priority, 2);
         assert_eq!(
-            actions[2].command.as_deref(),
+            actions[1].command.as_deref(),
             Some("ee init --workspace ."),
             "ee init must remain the final, conditional recovery action"
+        );
+        // Workspace commands resolve the store from --database or
+        // <workspace>/.ee/ee.db and read no environment variable for it, so an
+        // env action here is an instruction that changes nothing
+        // (bd-env-store-override-advertised-not-read-p6iqy). Restore one only
+        // together with a resolver that reads it.
+        assert!(
+            actions
+                .iter()
+                .all(|action| action.kind != super::RecoveryKind::Env),
+            "a store miss must not advertise an env override no command reads: {actions:?}"
         );
     }
 

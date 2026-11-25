@@ -257,15 +257,8 @@ fn error_envelope_workspace_store_missing_matches_required_fixture() -> TestResu
         "Re-check the exact addressed workspace before selecting another store.",
     );
     addressed_workspace.example = Some("--workspace /workspace/missing".to_owned());
-    let mut addressed_store = RecoveryAction::env(
-        2,
-        "EE_DATABASE_PATH",
-        "/workspace/missing/.ee/ee.db",
-        "Re-check the exact addressed database override before initializing a new store.",
-    );
-    addressed_store.example = Some("EE_DATABASE_PATH=/workspace/missing/.ee/ee.db".to_owned());
     let initialize = RecoveryAction {
-        priority: 3,
+        priority: 2,
         kind: RecoveryKind::Seed,
         rationale:
             "Only initialize when this exact addressed workspace was intentionally chosen for a new store."
@@ -294,7 +287,7 @@ fn error_envelope_workspace_store_missing_matches_required_fixture() -> TestResu
             },
         })
         .to_string(),
-        recovery_actions: vec![addressed_workspace, addressed_store, initialize],
+        recovery_actions: vec![addressed_workspace, initialize],
     };
 
     let json = error_response_json(&error);

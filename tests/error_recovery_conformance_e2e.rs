@@ -427,11 +427,23 @@ fn assert_storage_recovery_contract(case: &ConformanceCase, output: &Output) -> 
 
     let recovery = array_at(&json, "/error/details/recovery", case.id)?;
     ensure(
-        recovery.len() == 3,
+        recovery.len() == 2,
         format!(
-            "{}: expected exactly 3 recovery actions, got {}",
+            "{}: expected exactly 2 recovery actions, got {}",
             case.id,
             recovery.len()
+        ),
+    )?;
+    // Workspace commands read no environment variable for the store, so an
+    // env action is an instruction that changes nothing
+    // (bd-env-store-override-advertised-not-read-p6iqy).
+    ensure(
+        recovery
+            .iter()
+            .all(|action| action["kind"] != serde_json::json!("env")),
+        format!(
+            "{}: a store miss must not advertise an env override no command reads",
+            case.id
         ),
     )?;
     ensure(
@@ -455,23 +467,11 @@ fn assert_storage_recovery_contract(case: &ConformanceCase, output: &Output) -> 
             case.id
         ),
     )?;
-    let database_assignment = format!("EE_DATABASE_PATH={}", shell_quote_cli_arg(addressed_store));
-    ensure(
-        recovery[1]["priority"] == serde_json::json!(2)
-            && recovery[1]["kind"] == serde_json::json!("env")
-            && recovery[1]["envName"] == serde_json::json!("EE_DATABASE_PATH")
-            && recovery[1]["valueHint"] == serde_json::json!(addressed_store)
-            && recovery[1]["example"] == serde_json::json!(database_assignment),
-        format!(
-            "{}: second recovery action must expose the exact database override",
-            case.id
-        ),
-    )?;
     let init_command = format!("ee init {addressed_argument}");
     ensure(
-        recovery[2]["priority"] == serde_json::json!(3)
-            && recovery[2]["kind"] == serde_json::json!("seed")
-            && recovery[2]["command"] == serde_json::json!(init_command.as_str()),
+        recovery[1]["priority"] == serde_json::json!(2)
+            && recovery[1]["kind"] == serde_json::json!("seed")
+            && recovery[1]["command"] == serde_json::json!(init_command.as_str()),
         format!(
             "{}: ee init must be the final conditional recovery action",
             case.id
@@ -481,7 +481,7 @@ fn assert_storage_recovery_contract(case: &ConformanceCase, output: &Output) -> 
     let repair = string_at(&json, "/error/repair", case.id)?;
     ensure(
         repair.contains(&format!(
-            "Re-check --workspace addressing with {addressed_argument} (looked for"
+            "Re-check --workspace addressing with {addressed_argument} (looked for {addressed_store})"
         )),
         format!(
             "{}: freetext repair must lead with addressing and the looked-for path, got: {repair}",
