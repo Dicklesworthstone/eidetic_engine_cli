@@ -1612,9 +1612,20 @@ fn strict_semantic_search_publishes_a_small_delta_without_reembedding_a_larger_c
         // Exercise the ordinary pre-read reconciliation path, with the full
         // rebuild ceiling exceeded and a single durable document change.
         let run = run_search_with_performance(&options).unwrap();
+        // Reconciliation failures are only logged, so carry what the report
+        // says about freshness into the failure (bd-q1e4y: the first run
+        // ranked fixture memory 1 first, i.e. the delta was not scored).
         assert_eq!(
             run.report.results[0].doc_id,
-            remembered.memory_id.to_string()
+            remembered.memory_id.to_string(),
+            "delta not ranked first; embedder calls since remember: {}; index_freshness: {:?}; degraded: {:?}",
+            embedder.calls.load(Ordering::Relaxed) - calls_before,
+            run.report.index_freshness,
+            run.report
+                .degraded
+                .iter()
+                .map(|entry| entry.code.as_str())
+                .collect::<Vec<_>>()
         );
         assert!(run.report.results[0].fast_score.is_some());
         assert_eq!(
