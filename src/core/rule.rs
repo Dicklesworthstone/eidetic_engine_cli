@@ -7179,7 +7179,7 @@ mod tests {
             .map_err(PlaybookImportError::Invalid)?;
             // A real primary-key violation after the first rule, its tags,
             // audit and durable index job have all been inserted.
-            plan.rules[1].1.rule_id = plan.rules[0].1.rule_id.clone();
+            plan.rules[1].1.rule_id = plan.rules[0].1.rule_id;
             persist_playbook_import_plan(&connection, &mut prepared, &workspace_path, plan)
         });
         ensure(result.is_err(), "the second insert must fail")?;
