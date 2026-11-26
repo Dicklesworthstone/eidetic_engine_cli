@@ -5367,6 +5367,26 @@ fn search_score_calibration_for_workspace_cached(
     .0
 }
 
+/// Bind duplicate daemon reads to the same calibration and complete feedback
+/// authority used by pack handoffs. The caller supplies its own pinned source
+/// snapshot and releases it before joining a potentially long-running leader.
+/// An unavailable witness never establishes equivalence between requests.
+#[cfg(unix)]
+pub(crate) fn search_calibration_input_identity(
+    workspace_path: &Path,
+    database_path: &Path,
+    connection: &DbConnection,
+    reference_time: DateTime<Utc>,
+) -> Option<String> {
+    search_score_calibration_for_workspace_cached(
+        workspace_path,
+        Some(database_path),
+        Some(connection),
+        reference_time,
+    )
+    .input_identity()
+}
+
 fn search_score_calibration_with_feedback<'a>(
     workspace_path: &Path,
     database_path: Option<&Path>,
