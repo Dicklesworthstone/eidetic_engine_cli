@@ -129,7 +129,7 @@ fn build_fnx_graph(fixture: &Fixture) -> TestResult<DiGraph> {
 }
 
 #[cfg(feature = "differential-networkx")]
-fn run_networkx(fixture: &Fixture) -> TestResult<NetworkxReport> {
+fn networkx_centrality_report(fixture: &Fixture) -> TestResult<NetworkxReport> {
     let payload = serde_json::json!({
         "nodes": &fixture.nodes,
         "edges": &fixture.edges,
@@ -160,12 +160,13 @@ print(json.dumps({
     "out_degree": top_scores(nx.out_degree_centrality(graph)),
 }, sort_keys=True))
 "#;
-    run_python_json(script, &payload)
+    run_networkx(script, &payload)
 }
 
-/// Runs `script` under python3 with `payload` on stdin and parses its stdout.
+/// Runs a NetworkX `script` under python3 with `payload` on stdin and parses
+/// its stdout.
 #[cfg(feature = "differential-networkx")]
-fn run_python_json<T: DeserializeOwned>(
+fn run_networkx<T: DeserializeOwned>(
     script: &str,
     payload: &serde_json::Value,
 ) -> TestResult<T> {
@@ -291,7 +292,7 @@ fn assert_top3_match(
 fn fnx_centrality_topk_matches_networkx_on_fixed_fixture() -> TestResult {
     let fixture = networkx_fixture();
     let graph = build_fnx_graph(&fixture)?;
-    let networkx = run_networkx(&fixture)?;
+    let networkx = networkx_centrality_report(&fixture)?;
 
     let fnx_degree = top_scores(degree_centrality_directed(&graph).scores);
     let fnx_in_degree = top_scores(in_degree_centrality(&graph));
@@ -347,7 +348,7 @@ fn build_weighted_ppr_graph(fixture: &Fixture) -> TestResult<DiGraph> {
 }
 
 #[cfg(feature = "differential-networkx")]
-fn run_networkx_ppr(
+fn networkx_ppr_scores(
     fixture: &Fixture,
     seeds: &BTreeMap<String, f64>,
     policy: PersonalizedPageRankPolicy,
@@ -397,7 +398,7 @@ print(json.dumps([
     for node, score in sorted(scores.items(), key=lambda item: (-item[1], item[0]))
 ]))
 "#;
-    run_python_json(script, &payload)
+    run_networkx(script, &payload)
 }
 
 /// bd-reality-core-convergence-1azkt.82: ee's personalized PageRank, which
@@ -426,7 +427,7 @@ fn ee_weighted_personalized_pagerank_matches_networkx_on_fixed_fixture() -> Test
     if !ee.converged {
         return Err("ee personalized PageRank did not converge within 1000 iterations".to_owned());
     }
-    let networkx = run_networkx_ppr(&fixture, &seeds, policy)?;
+    let networkx = networkx_ppr_scores(&fixture, &seeds, policy)?;
     if ee.scores.len() != fixture.nodes.len() || networkx.len() != fixture.nodes.len() {
         return Err(format!(
             "both sides must score every node: ee={} networkx={} nodes={}",
