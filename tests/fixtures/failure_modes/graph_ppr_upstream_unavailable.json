@@ -8,6 +8,11 @@
   "surfaces": ["pack", "context"],
   "severity": "medium",
   "repair_present": true,
+  "retired": true,
+  "retired_by": {
+    "bead": "bd-reality-core-convergence-1azkt.82",
+    "reason": "FrankenNetworkX 0.4.1 ships personalized_pagerank, so graph::ppr computes PPR through it and the context rerank, Pack DNA PPR neighbors and suggest-links signal run again in production."
+  },
   "trigger": {
     "description": "Pack PPR influence is requested while the pinned FrankenNetworkX release lacks deterministic personalized PageRank. Turning the feature on gives ee pack a PPR weight of graph.ppr.alpha (0.30 by default), and the rerank runs once the pack has a candidate.",
     "setup_commands": [

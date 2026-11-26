@@ -508,7 +508,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `ask_conflicting_evidence` | warning | bd-169v0.5 (QA) |
 | `ask_semantic_degraded` | info | bd-169v0.5 (QA) |
 | `cass_limited` | info | bd-1et0v.14 (doctor-health) |
-| `graph_ppr_upstream_unavailable` | medium | bd-reality-core-convergence-1azkt.15 (G) |
+| `graph_ppr_upstream_unavailable` | medium | bd-reality-core-convergence-1azkt.15 (G), retired by bd-reality-core-convergence-1azkt.82 — historical stand-down while pinned FrankenNetworkX had no personalized PageRank; fnx 0.4.1 provides it |
 | `graph_remote_projection_stale` | medium | bd-nnheo — emitted at src/graph/mod.rs:4493 when `stale_edge_count > 0`, and src/graph/mod.rs:9949 already asserts it reaches `remoteGraph.degradedCodes[0]`, so this is a live user-visible code rather than a declaration. Severity DERIVED, not invented, from two independent readings that agree: the closest functional analogue is `search_index_stale` (medium) — a query surface served from a stale index — and medium is also the mode of the classified `graph_*` family. |
 | `graph_witness_unparseable_recorded_at` | medium | bd-bife.25 (G) |
 | `import_index_publish_failed` | warning | bd-index-auto-freshness-m5kwf (I) |
@@ -1055,7 +1055,7 @@ success artifact or lane grant. All three codes are `response_time`.
 | `graph_snapshot_topology_unavailable` | low | bd-17c65.5.3 (E3) |
 | `graph_snapshot_unusable` | high | bd-17c65.5.3 (E3) |
 
-#### Graph accretion sentinels (13 — response_time variants of graph_unavailable)
+#### Graph accretion sentinels (14 — response_time variants of graph_unavailable)
 | Code | Severity | Bead |
 |------|----------|------|
 | `graph_ppr_snapshot_stale` | medium | bd-bife.6 |
@@ -1070,6 +1070,7 @@ success artifact or lane grant. All three codes are `response_time`.
 | `graph_skyline_degenerate_communities` | info | bd-bife.6 |
 | `graph_hits_convergence_failure` | warning | bd-bife.6 |
 | `graph_louvain_declined` | medium | bd-reality-core-convergence-1azkt.82 (G) — FrankenNetworkX declined Louvain because the total edge weight leaves modularity undefined (every link weighs 0); `ee graph louvain` reports singleton communities with status `declined` |
+| `graph_suggest_links_ppr_failed` | warning | bd-reality-core-convergence-1azkt.82 (G) — FrankenNetworkX personalized PageRank failed for some `ee graph suggest-links` seeds (budget exhaustion, cancellation); their candidate pairs score a PPR signal of 0 while the other link signals still rank them |
 | `graph_scale_gomory_hu_skipped` | low | bd-bife.17 / bd-reality-core-convergence-1azkt.83 — Gomory-Hu proximity tree construction is skipped above `GOMORY_HU_SKIP_THRESHOLD_NODES` in `ee insights` |
 
 #### Graph NUMA pinning (4 — response_time)

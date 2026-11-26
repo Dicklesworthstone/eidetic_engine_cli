@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils";
  * The spans ee records while it builds a pack (src/core/context.rs, `trace.record_elapsed`), in the order
  * they start. `count` is an illustrative candidate count after the stage, not a measurement.
  */
-type Status = "always" | "optional" | "off" | "unavailable";
+type Status = "always" | "optional" | "off";
 
 export interface Stage {
   span: string;
@@ -100,10 +100,10 @@ export const STAGES: readonly Stage[] = [
   {
     span: "pprRerank",
     name: "Personalized PageRank",
-    what: "Would rerank candidates by graph proximity to the query. It is wired but unavailable in production: the pinned FrankenNetworkX revision has no deterministic personalized-PageRank API, so turning it on (graph.feature.ppr.enabled) reports a degradation and ranking stays textual. It is off by default, and then the stage passes candidates through untouched.",
-    status: "unavailable",
-    statusNote: "pass-through",
-    code: "graph_ppr_upstream_unavailable",
+    what: "Reranks candidates by personalized PageRank over the memory links, seeded by their search scores and computed by FrankenNetworkX: each score becomes (1 − w) × relevance + w × PPR. ee pack takes w from graph.ppr.alpha (0.30 by default); ee context also takes --ppr-weight. It is off by default, and then the stage passes candidates through untouched.",
+    status: "off",
+    statusNote: "graph.feature.ppr.enabled, off by default",
+    code: "graph_ppr_snapshot_stale",
     count: 52,
   },
   {
@@ -127,7 +127,6 @@ const STATUS: Record<Status, { label: string; className: string }> = {
   always: { label: "every pack", className: "border-violet-300/30 text-violet-200" },
   optional: { label: "when it applies", className: "border-sky-300/30 text-sky-200" },
   off: { label: "opt-in", className: "border-white/15 text-slate-300" },
-  unavailable: { label: "unavailable", className: "border-amber-300/40 text-amber-200" },
 };
 
 const STEP_MS = 1800;
@@ -152,8 +151,7 @@ function StageDetail({ stage, index }: { stage: Stage; index: number }) {
       {stage.code ? (
         <p className="mt-3 font-mono text-[11px] text-slate-500">
           reports, when it applies: <span className="text-amber-200/90">{stage.code}</span>
-          {/* Codes only, no repairs. ee pack has no --ppr-weight: it reads the weight from config
-              (graph.feature.ppr.enabled, off by default), which is the switch ee's repair for this code names. */}
+          {/* Codes only, no repairs: the figure says what a stage can report, not how to clear it. */}
         </p>
       ) : null}
     </>
@@ -175,9 +173,8 @@ export const MULTIPLIERS: readonly { name: string; rule: string; low: number; hi
 const SCALE_MAX = 1.6;
 
 /**
- * How ee builds a pack, stage by stage: the twelve spans of its timing trace in order, what each does, which are
- * conditional or off, and the one (personalized PageRank) that is wired but unavailable. Below it, the two
- * retrieval arms and the multipliers that order candidates.
+ * How ee builds a pack, stage by stage: the twelve spans of its timing trace in order, what each does, and which
+ * are conditional or opt-in. Below it, the two retrieval arms and the multipliers that order candidates.
  */
 export function PackPipeline() {
   const [active, setActive] = useState(0);
@@ -204,9 +201,9 @@ export function PackPipeline() {
         <>
           src/core/context.rs · the spans recorded by trace.record_elapsed, apply_memory_tier_candidate_admission
           (CONTEXT_MEMORY_TIER_HOT_BOOST 0.025, WARM 0.010), filter_candidates_by_instruction_authority,
-          apply_personalized_pagerank_rerank · src/core/search.rs · DEFAULT_SEARCH_LEXICAL_WEIGHT 0.45,
-          DEFAULT_SEARCH_SEMANTIC_WEIGHT 0.45, RRF k = 60 · src/search/scoring.rs · SearchScoreComponents · README
-          · Limitations (personalized PageRank). The trace also records embedderPrepare, the daemon handoff&apos;s
+          apply_personalized_pagerank_rerank (DEFAULT_CONTEXT_PPR_WEIGHT 0.30) · src/graph/ppr.rs · src/core/search.rs ·
+          DEFAULT_SEARCH_LEXICAL_WEIGHT 0.45, DEFAULT_SEARCH_SEMANTIC_WEIGHT 0.45, RRF k = 60 · src/search/scoring.rs ·
+          SearchScoreComponents. The trace also records embedderPrepare, the daemon handoff&apos;s
           validation, sub-spans and the total, which the figure leaves out. Candidate counts on the stages are
           illustrative.
         </>
@@ -235,7 +232,7 @@ export function PackPipeline() {
           {STAGES.map((item, index) => {
             const on = index === active;
             const past = index < active;
-            const muted = item.status === "off" || item.status === "unavailable";
+            const muted = item.status === "off";
             return (
               <li key={item.span} className="relative">
                 <button
@@ -270,7 +267,7 @@ export function PackPipeline() {
                       <span
                         className={cn(
                           "h-1.5 w-1.5 rounded-full",
-                          item.status === "unavailable" ? "bg-amber-300" : item.status === "off" ? "bg-slate-500" : "bg-sky-300",
+                          item.status === "off" ? "bg-slate-500" : "bg-sky-300",
                         )}
                         aria-hidden="true"
                       />
@@ -303,20 +300,12 @@ export function PackPipeline() {
           <span className="flex items-center gap-1.5">
             <span className="h-1.5 w-1.5 rounded-full bg-slate-500" aria-hidden="true" /> opt-in
           </span>
-          <span className="flex items-center gap-1.5">
-            <span className="h-1.5 w-1.5 rounded-full bg-amber-300" aria-hidden="true" /> unavailable
-          </span>
         </p>
 
         {/* The stage in focus. Every stage's text sits invisibly in the same grid cell, so the box is always as
             tall as the longest one and the page below it does not jump while the run plays. While it plays the
             region is not live, so a screen reader is not read a new stage every 1.8 seconds. */}
-        <div
-          className={cn(
-            "mt-4 grid rounded-2xl border p-4 sm:p-5",
-            stage.status === "unavailable" ? "border-amber-300/25 bg-amber-300/[0.04]" : "border-white/[0.08] bg-black/25",
-          )}
-        >
+        <div className="mt-4 grid rounded-2xl border border-white/[0.08] bg-black/25 p-4 sm:p-5">
           {STAGES.map((item, index) => (
             <div key={item.span} className="invisible col-start-1 row-start-1 min-w-0" aria-hidden="true">
               <StageDetail stage={item} index={index} />

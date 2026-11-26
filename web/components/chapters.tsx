@@ -996,7 +996,7 @@ function ComparisonTable() {
         </table>
       </div>
       <figcaption className="border-t border-white/[0.06] px-5 py-3.5 font-mono text-[11px] text-slate-500 sm:px-6">
-        README, &ldquo;Comparison&rdquo;. &ldquo;Graph analytics&rdquo; excludes personalized PageRank, which is pending upstream.
+        README, &ldquo;Comparison&rdquo;.
       </figcaption>
     </figure>
   );

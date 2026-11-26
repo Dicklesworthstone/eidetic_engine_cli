@@ -61,13 +61,22 @@ describe("figure 03.1: the stages of ee pack", () => {
     expect(source("src/config/merge.rs")).toContain("memory_tier_admission: Some(false),");
   });
 
-  test("personalized PageRank: off by default, and unavailable when turned on", () => {
+  test("personalized PageRank: off by default, FrankenNetworkX's when on", () => {
+    const ppr = STAGES.find((stage) => stage.span === "pprRerank")!;
+    expect(ppr.status).toBe("off");
     expect(source("src/config/merge.rs")).toContain("ppr_enabled: Some(false),");
     // With the feature off, ee pack's weight resolves to 0 and the stage returns before ranking anything.
     expect(context).toContain("if !config.graph.feature.ppr_enabled.unwrap_or(false) {");
     expect(context).toContain("if candidates.is_empty() || ppr_weight == 0.0 {");
-    expect(context).toMatch(/#\[cfg\(not\(test\)\)\]\s*\{\s*push_graph_ppr_upstream_unavailable_degradation\(degraded\);/);
-    // The figure quotes no repair because ee's says --ppr-weight, which ee pack does not take.
+    // When on, it runs in production (no test-only gate) and blends as the figure says.
+    expect(context).not.toContain("graph_ppr_upstream_unavailable");
+    expect(context).toContain("let blended = (ppr_weight * ppr_score) + ((1.0 - ppr_weight) * base);");
+    expect(context).toContain("pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;");
+    expect(ppr.what).toContain("0.30");
+    expect(source("src/graph/ppr.rs")).toContain("fnx_algorithms::personalized_pagerank(");
+    expect(ppr.code).toBe("graph_ppr_snapshot_stale");
+    expect(source("src/models/degradation.rs")).toContain('GRAPH_PPR_SNAPSHOT_STALE_CODE: &str = "graph_ppr_snapshot_stale"');
+    // The figure says only ee context takes --ppr-weight; ee pack reads graph.ppr.alpha.
     const packArgs = source("src/cli/mod.rs").match(/pub struct PackArgs \{[\s\S]*?\n\}/)?.[0] ?? "";
     expect(packArgs).toContain("pub max_tokens");
     expect(packArgs).not.toContain("ppr_weight");

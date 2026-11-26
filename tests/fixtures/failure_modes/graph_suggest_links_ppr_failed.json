@@ -1,0 +1,22 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_suggest_links_ppr_failed",
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.82",
+    "epic_letter": "G"
+  },
+  "surfaces": ["graph suggest-links"],
+  "severity": "warning",
+  "repair_present": false,
+  "repair_unavailable_reason": "A seed's PPR run fails on budget exhaustion or cancellation over a large memory graph. No flag bounds the walk, and the suggestions are still ranked by their other signals.",
+  "trigger": {
+    "description": "`ee graph suggest-links` seeds one FrankenNetworkX personalized PageRank run per candidate endpoint (up to 64). A run that exceeds the graph algorithm budget or is cancelled is counted instead of dropped: its candidate pairs carry a PPR signal of 0, and Adamic-Adar, tag overlap, retrieval affinity and preferential attachment still rank them. Reproducing it needs a memory graph large enough to exhaust the foreground budget.",
+    "setup_commands": ["ee init --workspace ."],
+    "invocation": "ee graph suggest-links --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_suggest_links_ppr_failed",
+    "severity": "warning",
+    "message_contains": ["Personalized PageRank failed for", "seed memories", "no PPR signal"]
+  }
+}

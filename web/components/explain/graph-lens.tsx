@@ -454,8 +454,8 @@ export function GraphLens() {
         <>
           README · Graph and Graph-derived insights command tables · docs/configuration/graph.md · every
           graph.feature.* flag defaults to false · src/db/mod.rs · MemoryLinkRelation · src/models/context_profile.rs ·
-          hits_boost_weights (grounding, orientation, balanced) · src/graph/decay.rs · compute_onion_layers · personalized
-          PageRank: graph_ppr_upstream_unavailable
+          hits_boost_weights (grounding, orientation, balanced) · src/graph/decay.rs · compute_onion_layers ·
+          src/graph/ppr.rs · fnx_algorithms::personalized_pagerank
         </>
       }
     >
@@ -662,8 +662,8 @@ export function GraphLens() {
         </div>
       </div>
 
-      {/* Current status, as three states: what runs, what is switched off, and what is not available. */}
-      <ul aria-label="Current status" className="mt-6 grid grid-cols-1 gap-3 text-[13px] leading-snug md:grid-cols-3">
+      {/* Current status, as two states: what runs on demand and what is switched off. */}
+      <ul aria-label="Current status" className="mt-6 grid grid-cols-1 gap-3 text-[13px] leading-snug md:grid-cols-2">
         <li className="rounded-xl border border-emerald-300/20 bg-emerald-300/[0.04] px-4 py-3">
           <p className="flex items-center gap-2 font-mono text-[10.5px] tracking-[0.16em] text-emerald-200/90 uppercase">
             <span aria-hidden="true" className="h-2 w-2 rounded-full bg-emerald-300" />
@@ -677,22 +677,9 @@ export function GraphLens() {
             Off by default
           </p>
           <p className="mt-2 text-slate-400">
-            The features that would change ranking, retention or pack explanations (Pack DNA, proximity, HITS profiles,
-            structural decay), and the knowledge skyline. Each is a{" "}
+            The features that would change ranking, retention or pack explanations (personalized PageRank, Pack DNA,
+            proximity, HITS profiles, structural decay), and the knowledge skyline. Each is a{" "}
             <span className="font-mono text-[12px] text-slate-300">graph.feature.*</span> flag.
-          </p>
-        </li>
-        <li className="rounded-xl border border-rose-300/20 bg-rose-300/[0.04] px-4 py-3">
-          <p className="flex items-center gap-2 font-mono text-[10.5px] tracking-[0.16em] text-rose-200/90 uppercase">
-            <span aria-hidden="true" className="text-[12px] leading-none text-rose-300">
-              ×
-            </span>
-            Not available
-          </p>
-          <p className="mt-2 text-slate-400">
-            Personalized PageRank: a request reports{" "}
-            <span className="font-mono text-[12px] text-slate-300">graph_ppr_upstream_unavailable</span> and falls back to
-            textual ranking.
           </p>
         </li>
       </ul>

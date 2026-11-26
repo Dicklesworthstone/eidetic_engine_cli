@@ -443,12 +443,8 @@ export const releases = [
 /** README "Limitations" and the ADRs: what is not done, said plainly. */
 export const limitations = [
   {
-    title: "Personalized PageRank is unavailable",
-    text: "The pinned graph library has no deterministic personalized PageRank yet, so that ranking signal and Pack DNA's PPR neighbors are unavailable; both report graph_ppr_upstream_unavailable and fall back. PageRank, HITS, Louvain and articulation points are unaffected.",
-  },
-  {
     title: "Most graph views are opt-in",
-    text: "Every graph.feature.* flag defaults to off, so ee proximity, ee why --causal-explain, ee health --robot-insights, the knowledge skyline and Pack DNA report graph_feature_disabled until you run ee config set graph.feature.<name>.enabled true. PageRank, HITS, Louvain and articulation points need no flag.",
+    text: "Every graph.feature.* flag defaults to off, so the personalized PageRank rerank, ee proximity, ee why --causal-explain, ee health --robot-insights, the knowledge skyline and Pack DNA report graph_feature_disabled until you run ee config set graph.feature.<name>.enabled true. PageRank, HITS, Louvain and articulation points need no flag.",
   },
   {
     title: "Determinism is per platform, and not yet gated across hosts",

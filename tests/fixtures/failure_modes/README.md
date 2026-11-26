@@ -288,6 +288,7 @@ in the same commit, keeping the catalog complete by construction.
 | `insights_section_unavailable` | insights | info | bd-113r0 (retired by bd-2pos6.4) |
 | `graph_algorithm_unavailable` | graph centrality | medium | bd-3usjw.2 |
 | `graph_louvain_declined` | graph louvain | medium | bd-reality-core-convergence-1azkt.82 (G) |
+| `graph_suggest_links_ppr_failed` | graph suggest-links | warning | bd-reality-core-convergence-1azkt.82 (G) |
 | `graph_snapshot_missing` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
 | `graph_snapshot_stale` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
 | `graph_snapshot_unusable` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
@@ -295,7 +296,7 @@ in the same commit, keeping the catalog complete by construction.
 | `graph_witness_unparseable_recorded_at` | maintenance graph-witnesses-prune | medium | bd-bife.25 |
 | `graph_ppr_snapshot_stale` | context | medium | bd-bife.6 |
 | `graph_ppr_empty_seed_set` | context | low | bd-bife.6 |
-| `graph_ppr_upstream_unavailable` | pack, context | medium | bd-reality-core-convergence-1azkt.15 (G) |
+| `graph_ppr_upstream_unavailable` | pack, context | medium | bd-reality-core-convergence-1azkt.15 (G) (retired by bd-reality-core-convergence-1azkt.82) |
 | `graph_pack_dna_no_dominator` | context | low | bd-bife.6 |
 | `graph_pack_dna_timeout` | context | low | bd-1prrl.8.4 |
 | `graph_causal_no_evidence` | why | low | bd-bife.6 |

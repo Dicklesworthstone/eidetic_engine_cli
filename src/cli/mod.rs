@@ -38075,12 +38075,68 @@ where
         };
         let candidates = generate_candidate_pairs(&prepared);
 
-        // bd-reality-core-convergence-1azkt.15 / .4: pinned FrankenNetworkX
-        // does not expose deterministic personalized PageRank. Production
-        // link suggestions must not run the local ACL-push kernel; prepared.ppr
-        // remains empty (signals.ppr = 0.0) and the missing upstream signal is
-        // reported in degraded[].
-        let ppr_upstream_unavailable = !candidates.is_empty();
+        // PPR is FrankenNetworkX's (bd-reality-core-convergence-1azkt.82). Each
+        // candidate endpoint, up to the seed cap, seeds its own run, and a
+        // pair's signal is the rank each endpoint gives the other. A seed whose
+        // run fails is counted and reported, not dropped.
+        const PPR_SEED_CAP: usize = 64;
+        let mut seeds: BTreeSet<String> = BTreeSet::new();
+        for (left, right) in &candidates {
+            if seeds.len() >= PPR_SEED_CAP {
+                break;
+            }
+            seeds.insert(left.clone());
+            if seeds.len() < PPR_SEED_CAP {
+                seeds.insert(right.clone());
+            }
+        }
+        let mut ppr_scores: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+        let mut ppr_failed_seeds = 0_usize;
+        let mut first_ppr_error: Option<String> = None;
+        for seed in &seeds {
+            let run = seed
+                .parse::<crate::models::MemoryId>()
+                .map_err(|error| format!("seed {seed} is not a memory ID: {error}"))
+                .and_then(|seed_id| {
+                    crate::graph::ppr::compute_personalized_pagerank(
+                        &input.directed,
+                        &BTreeMap::from([(seed_id, 1.0)]),
+                    )
+                    .map_err(|error| error.to_string())
+                });
+            match run {
+                Ok(scores) => {
+                    ppr_scores.insert(
+                        seed.clone(),
+                        scores
+                            .into_iter()
+                            .map(|(memory_id, score)| (memory_id.to_string(), score))
+                            .collect(),
+                    );
+                }
+                Err(error) => {
+                    ppr_failed_seeds = ppr_failed_seeds.saturating_add(1);
+                    first_ppr_error.get_or_insert(error);
+                }
+            }
+        }
+        for (left, right) in &candidates {
+            let forward = ppr_scores
+                .get(left)
+                .and_then(|scores| scores.get(right))
+                .copied()
+                .unwrap_or(0.0);
+            let backward = ppr_scores
+                .get(right)
+                .and_then(|scores| scores.get(left))
+                .copied()
+                .unwrap_or(0.0);
+            if forward + backward > 0.0 {
+                prepared
+                    .ppr
+                    .insert((left.clone(), right.clone()), forward + backward);
+            }
+        }
 
         // Content for typed relations, bounded to candidate endpoints.
         const CONTENT_FETCH_CAP: usize = 512;
@@ -38114,12 +38170,14 @@ where
         let report = suggest_links(&prepared);
 
         let mut degraded: Vec<serde_json::Value> = Vec::new();
-        if ppr_upstream_unavailable {
+        if let Some(error) = first_ppr_error {
             degraded.push(serde_json::json!({
-                "code": "graph_ppr_upstream_unavailable",
-                "severity": "info",
-                "message": "Personalized PageRank link-suggestion signal is disabled because pinned FrankenNetworkX does not expose deterministic personalized PageRank; suggestions use Adamic-Adar, tag overlap, retrieval affinity, and preferential attachment.",
-                "repair": "Upgrade FrankenNetworkX when deterministic personalized PageRank is available.",
+                "code": crate::models::degradation::GRAPH_SUGGEST_LINKS_PPR_FAILED_CODE,
+                "severity": "warning",
+                "message": format!(
+                    "Personalized PageRank failed for {ppr_failed_seeds} of {} seed memories, so their candidate pairs carry no PPR signal; Adamic-Adar, tag overlap, retrieval affinity and preferential attachment still rank them. First error: {error}",
+                    seeds.len()
+                ),
             }));
         }
         if report.affinity_cold {
@@ -84664,19 +84722,26 @@ mod tests {
                 &serde_json::json!(if cold { 0.0 } else { 2.5 }),
                 "stored affinity weight",
             )?;
-            ensure_equal(
-                &suggestions[0]["signals"]["ppr"],
-                &serde_json::json!(0.0),
-                "local PPR disabled in suggest-links while upstream fnx PPR is unavailable",
+            // bd-reality-core-convergence-1azkt.82: fnx PPR walks m0 -> m2 -> m1
+            // over the two `related` links, so the pair carries a PPR signal.
+            // The .15 stand-down pinned exactly 0.0 here.
+            ensure(
+                suggestions[0]["signals"]["ppr"]
+                    .as_f64()
+                    .is_some_and(|ppr| ppr.is_finite() && ppr > 0.0),
+                format!(
+                    "fnx PPR supplies the pair's ppr signal: {}",
+                    suggestions[0]["signals"]
+                ),
             )?;
             let degraded = response["degraded"]
                 .as_array()
                 .ok_or("missing degraded array")?;
             ensure(
-                degraded
-                    .iter()
-                    .any(|entry| entry["code"] == "graph_ppr_upstream_unavailable"),
-                "suggest-links reports graph_ppr_upstream_unavailable in degraded",
+                !degraded.iter().any(|entry| {
+                    entry["code"] == crate::models::degradation::GRAPH_SUGGEST_LINKS_PPR_FAILED_CODE
+                }),
+                format!("suggest-links PPR ran without a degradation: {degraded:?}"),
             )?;
             ensure_equal(
                 &degraded

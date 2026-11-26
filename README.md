@@ -75,7 +75,7 @@ durable learned memory (see [CASS Integration](#cass-integration)).
 | **Procedural rules with decay** | Confidence ages out, harmful feedback demotes faster than helpful feedback promotes |
 | **Anti-patterns first-class** | Explicit advisory queries surface matching risk, anti-pattern, and failure memories with provenance |
 | **Memory hygiene** | `ee curate doctor` ranks content debt, `ee learn gaps` turns missed demand into capture templates, and steward snapshots show whether hygiene is improving |
-| **Graph-aware** | PageRank, HITS, Gomory-Hu proximity, dominance, causal paths, structural health, Pack DNA, and skyline views. Personalized PageRank is the one exception: it is wired but **not currently available in production** — see [Limitations](#limitations) |
+| **Graph-aware** | PageRank, personalized PageRank, HITS, Gomory-Hu proximity, dominance, causal paths, structural health, Pack DNA, and skyline views |
 | **CASS session import** | Mines your existing `cass` corpus (Claude Code, Codex, Cursor, Gemini, ChatGPT) for evidence |
 | **Context profiles** | `compact`, `balanced`, `grounding`, `orientation`, `thorough`, and `submodular` quota/objective mixes |
 | **Local-first** | No cloud service or paid LLM API is required. Embeddings run locally through Frankensearch, with one-time pinned model download and offline hash fallback |
@@ -329,7 +329,7 @@ Every promotion, consolidation, replacement, and tombstone produces an audit ent
 | Procedural rules with decay | ✅ | ❌ | ❌ | ❌ |
 | Anti-patterns + harmful feedback | ✅ | ❌ | ❌ | manual |
 | Explainable scores | ✅ | ❌ | partial | n/a |
-| Graph analytics (HITS, PageRank, proximity, causal paths; PPR pending upstream) | ✅ | ❌ | ❌ | ❌ |
+| Graph analytics (HITS, PageRank, personalized PageRank, proximity, causal paths) | ✅ | ❌ | ❌ | ❌ |
 | Deterministic JSON output | ✅ | varies | varies | n/a |
 | CASS session corpus import | ✅ | manual ETL | ❌ | manual |
 | Works without daemon | ✅ | ❌ | ❌ | ✅ |
@@ -3621,7 +3621,6 @@ Boundaries to know:
 | Model choice | Embeddings are delegated to Frankensearch. Default installs use the pinned local `potion-multilingual-128M` fast tier; semantic quality follows that model and the derived index unless the operator explicitly changes Frankensearch posture. |
 | MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
 | Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) is refreshed by hand after asset verification. Starting with 0.15.1, Cargo builds resolve the complete dependency graph from crates.io using `Cargo.lock`. Current releases (`v0.16.0`–`v0.19.0`) are cut outside GitHub Actions and ship platform archives, per-archive `.sha256` sidecars and `.minisig` minisign signatures, installers, `SHA256SUMS`, and `SHA256SUMS.minisig` without a release `manifest.json`, Sigstore bundles, or SLSA provenance; `--require-provenance` therefore fails by design. See the installation table for current publication status and the release notes for validation and remaining limits. |
-| Personalized PageRank | PPR ranking influence and Pack DNA's `pprNeighbors` are **unavailable**, not merely degraded: the pinned FrankenNetworkX revision exposes no deterministic personalized-PageRank API, so a request for PPR emits `graph_ppr_upstream_unavailable` and falls back to textual ranking. Its repair is `ee config set graph.feature.ppr.enabled false` (plus dropping `--ppr-weight` from `ee context`); Pack DNA reports the code whenever it runs. Every other graph surface above is unaffected. Tracked on `bd-reality-core-convergence-1azkt.82` (successor to closed `bd-reality-core-convergence-1azkt.15`) as an upstream dependency blocker. |
 | Reserved adapters | Lightweight deterministic science metrics are built in (`ee analyze science-status`), while `science-analytics` is an empty reservation for heavier backends; the loopback-only `serve` adapter is compiled into every build, and both Cargo feature flags only flip their `features[]` `enabled` boolean in `ee capabilities` / `ee version`. |
 | Doctor repairs | Start with `ee doctor --fix-plan --json`; use `--fix` only after reviewing the run summary and undo path. |
 

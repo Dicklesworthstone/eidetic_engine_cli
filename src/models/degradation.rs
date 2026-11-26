@@ -403,8 +403,8 @@ pub const GRAPH_METRICS_UNAVAILABLE: DegradationCode = DegradationCode {
 pub const GRAPH_PPR_SNAPSHOT_STALE_CODE: &str = "graph_ppr_snapshot_stale";
 /// Response degraded code for PPR reranking without retrieval seeds.
 pub const GRAPH_PPR_EMPTY_SEED_SET_CODE: &str = "graph_ppr_empty_seed_set";
-/// Response degraded code while pack PPR awaits an upstream FrankenNetworkX API.
-pub const GRAPH_PPR_UPSTREAM_UNAVAILABLE_CODE: &str = "graph_ppr_upstream_unavailable";
+/// Degraded code for link-suggestion seeds whose PPR run failed.
+pub const GRAPH_SUGGEST_LINKS_PPR_FAILED_CODE: &str = "graph_suggest_links_ppr_failed";
 /// Degraded code for a Louvain partition FrankenNetworkX declined.
 pub const GRAPH_LOUVAIN_DECLINED_CODE: &str = "graph_louvain_declined";
 /// Response degraded code for Pack DNA without a trust-anchor dominator.

@@ -8,7 +8,6 @@ use ee::db::{
     CreateMemoryLinkInput, DbConnection, GraphSnapshotType, MemoryLinkRelation, MemoryLinkSource,
 };
 use ee::graph::{CentralityRefreshOptions, CentralityRefreshStatus, refresh_graph_snapshot};
-use ee::models::degradation::GRAPH_PPR_UPSTREAM_UNAVAILABLE_CODE;
 use ee::models::{MemoryScope, WorkspaceId};
 use ee::pack::ContextResponse;
 use ee::search::SpeedMode;
@@ -16,6 +15,10 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 type TestResult<T = ()> = Result<T, String>;
+
+/// The stand-down code bd-reality-core-convergence-1azkt.82 retired. Nothing
+/// may emit it now that FrankenNetworkX computes personalized PageRank.
+const RETIRED_PPR_UPSTREAM_CODE: &str = "graph_ppr_upstream_unavailable";
 
 fn db_path(workspace_path: &Path) -> PathBuf {
     workspace_path.join(".ee").join("ee.db")
@@ -160,31 +163,6 @@ fn ppr_breakdown_count(response: &ContextResponse) -> usize {
         .count()
 }
 
-fn pack_selection_signature(
-    response: &ContextResponse,
-) -> Vec<(String, u32, String, Option<(u32, u32, u32)>)> {
-    response
-        .data
-        .pack
-        .items
-        .iter()
-        .map(|item| {
-            (
-                item.memory_id.to_string(),
-                item.relevance.into_inner().to_bits(),
-                item.why.clone(),
-                item.score_breakdown.map(|breakdown| {
-                    (
-                        breakdown.text_score.to_bits(),
-                        breakdown.ppr_score.to_bits(),
-                        breakdown.combined_score.to_bits(),
-                    )
-                }),
-            )
-        })
-        .collect()
-}
-
 fn assert_pack_item_before(
     response: &ContextResponse,
     earlier_memory_id_raw: &str,
@@ -219,7 +197,7 @@ fn assert_pack_item_before(
     Ok(())
 }
 
-fn assert_no_context_ppr_artifacts(workspace_path: &Path, db_path: &Path) -> TestResult {
+fn assert_context_ppr_witness(workspace_path: &Path, db_path: &Path) -> TestResult {
     let connection = DbConnection::open_file(db_path).map_err(|error| error.to_string())?;
     let workspace_id = stable_workspace_id(workspace_path);
     let snapshot = connection
@@ -229,45 +207,84 @@ fn assert_no_context_ppr_artifacts(workspace_path: &Path, db_path: &Path) -> Tes
     let witnesses = connection
         .list_graph_algorithm_witnesses(&workspace_id, &snapshot.id, Some("personalized_pagerank"))
         .map_err(|error| error.to_string())?;
-    if !witnesses.is_empty() {
+    if witnesses.len() != 1 {
         return Err(format!(
-            "disabled pack PPR must not emit personalized_pagerank witnesses, got {}",
+            "context PPR rerank should emit exactly one personalized_pagerank witness, got {}",
             witnesses.len()
         ));
     }
-    let results = connection
-        .list_graph_algorithm_results(&workspace_id, &snapshot.id, Some("personalized_pagerank"))
-        .map_err(|error| error.to_string())?;
-    if !results.is_empty() {
+    let params: Value = serde_json::from_str(&witnesses[0].params_json)
+        .map_err(|error| format!("PPR witness params must be JSON: {error}"))?;
+    if params["seedCount"].as_u64().unwrap_or(0) == 0 {
         return Err(format!(
-            "disabled pack PPR must not create personalized_pagerank cache rows, got {}",
-            results.len()
+            "PPR witness params must record a non-empty seed set: {params}"
         ));
     }
     connection.close().map_err(|error| error.to_string())
 }
 
-fn ppr_unavailable_snapshot_summary(
-    requested: &ContextResponse,
-    zero_weight: &ContextResponse,
-) -> Value {
-    let pack_dna = requested.data.pack_dna.as_ref().unwrap_or(&Value::Null);
+fn ppr_snapshot_summary(response: &ContextResponse) -> Value {
+    let items = response
+        .data
+        .pack
+        .items
+        .iter()
+        .filter_map(|item| {
+            let breakdown = item.score_breakdown?;
+            let text_score = f64::from(breakdown.text_score);
+            let ppr_score = f64::from(breakdown.ppr_score);
+            let combined_score = f64::from(breakdown.combined_score);
+            Some(json!({
+                "combinedEqualsPpr": (combined_score - ppr_score).abs() < 0.000001,
+                "content": item.content,
+                "pprScorePositive": ppr_score > 0.0,
+                "scoreBreakdownKeys": ["combinedScore", "pprScore", "textScore"],
+                "textScorePositive": text_score > 0.0,
+                "whyMentionsPpr": item.why.contains("Personalized PageRank"),
+            }))
+        })
+        .collect::<Vec<_>>();
+
     json!({
-        "schema": "ee.pack.ppr.unavailable.golden.v1",
-        "requestedDegradationCount": requested.data.degraded.iter().filter(|entry| entry.code == GRAPH_PPR_UPSTREAM_UNAVAILABLE_CODE).count(),
-        "selectionMatchesZeroWeight": pack_selection_signature(requested) == pack_selection_signature(zero_weight),
-        "scoreBreakdownCount": ppr_breakdown_count(requested),
-        "whyMentionsPpr": requested.data.pack.items.iter().any(|item| item.why.contains("Personalized PageRank")),
-        "packDna": {
-            "hasCommunityOfMass": !pack_dna["communityOfMass"].is_null(),
-            "pprNeighborCount": pack_dna["pprNeighbors"].as_array().map_or(0, Vec::len),
-            "unavailableDegradationCount": pack_dna["degraded"].as_array().map_or(0, |entries| entries.iter().filter(|entry| entry["code"] == GRAPH_PPR_UPSTREAM_UNAVAILABLE_CODE).count()),
-        },
+        "schema": "ee.pack.ppr.golden.v1",
+        "pprItemCount": items.len(),
+        "items": items,
     })
 }
 
+fn retired_ppr_code_count(response: &ContextResponse) -> usize {
+    let pack_dna_count = response
+        .data
+        .pack_dna
+        .as_ref()
+        .and_then(|pack_dna| pack_dna["degraded"].as_array())
+        .map_or(0, |entries| {
+            entries
+                .iter()
+                .filter(|entry| entry["code"] == RETIRED_PPR_UPSTREAM_CODE)
+                .count()
+        });
+    response
+        .data
+        .degraded
+        .iter()
+        .filter(|entry| entry.code == RETIRED_PPR_UPSTREAM_CODE)
+        .count()
+        + pack_dna_count
+}
+
+/// bd-reality-core-convergence-1azkt.82 restores the contract .15 stood down:
+/// fnx personalized PageRank reranks the pack and Pack DNA ranks PPR
+/// neighbors again.
+///
+/// Why weight 1 promotes the neighbor: the only link is seed -> neighbor, and
+/// fnx (damping d = 0.85) returns dangling mass to the personalization, so
+/// the neighbor scores K(p_n + d p_s) against the seed's K p_s. It therefore
+/// leads exactly when its search score exceeds (1 - d) = 0.15 of the seed's.
+/// It matches three of the query's four terms, so a red here means it lost
+/// its search hit rather than that the kernel changed.
 #[test]
-fn requested_pack_ppr_degrades_without_changing_textual_ranking() -> TestResult {
+fn context_pack_with_ppr_emits_score_breakdown_and_matches_golden() -> TestResult {
     let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
     let workspace = temp_dir
         .path()
@@ -305,67 +322,29 @@ fn requested_pack_ppr_degrades_without_changing_textual_ranking() -> TestResult 
     enable_ppr_feature(workspace_path)?;
     insert_support_link(workspace_path, &db_path, &seed_id, &neighbor_id)?;
 
-    let zero_weight = run_context_pack(&context_options(workspace_path, &db_path, Some(0.0)))
-        .map_err(|error| format!("zero-weight context pack failed: {error:?}"))?;
-    if ppr_breakdown_count(&zero_weight) != 0 {
-        return Err("ppr_weight=0 must not emit a PPR score breakdown".to_owned());
-    }
-    if zero_weight
-        .data
-        .degraded
-        .iter()
-        .any(|entry| entry.code == GRAPH_PPR_UPSTREAM_UNAVAILABLE_CODE)
-    {
-        return Err("ppr_weight=0 must remain a silent PPR no-op".to_owned());
-    }
-    assert_pack_item_before(
-        &zero_weight,
-        &seed_id,
-        &neighbor_id,
-        "ppr_weight=0 should preserve textual seed ranking",
-    )?;
-
+    // Weight 1 runs first: the zero-weight run never reaches the rerank, so
+    // it cannot leave a witness or cache row behind for the count below.
     let mut requested_options = context_options(workspace_path, &db_path, Some(1.0));
     requested_options.output_options = requested_options.output_options.with_pack_dna(true);
     let requested = run_context_pack(&requested_options)
-        .map_err(|error| format!("requested-PPR context pack failed: {error:?}"))?;
-    if pack_selection_signature(&requested) != pack_selection_signature(&zero_weight) {
+        .map_err(|error| format!("context pack with PPR failed: {error:?}"))?;
+    if ppr_breakdown_count(&requested) == 0 {
         return Err(format!(
-            "requested but unavailable PPR changed textual selection\nrequested={:?}\nzero={:?}",
-            requested.data.pack.items, zero_weight.data.pack.items
+            "PPR score breakdown missing from context pack: degraded={:?} items={:?}",
+            requested.data.degraded, requested.data.pack.items
         ));
     }
-    if ppr_breakdown_count(&requested) != 0 {
-        return Err("unavailable pack PPR must not emit score breakdowns".to_owned());
-    }
-    if requested
-        .data
-        .pack
-        .items
-        .iter()
-        .any(|item| item.why.contains("Personalized PageRank"))
-    {
-        return Err("unavailable pack PPR must not alter item why text".to_owned());
-    }
-    let unavailable = requested
-        .data
-        .degraded
-        .iter()
-        .filter(|entry| entry.code == GRAPH_PPR_UPSTREAM_UNAVAILABLE_CODE)
-        .collect::<Vec<_>>();
-    if unavailable.len() != 1 {
+    assert_pack_item_before(
+        &requested,
+        &neighbor_id,
+        &seed_id,
+        "ppr_weight=1 should visibly promote the graph-linked neighbor",
+    )?;
+    assert_context_ppr_witness(workspace_path, &db_path)?;
+    if retired_ppr_code_count(&requested) != 0 {
         return Err(format!(
-            "requested pack PPR must emit exactly one upstream-unavailable degradation: {:?}",
+            "{RETIRED_PPR_UPSTREAM_CODE} is retired and must not be emitted: {:?}",
             requested.data.degraded
-        ));
-    }
-    if unavailable[0].severity.as_str() != "medium"
-        || !unavailable[0].message.contains("FrankenNetworkX")
-        || !unavailable[0].message.contains("textual ranking")
-    {
-        return Err(format!(
-            "pack PPR degradation must explain the truthful fallback: {:?}",
-            unavailable[0]
         ));
     }
 
@@ -382,64 +361,67 @@ fn requested_pack_ppr_degrades_without_changing_textual_ranking() -> TestResult 
             "neighbor proximityToSeed should reflect the seeded support link; got {neighbor_proximity}"
         ));
     }
-    assert_no_context_ppr_artifacts(workspace_path, &db_path)?;
 
+    // Every linked memory is in this pack, so each one is a Pack DNA seed and
+    // none can be a PPR neighbor; the non-empty default is pinned in
+    // graph::pack_dna. What this proves is that the production path ran
+    // without a stand-down: any neighbor it reports lies outside the pack.
     let pack_dna = requested
         .data
         .pack_dna
         .as_ref()
         .ok_or_else(|| "requested Pack DNA block is absent".to_owned())?;
-    if pack_dna["pprNeighbors"]
-        .as_array()
-        .map_or(usize::MAX, Vec::len)
-        != 0
-    {
-        return Err(format!(
-            "production Pack DNA must not expose local PPR neighbors: {pack_dna}"
-        ));
-    }
     if pack_dna["communityOfMass"].is_null() {
         return Err(format!(
-            "disabling PPR neighbors must retain non-PPR Pack DNA explanations: {pack_dna}"
+            "Pack DNA must keep its community of mass beside PPR: {pack_dna}"
         ));
     }
-    let nested_unavailable = pack_dna["degraded"]
-        .as_array()
-        .map(|entries| {
-            entries
-                .iter()
-                .filter(|entry| entry["code"] == GRAPH_PPR_UPSTREAM_UNAVAILABLE_CODE)
-                .count()
-        })
-        .unwrap_or(0);
-    if nested_unavailable != 1 {
-        return Err(format!(
-            "Pack DNA must expose exactly one nested PPR unavailable degradation: {pack_dna}"
-        ));
-    }
-    let outer_unavailable = requested
+    let pack_ids = requested
         .data
-        .degraded
+        .pack
+        .items
         .iter()
-        .filter(|entry| entry.code == GRAPH_PPR_UPSTREAM_UNAVAILABLE_CODE)
-        .count();
-    if outer_unavailable != 1 {
+        .map(|item| item.memory_id.to_string())
+        .collect::<Vec<_>>();
+    let neighbors = pack_dna["pprNeighbors"]
+        .as_array()
+        .ok_or_else(|| format!("Pack DNA pprNeighbors must be an array: {pack_dna}"))?;
+    if !neighbors.iter().all(|neighbor| {
+        neighbor["memoryId"]
+            .as_str()
+            .is_some_and(|memory_id| !pack_ids.iter().any(|id| id == memory_id))
+            && neighbor["score"]
+                .as_f64()
+                .is_some_and(|score| score.is_finite() && score > 0.0)
+    }) {
         return Err(format!(
-            "Pack DNA must not duplicate the top-level PPR unavailable degradation: {:?}",
-            requested.data.degraded
+            "Pack DNA PPR neighbors must lie outside the pack with positive rank: {pack_dna}"
         ));
     }
-    assert_no_context_ppr_artifacts(workspace_path, &db_path)?;
 
-    let summary =
-        serde_json::to_string_pretty(&ppr_unavailable_snapshot_summary(&requested, &zero_weight))
-            .map_err(|error| format!("serialize unavailable-PPR snapshot summary: {error}"))?;
+    let summary = serde_json::to_string_pretty(&ppr_snapshot_summary(&requested))
+        .map_err(|error| format!("serialize PPR snapshot summary: {error}"))?;
     let expected = include_str!("snapshots/pack_with_ppr.snap").trim_end();
     if summary != expected {
         return Err(format!(
-            "unavailable-PPR pack golden mismatch\nexpected:\n{expected}\nactual:\n{summary}"
+            "PPR pack golden mismatch\nexpected:\n{expected}\nactual:\n{summary}"
         ));
     }
+
+    let zero_weight = run_context_pack(&context_options(workspace_path, &db_path, Some(0.0)))
+        .map_err(|error| format!("zero-weight context pack failed: {error:?}"))?;
+    if ppr_breakdown_count(&zero_weight) != 0 {
+        return Err("PPR score breakdown should be absent when ppr_weight=0".to_owned());
+    }
+    if retired_ppr_code_count(&zero_weight) != 0 {
+        return Err("ppr_weight=0 must remain a silent PPR no-op".to_owned());
+    }
+    assert_pack_item_before(
+        &zero_weight,
+        &seed_id,
+        &neighbor_id,
+        "ppr_weight=0 should preserve the textual seed ahead of its graph neighbor",
+    )?;
 
     Ok(())
 }

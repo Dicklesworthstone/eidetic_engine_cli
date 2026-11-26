@@ -10,7 +10,7 @@ configuration precedence chain.
 
 | Key | Type | Default | Range | Description | Tuning Advice |
 | --- | --- | --- | --- | --- | --- |
-| `graph.ppr.alpha` | float | `0.30` | `0.0..=1.0` | Weight reserved for Personalized PageRank influence when a graph-aware context ranker blends text and graph scores. | Lower toward `0.0` to preserve legacy text-first ordering; raise only after graph links are trusted and dense. |
+| `graph.ppr.alpha` | float | `0.30` | `0.0..=1.0` | Weight `w` of the Personalized PageRank rerank, which scores each pack candidate `(1 − w) × relevance + w × PPR` when `graph.feature.ppr.enabled` is true. `ee context --ppr-weight` overrides it for one call. | Lower toward `0.0` to preserve legacy text-first ordering; raise only after graph links are trusted and dense. |
 | `graph.health.contradiction_threshold` | float | `0.20` | `0.0..=1.0` | Minimum contradiction-cluster density required before graph health surfaces treat a community as suspicious. | Raise in noisy workspaces with many tentative contradiction edges; lower when contradiction links are curated and high-confidence. |
 | `graph.curate.onion_decay_max` | float | `3.0` | `> 0.0` | Maximum structural decay multiplier for memories far from the graph core. | Increase when peripheral memories should fade more aggressively; keep near `1.0` for small or sparse workspaces. |
 | `graph.curate.articulation_protection_multiplier` | float | `0.5` | `0.0..=1.0` | Decay multiplier applied to articulation memories so bridge facts are protected from ordinary structural decay. | Lower to protect bridge memories more strongly; raise toward `1.0` when articulation points are too sticky. |
@@ -26,7 +26,7 @@ configuration precedence chain.
 | `graph.memory.growth_multiplier_basis_points` | integer | `15000` | `>= 1` | In-build growth tripwire. `15000` means observed allocation may grow to `1.5x` the pre-build estimate before aborting. | Keep conservative unless measurements show the estimator is systematically low. |
 | `graph.witnesses.retention_days` | integer | `30` | `>= 0` | Default TTL for graph algorithm witness rows pruned by `ee maintenance graph-witnesses-prune`. | Keep at the default for normal workspaces; raise when graph auditability matters more than table size. |
 | `graph.witnesses.algorithm_ttl_days.<algorithm>` | integer | unset | `>= 0` | Per-algorithm TTL override for graph witness retention. | Use longer windows for cache or audit witnesses, shorter windows for high-volume ad-hoc algorithms. |
-| `graph.feature.ppr.enabled` | boolean | `false` | `true` or `false` | Enables Personalized PageRank graph re-ranking once its runtime surface is wired. | Keep disabled until the PPR path has fresh graph snapshots and behavior-shift tests in the target workspace. |
+| `graph.feature.ppr.enabled` | boolean | `false` | `true` or `false` | Enables the Personalized PageRank pack rerank, which FrankenNetworkX computes over the latest memory-links snapshot, seeded by the candidates' search scores. | Enable once the workspace's links are trusted. The rerank is skipped with `graph_ppr_snapshot_stale` while the snapshot lags the links; `ee graph snapshot refresh --workspace .` clears it. |
 | `graph.feature.pack_dna.enabled` | boolean | `false` | `true` or `false` | Enables Pack DNA explanation blocks once the section is available. | Enable for audits and debugging; keep disabled for tight prompt budgets until the JSON budget is validated. |
 | `graph.feature.causal_explain.enabled` | boolean | `false` | `true` or `false` | Enables causal explanation graph surfaces. | Enable only after causal evidence builders are populated; otherwise prefer honest unavailable signals. |
 | `graph.feature.structural_health.enabled` | boolean | `false` | `true` or `false` | Enables k-truss, contradiction-cluster, and related structural health sections. | Enable after contradiction/support subgraphs are populated and fixtures cover the target corpus. |
@@ -64,8 +64,7 @@ enabled = true
 ```
 
 Setting `graph.ppr.alpha = 0.0` is the compatibility profile for pack assembly:
-the graph rank contribution is disabled and text-first ordering should remain
-byte-identical once the PPR integration lands.
+the rerank returns before scoring anything, so text-first ordering is unchanged.
 
 The same keys are available through the JSON-first config surface:
 

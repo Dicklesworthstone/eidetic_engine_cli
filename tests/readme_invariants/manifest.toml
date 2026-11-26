@@ -186,7 +186,7 @@ verify = { type = "test", path = "tests/readme_perf_sync.rs" }
 [[invariant]]
 id = "rfm-004-no-silent-memory-rewrite-faq"
 readme_section = "FAQ"
-readme_line_anchor = 3710
+readme_line_anchor = 3709
 sentence_hash = "blake3:935a24556f4d3cffd019528aae7efa59e2c4dba3abd93112a8f0e8f8e85ec4b2"
 classification = "promise"
 verify = { type = "test", path = "tests/contracts/audit_event_coverage.rs" }
@@ -334,7 +334,7 @@ verify = { type = "test", path = "tests/e2e_migration_boundary.rs" }
 [[invariant]]
 id = "rfm-022-tokio-forbidden-ci-audit"
 readme_section = "FAQ"
-readme_line_anchor = 3642
+readme_line_anchor = 3641
 sentence_hash = "blake3:2e498161dfcffd18f603f9839f366494f4bd887bf162d2cd6b74d9bbed78a371"
 classification = "constraint"
 verify = { type = "test", path = "tests/forbidden_deps.rs" }
@@ -342,7 +342,7 @@ verify = { type = "test", path = "tests/forbidden_deps.rs" }
 [[invariant]]
 id = "rfm-023-indexes-derived-from-db"
 readme_section = "FAQ"
-readme_line_anchor = 3668
+readme_line_anchor = 3667
 sentence_hash = "blake3:d57134fa7080b09c3954a8ff2e9055da2d5e70472f26c8bde42805d6164fbb9c"
 classification = "promise"
 verify = { type = "test", path = "tests/snapshot_index_recovery_e2e.rs" }
