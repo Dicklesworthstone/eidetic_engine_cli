@@ -16792,6 +16792,165 @@ mod tests {
         }
     }
 
+    /// Records every command the collectors issue. `which` resolves every
+    /// program, so the toolchain source goes on to its version probes. Every
+    /// other command is unavailable, so each source degrades and the planner
+    /// has repairs to propose.
+    #[derive(Default)]
+    struct RecordingReadOnlyRunner {
+        calls: std::cell::RefCell<Vec<(String, Vec<String>)>>,
+    }
+
+    impl SwarmBriefCommandRunner for RecordingReadOnlyRunner {
+        fn run(
+            &self,
+            program: &str,
+            args: &[&str],
+            _cwd: &Path,
+            _timeout_ms: u64,
+        ) -> Result<crate::core::swarm_brief::SwarmBriefCommandOutput, SwarmBriefCommandError>
+        {
+            self.calls.borrow_mut().push((
+                program.to_owned(),
+                args.iter().map(|arg| (*arg).to_owned()).collect(),
+            ));
+            match (program, args) {
+                ("which", ["-a", name]) => Ok(crate::core::swarm_brief::SwarmBriefCommandOutput {
+                    stdout: format!("/nonexistent/ee-repair-plan-test/{name}\n"),
+                    stderr: String::new(),
+                }),
+                _ => Err(SwarmBriefCommandError::Unavailable(format!(
+                    "{program} is not available to this test"
+                ))),
+            }
+        }
+    }
+
+    /// The commands plan generation issues, each a read. Anything else fails
+    /// the test below: a cargo subcommand (cargo may only report its version),
+    /// a tracker write, a mail send, a reservation or a worker change.
+    fn is_read_only_probe(program: &str, args: &[String]) -> bool {
+        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+        match (program, args.as_slice()) {
+            (_, ["--version"]) | ("which", ["-a", _]) => true,
+            ("git", [verb, ..]) => matches!(*verb, "rev-parse" | "status" | "log" | "ls-files"),
+            ("br", ["ready" | "blocked" | "list" | "show", ..])
+            | ("br", ["dep", "cycles", ..])
+            | ("br", ["sync", "--status", ..]) => true,
+            ("br", ["doctor", rest @ ..]) => !rest.contains(&"--fix"),
+            ("bv", flags) => {
+                !flags.is_empty() && flags.iter().all(|flag| flag.starts_with("--robot-"))
+            }
+            ("rch", ["--help-json"] | ["status" | "queue", ..])
+            | ("rch", ["agents", "status", ..] | ["config", "show", ..])
+            | ("rch", ["workers", "probe", ..] | ["diagnose", "--dry-run", ..])
+            | ("am", ["agents", "list", ..]) => true,
+            ("bash", [script, "actionable", "--json"]) => {
+                *script == ACTIONABLE_QUEUE_SCRIPT_RELATIVE_PATH
+            }
+            _ => false,
+        }
+    }
+
+    /// Every path under `root`, with file contents; `None` marks a directory.
+    fn workspace_tree(root: &Path) -> Result<BTreeMap<String, Option<Vec<u8>>>, String> {
+        let mut tree = BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory).map_err(|error| error.to_string())? {
+                let path = entry.map_err(|error| error.to_string())?.path();
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|error| error.to_string())?
+                    .display()
+                    .to_string();
+                if path.is_dir() {
+                    tree.insert(relative, None);
+                    pending.push(path);
+                } else {
+                    let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+                    tree.insert(relative, Some(bytes));
+                }
+            }
+        }
+        Ok(tree)
+    }
+
+    /// bd-22po3.4: plan generation is read-only. This drives the collector and
+    /// planner as `ee swarm repair-plan` does (every source, rch included, a
+    /// requested candidate) and observes what they do. The contract test in
+    /// tests/swarm_schema_lifecycle.rs reads the declared nonMutationPolicy
+    /// flags from a hand-written fixture instead. Not covered: a workspace
+    /// with an existing .ee/ee.db, which the verifier-ledger reader opens.
+    #[test]
+    fn repair_plan_generation_issues_only_reads_and_leaves_the_workspace_untouched()
+    -> Result<(), String> {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        // The queue script must exist for its probe to be issued. It and the
+        // tracker file also give the comparison below something to lose.
+        let script = workspace.path().join(ACTIONABLE_QUEUE_SCRIPT_RELATIVE_PATH);
+        let script_dir = script
+            .parent()
+            .ok_or_else(|| "queue script path has no parent".to_owned())?;
+        std::fs::create_dir_all(script_dir).map_err(|error| error.to_string())?;
+        std::fs::write(&script, "#!/usr/bin/env bash\nexit 0\n")
+            .map_err(|error| error.to_string())?;
+        let beads_dir = workspace.path().join(".beads");
+        std::fs::create_dir_all(&beads_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            beads_dir.join("issues.jsonl"),
+            "{\"id\":\"bd-plan\",\"status\":\"open\"}\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let before = workspace_tree(workspace.path())?;
+
+        let mut options = SwarmBriefCollectOptions::for_workspace(workspace.path());
+        options.enabled_sources = crate::core::swarm_brief::all_swarm_brief_sources();
+        options.include_rch = true;
+        let runner = RecordingReadOnlyRunner::default();
+        let packet = collect_swarm_work_packet_with_verifier_evidence(
+            &options,
+            &runner,
+            &[],
+            Some("bd-plan"),
+        );
+        let gate = packet.claim_gate(Some("bd-plan"));
+        let plan = build_swarm_repair_plan_from_claim_gate(&packet, &gate);
+
+        // Not vacuous: every source degraded, so there were repairs to run,
+        // and each command family was actually reached.
+        if plan.actions.is_empty() {
+            return Err("every source degraded, yet the plan proposes no repair".to_owned());
+        }
+        let calls = runner.calls.borrow();
+        for program in ["git", "br", "rch", "which", "bash"] {
+            if !calls.iter().any(|(called, _)| called == program) {
+                return Err(format!("no `{program}` call was recorded: {calls:?}"));
+            }
+        }
+        let refused = calls
+            .iter()
+            .filter(|(program, args)| !is_read_only_probe(program, args))
+            .collect::<Vec<_>>();
+        if !refused.is_empty() {
+            return Err(format!(
+                "plan generation issued non-read commands: {refused:?}"
+            ));
+        }
+        let after = workspace_tree(workspace.path())?;
+        if before != after {
+            let changed = before
+                .keys()
+                .chain(after.keys())
+                .filter(|path| before.get(*path) != after.get(*path))
+                .collect::<BTreeSet<_>>();
+            return Err(format!(
+                "plan generation changed the workspace: {changed:?}"
+            ));
+        }
+        Ok(())
+    }
+
     fn verification_for_queue_posture(
         remote_only_safe: Option<bool>,
         active_count: Option<u64>,
