@@ -65,6 +65,21 @@ const CAPABILITIES_CASS_BINARY: &str = "tests/fixtures/missing-ee-workspace/no-c
 const GRAPH_ALGORITHMS: &[&str] = &["pagerank"];
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
+    run_ee_from(args, None)
+}
+
+/// [`run_ee`] for a spawn that names no workspace (bd-uuaa3). With no
+/// `--workspace` and no `EE_WORKSPACE`, `ee` walks up from its cwd to the first
+/// `.ee/`, so a spawn from cargo's cwd reads the checkout's own store, while the
+/// lane's export has none. This runs it from a dir no walk-up can leave, with
+/// `EE_WORKSPACE` removed. `run_ee` keeps cargo's cwd because several callers
+/// pass paths relative to the crate root (`tests/fixtures/...`).
+fn run_ee_outside_workspace(args: &[&str]) -> Result<Output, String> {
+    let cwd = crate::isolated_ee::outside_workspace_tempdir()?;
+    run_ee_from(args, Some(cwd.path()))
+}
+
+fn run_ee_from(args: &[&str], cwd: Option<&Path>) -> Result<Output, String> {
     let isolated_home =
         tempfile::tempdir().map_err(|error| format!("failed to create isolated HOME: {error}"))?;
     let mut spellings = vec![isolated_home.path().to_string_lossy().into_owned()];
@@ -76,13 +91,18 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
     }
     spellings.sort_by_key(|spelling| std::cmp::Reverse(spelling.len()));
     ISOLATED_GOLDEN_HOME.with(|home| *home.borrow_mut() = spellings);
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    command
         .args(args)
         .env("HOME", isolated_home.path())
         .env("EE_EMBED_DOWNLOAD", "off")
         .env_remove("XDG_DATA_HOME")
         .env_remove("XDG_CONFIG_HOME")
-        .env_remove("XDG_CACHE_HOME")
+        .env_remove("XDG_CACHE_HOME");
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd).env_remove("EE_WORKSPACE");
+    }
+    command
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
@@ -779,6 +799,43 @@ fn normalize_version_json_for_golden(text: &str) -> String {
     if let Some(range) = value.pointer_mut("/data/database/supportedMigrationRange") {
         *range = Value::String("<scrubbed:supportedMigrationRange>".to_owned());
     }
+    // Git source provenance belongs to the build, like targetTriple. Since
+    // f0adfda79 the pinned lane stamps committed-tree builds with VERGEN_GIT_*,
+    // so the same source reports `state: clean` with a commit and no
+    // git_metadata_unavailable there, and the unstamped form everywhere else.
+    // The golden pins the unstamped form, so every lane run since then has
+    // failed this case, and the runner stopped before the cases after it.
+    // build_provenance_degradations_discriminate_instead_of_always_agreeing
+    // (src/core/mod.rs) pins the degradation itself, on both arms, with
+    // synthetic builds.
+    if let Some(source) = value
+        .pointer_mut("/data/source")
+        .and_then(Value::as_object_mut)
+    {
+        for key in ["gitCommit", "gitTag", "gitDirty", "state"] {
+            if let Some(field) = source.get_mut(key) {
+                *field = Value::String(format!("<scrubbed:{key}>"));
+            }
+        }
+    }
+    for pointer in ["/degraded", "/data/provenance/degraded"] {
+        if let Some(entries) = value.pointer_mut(pointer).and_then(Value::as_array_mut) {
+            entries.retain(|entry| entry["code"] != "git_metadata_unavailable");
+        }
+    }
+    // `available` is `degradations.is_empty()` (provenance_available), so it is
+    // recomputed from what remains rather than scrubbed: another degradation,
+    // such as an unknown target triple, still reads false.
+    let provenance_clean = value
+        .pointer("/data/provenance/degraded")
+        .and_then(Value::as_array)
+        .map(Vec::is_empty);
+    if let (Some(clean), Some(available)) = (
+        provenance_clean,
+        value.pointer_mut("/data/provenance/available"),
+    ) {
+        *available = Value::Bool(clean);
+    }
     serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_owned())
 }
 
@@ -1337,8 +1394,11 @@ fn validate_contract_case(case: ContractCase) -> TestResult {
         run_ee_with_deterministic_capabilities_env(case.args)?
     } else if matches!(case.name, "status_json" | "doctor_json" | "doctor_toon") {
         run_ee_with_deterministic_external_probes(case.args)?
-    } else {
+    } else if case.args.contains(&"--workspace") || case.args.contains(&"--database") {
+        // Both take paths relative to the crate root, so keep cargo's cwd.
         run_ee(case.args)?
+    } else {
+        run_ee_outside_workspace(case.args)?
     };
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("{} stdout was not UTF-8: {error}", case.command_display()))?;
@@ -1926,7 +1986,7 @@ fn doctor_toon_output_matches_golden() -> TestResult {
 
 #[test]
 fn doctor_franken_health_json_matches_golden() -> TestResult {
-    let output = run_ee(&["doctor", "--franken-health", "--json"])?;
+    let output = run_ee_outside_workspace(&["doctor", "--franken-health", "--json"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -3776,8 +3836,11 @@ fn all_json_commands_have_schema_envelope() -> TestResult {
         &["--agent-docs"],
     ];
 
+    // status, check and doctor run storeless here, as they always have on the
+    // lane, whose export has no `.ee/`. From cargo's cwd they read the
+    // checkout's own store instead (bd-uuaa3).
     for args in commands {
-        let output = run_ee(args)?;
+        let output = run_ee_outside_workspace(args)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
