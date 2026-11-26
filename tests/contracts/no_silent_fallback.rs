@@ -332,9 +332,11 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         // bd-amhns key repair, BOTH halves of the key. The function gained an
         // `_at` as-of parameter and `_with_observer_at` helper, and the existence
         // check moved from `.exists()` to `.try_exists().map_err(global_read_error)?`.
+        // f53320496 moved the existence check into GlobalStoreReadSnapshot::open,
+        // which returns Ok(None) for exactly that case, so the key follows it.
         "read_global_store_memories_with_observer_at",
-        ".try_exists()",
-        "No user-global store file means no user-global memories. Checked before opening; once the file exists, open_file_read_only failures become an Err with the reason. The refactor STRENGTHENED this justification rather than weakening it: `.exists()` returned false on an IO error, collapsing \"cannot tell\" into \"absent\", whereas `try_exists` now propagates that error with `?`.",
+        "GlobalStoreReadSnapshot::open(paths)? else",
+        "No user-global store file means no user-global memories. GlobalStoreReadSnapshot::open returns Ok(None) only when `try_exists` reports the database absent. An IO error from that check, a failed read-only open and a failed read snapshot all return Err with the reason, and `?` propagates them here. The bd-amhns refactor STRENGTHENED this justification rather than weakening it: `.exists()` returned false on an IO error, collapsing \"cannot tell\" into \"absent\", whereas `try_exists` propagates that error.",
     ),
     allowed_in(
         "NSF-CORE-GLOBAL-STORE-NO-WORKSPACE-ROW",
@@ -550,15 +552,19 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "NSF-CORE-WRITE-OWNER-TELEMETRY-CONFIG-DEFAULT",
         "src/core/write_owner.rs",
         "write_group_commit_telemetry",
-        ".map(|config| WriteHotPathConfig::from_write_config(&config.write))",
+        // fe120811d moved the config read into write_hot_path_config; this
+        // site now only defaults the no-workspace case.
+        ".map(write_hot_path_config)",
         "No workspace path, or a workspace with no write config, yields the documented default hot-path configuration. The value is only used to decide whether group-commit telemetry is enabled, and the disabled case is itself named downstream rather than silent.",
     ),
     allowed_in(
         "NSF-CORE-WRITE-OWNER-INTAKE-CONFIG-DEFAULT",
         "src/core/write_owner.rs",
-        "run_one_shot_write_intake",
-        ".map(|config| WriteHotPathConfig::from_write_config(&config.write))",
-        "The same default in the intake path, and here the honesty is explicit: `if !config.enabled` produces WriteGroupCommitFallbackReason::Disabled, a named fallback reason carried in the result, so running without group commit is reported rather than assumed.",
+        // fe120811d moved the intake's config read here, into the reader that
+        // intake and telemetry share, and made it merge every config layer.
+        "write_hot_path_config",
+        ".map(|merged| WriteHotPathConfig::from_write_config(&merged.values.write))",
+        "An unreadable or malformed config yields the default, and the default disables group commit, so every write commits on its own: the slower path, never a lost write. In the intake path `if !config.enabled` then produces WriteGroupCommitFallbackReason::Disabled, a named fallback reason carried in the result, so running without group commit is reported rather than assumed. The config error itself is not reported on this path.",
     ),
     allowed_in(
         "NSF-CORE-MODEL-LAST-SEGMENT",
@@ -1238,11 +1244,16 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         ".filter(|ancestor| graph.successors(ancestor).unwrap_or_default().is_empty())",
         "A reachable ancestor with no outgoing causal successors is intentionally treated as terminal. The empty successor list is READ here, not returned: it is the predicate's own definition of terminal, so an absent adjacency entry and a genuinely childless node are the same fact for this filter.",
     ),
-    allowed(
+    allowed_in(
         "NSF-GRAPH-CAUSAL-NO-NODE-ATTRS",
         "src/graph/causal.rs",
+        // File-scoped until 2026-11-26. bd-amhns relied on the `(node)`
+        // spelling to pin it here, and 2076869fe broke that: it rewrote
+        // reachable_causal_subgraph to copy every node with the same
+        // `graph.node_attrs(node)` call, so this rule owned 2 against 1.
+        "build_unit_flow_graph",
         "graph.node_attrs(node).cloned().unwrap_or_default()",
-        "Causal flow projection permits nodes without optional attributes while adding required demand metadata explicitly. Left file-scoped and unchanged by bd-amhns: the `(node)` spelling in the fragment pins it to build_unit_flow_graph, and the two sibling sites in reachable_causal_subgraph spell it `(source)` and `(successor)`, so this rule cannot reach them.",
+        "Causal flow projection permits nodes without optional attributes while adding required demand metadata explicitly.",
     ),
     allowed_in(
         "NSF-GRAPH-CAUSAL-BFS-NO-SUCCESSORS",
@@ -1255,6 +1266,9 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         // Adding the function scope is the fix: the absorbed sites belong to a
         // different operation and are justified separately below, rather than
         // being swept under a reason written about shortest-path traversal.
+        // Owns 0 since 2076869fe: shortest_path_lengths now calls fnx's
+        // single_source_shortest_path_length_directed and has no successor
+        // walk of its own. Retired to zero in the counts ledger.
         "shortest_path_lengths",
         "graph.successors(&current).unwrap_or_default()",
         "Causal shortest-path traversal uses an empty successor list as the explicit leaf-node case.",
@@ -1264,7 +1278,17 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/graph/causal.rs",
         "reachable_causal_subgraph",
         "graph.node_attrs(",
-        "Three sites, multiplicity 3, added by bd-amhns for the reachable-subgraph copy introduced in 543601123: the source node's attrs, the successor walk, and each successor's attrs. All three COPY what the source graph holds, so an absent entry means the graph genuinely has no attributes for that node or no outgoing edges from it -- there is no read to fail. Node existence is not assumed either: `if !graph.has_node(source)` returns the empty scoped graph before any of this. One fragment carries all three because the two node_attrs lines straddle the successor line, so each site's window contains one of them; no single LINE is inside all three windows, which is why the fragment names the call and not a statement.",
+        "Added by bd-amhns for the reachable-subgraph copy introduced in 543601123. Since 2076869fe the copy adds every reachable node, in distance order, with `graph.node_attrs(node).cloned().unwrap_or_default()`; the successor walk that follows is NSF-GRAPH-CAUSAL-SCOPED-SUBGRAPH-SUCCESSORS. The copy reproduces what the source graph holds, so an absent entry means the graph has no attributes for that node, and there is no read to fail. Node existence is not assumed: `if !graph.has_node(source)` returns the empty scoped graph before any of this, and every copied node comes from the reachability map of that graph.",
+    ),
+    allowed_in(
+        "NSF-GRAPH-CAUSAL-SCOPED-SUBGRAPH-SUCCESSORS",
+        "src/graph/causal.rs",
+        // Split from SCOPED-SUBGRAPH-COPY on 2026-11-26: 2076869fe moved this
+        // line out of every node_attrs line's +/-4 window, so it went
+        // unclassified.
+        "reachable_causal_subgraph",
+        "graph.successors(current).unwrap_or_default()",
+        "The successor walk of the reachable-subgraph copy. Every `current` comes from the reachability map of the same graph, so it is a known node, and an empty successor list means it has no outgoing causal edge. The edges that ARE copied fail loudly: a successor without edge attributes returns GraphError::GraphEngine (\"missing edge attributes\") rather than being skipped.",
     ),
     allowed_in(
         "NSF-GRAPH-CAUSAL-SEED-WALK-SUCCESSORS",
@@ -2782,21 +2806,24 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     allowed_in(
         "NSF-CURATE-AUDIT-DETAILS-PARSE",
         "src/core/curate.rs",
-        "audited_source_memory_ids_for_rule_candidate",
+        // 8a7516a59 moved the body of audited_source_memory_ids_for_rule_candidate
+        // into this function unchanged; the wrapper now only passes `false`.
+        // Same for the two rules below.
+        "source_memory_ids_for_rule_candidate_with_audits",
         "serde_json::from_str(entry.details.as_deref().unwrap_or_default())",
         "The default feeds a PARSER THAT REJECTS IT. serde_json::from_str(\"\") is an error, mapped immediately to invalid(\"malformed audit details\")?, so an audit row with no details fails the verification instead of passing it with an empty document.",
     ),
     allowed_in(
         "NSF-CURATE-AUDIT-CONTENT-HASH",
         "src/core/curate.rs",
-        "audited_source_memory_ids_for_rule_candidate",
+        "source_memory_ids_for_rule_candidate_with_audits",
         "!= blake3::hash(",
         "Absent proposed content hashes as empty, and that hash is COMPARED against the recorded proposedContentHash; a mismatch returns invalid(\"audit does not describe this proposal\"). The empty hash cannot falsely verify a proposal that had content, and when the recorded hash is itself the hash of empty the two agree correctly.",
     ),
     allowed_in(
         "NSF-CURATE-DERIVATION-REF-HASH",
         "src/core/curate.rs",
-        "audited_source_memory_ids_for_rule_candidate",
+        "source_memory_ids_for_rule_candidate_with_audits",
         "reference[\"contentHash\"].as_str().unwrap_or_default(),",
         "The reference's IDENTITY is validated strictly on the two lines above -- a missing `id` is invalid(\"missing memory ID\"), and a non-memory kind or unparseable MemoryId is invalid(\"invalid memory reference\"). Only the supplementary content hash defaults, and an empty string is not a valid blake3 hash, so it records \"this audit reference carried no content hash\" rather than a value that could falsely match one.",
     ),
@@ -3349,6 +3376,10 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     allowed_in(
         "NSF-CORE-GLOBAL-FALLBACK-ADMISSION",
         "src/core/search.rs",
+        // Owns 0 since f53320496: the function now returns
+        // `Ok((Vec::new(), None))` after each degraded.push, and the
+        // `.map(..).unwrap_or_default()` this key named is gone. Retired to
+        // zero in the counts ledger; the reasoning below still describes it.
         "global_store_fallback_memories",
         ".map(|(_, memories, feedback)| (memories, Some(feedback)))",
         "EXEMPLARY, and the positive control cited by bd-p42mq. The callee returns Option, not Result, and every None return is immediately preceded by a degraded.push -- scope_metadata_unavailable, global_memory_disabled, global_lane_migration_required, and scope_metadata_unavailable again. The REASON travels out through the degraded channel; only the VALUE falls back, which is exactly what a fail-soft default should look like. The genuinely untrustworthy case is separated and fails hard instead: workspace_memory_policy(..)? propagates one line above, matching the doc comment's promise that an untrustworthy privacy policy fails the request rather than enabling the lane.",
@@ -3702,6 +3733,80 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "parse",
         ".transpose()?",
         "Three optional query parameters in `parse` (`speed`, `sourceMode`, `memoryScope`), multiplicity 3: omitted parameters take their documented defaults while malformed present values fail closed through `serve_usage_error` and `.transpose()?`.",
+    ),
+    // 2026-11-26: sixteen sites added since this gate last ran on the lane,
+    // each read at its source before it was admitted here.
+    allowed_in(
+        "NSF-CLI-PLAN-GOAL-HUMAN-TEXT",
+        "src/cli/mod.rs",
+        "render_goal_plan_human",
+        "value.as_str().unwrap_or_default().to_owned()",
+        "The renderer's only caller, handle_plan_goal, passes the `data` object that GoalPlan::data_json built a few lines earlier. planId, goalInput, recipeId and profile, and each step's command, effectClass and description, are Rust `String`s or `as_str()` labels there, so every field it reads is a JSON string and the empty default cannot be reached from that caller. The JSON, TOON and compact renderers emit the same object directly, without this helper.",
+    ),
+    allowed_in(
+        "NSF-CORE-PACK-DRIFT-ANCHOR-BATCH-ABSENT",
+        "src/core/context.rs",
+        "push_selected_context_memory_drift_degradations",
+        "anchors.remove(*memory_id).unwrap_or_default(),",
+        "list_memory_anchors_batch inserts a memory only when it has at least one anchor row, so a memory missing from the batch map has no anchors, which is the answer the isolated per-memory read gives too. A FAILED batch is not this case: `.ok()` turns it into None, and every memory then takes memory_drift_selection_hint_for_memory, whose read errors stay per-item diagnostics.",
+    ),
+    allowed_in(
+        "NSF-CORE-PACK-CANDIDATE-SEAL-BATCH-FALLBACK",
+        "src/core/context.rs",
+        "candidates_from_search_for_task_paths",
+        "(id.clone(), admission)",
+        "A failed seal batch yields an EMPTY map, and an empty map withholds nothing. Every candidate then misses `candidate_seals` and is filled by `.entry(..).or_insert_with(|| context_memory_seal_admission(..))`, an isolated get_effective_memory_seal read that excludes the candidate fail closed with context_candidate_memory_batch_unavailable when it cannot be read. rule_sources_admission takes the same map and fills it the same way. The batch only saves reads; its failure costs reads, not seal enforcement.",
+    ),
+    allowed_in(
+        "NSF-SEARCH-REVALIDATE-NO-LOCAL-PRELOAD",
+        "src/core/search.rs",
+        "revalidate_with_feedback",
+        ".map(|snapshot| snapshot.global.local_memories.clone())",
+        "`validated` is None only from the #[cfg(test)] `revalidate` wrapper. The production caller in src/core/context.rs reaches revalidate_with_feedback only with a validated snapshot; when validation fails it drops the handoff and reruns the canonical pack path. Without a snapshot there are no preloaded rows to reuse, so the map starts empty and every local hit is revalidated against `connection`.",
+    ),
+    allowed_in(
+        "NSF-SEARCH-REVALIDATE-NO-GLOBAL-HITS",
+        "src/core/search.rs",
+        "revalidate_with_feedback",
+        ".take_global_hits(options, &mut hits, &mut memories)",
+        "The same None case as NSF-SEARCH-REVALIDATE-NO-LOCAL-PRELOAD, reachable only from the #[cfg(test)] wrapper. With no validated global snapshot no hit is admitted as global, so none can be mistaken for a locally owned row: a `mem_` hit that is not in the local store is dropped by the `retain` below.",
+    ),
+    allowed_in(
+        "NSF-SEARCH-TOMBSTONE-SNAPSHOT-EMPTY",
+        "src/core/search.rs",
+        // Ahead of the DEGRADED rule below: the first site's window also
+        // reaches that rule's fragment.
+        "tombstone_snapshot_hits",
+        "if memories.is_empty()",
+        "Two sites, multiplicity 2, each a true empty result: the workspace has no tombstoned memories within the retrieval bounds, or revision admission at the reference time admitted none of them (admit_local_memory_ids pushes its own degradation when it cannot read). This retrieval only SUPPLEMENTS the main search with historical hits, so finding none adds nothing.",
+    ),
+    allowed_in(
+        "NSF-SEARCH-TOMBSTONE-SNAPSHOT-DEGRADED",
+        "src/core/search.rs",
+        "tombstone_snapshot_hits",
+        "degraded.push(unavailable(",
+        "Five sites, multiplicity 5: no lexical backend in this build, no pinned read-only source snapshot, a retired corpus over the retrieval limit, a failed read of the retired rows, and a failed in-memory lexical query. Each pushes search_tombstone_snapshot_unavailable (warning) naming its cause on the line before it returns, and the two failures also log the error with tracing::warn. The empty Vec is the absence of a SUPPLEMENTAL result; the main search's hits are untouched.",
+    ),
+    allowed_in(
+        "NSF-SWARM-BRIEF-RESERVATION-OPTIONAL-FIELDS",
+        "src/core/swarm_brief_delta.rs",
+        "from_json_value",
+        ".get(\"pathPattern\")",
+        "Two sites, multiplicity 2: a reservation's holder and path pattern are optional in the snapshot JSON, and an absent one parses as empty. That matches the in-process conversion above, which also builds the id as `{holder}:{path}` and skips a reservation when both are empty. Here a reservation with neither an explicit id nor a holder or path (id empty or `:`) is skipped by the `continue` below.",
+    ),
+    allowed_in(
+        "NSF-SWARM-BRIEF-EVIDENCE-HASH-OPTIONAL",
+        "src/core/swarm_brief_delta.rs",
+        "from_json_value",
+        ".get(\"evidenceHash\")",
+        "An absent evidence hash parses as empty: the entry recorded none. A verification entry is identified by its command fingerprint, and one without a fingerprint is skipped by the `continue` above; status defaults explicitly to \"unknown\". The delta compares evidence hashes, so an empty hash against a recorded one still reports a change.",
+    ),
+    allowed_in(
+        "NSF-DAEMON-KEYED-ACK-DEGRADED-COPY",
+        "src/daemon/server.rs",
+        "daemon_keyed_memory_ack_json",
+        ".and_then(|report| report.get(\"degraded\"))",
+        "When the remember report is absent, this empty default never ships: `if !complete` replaces `degraded` with daemon_write_followup_failed (medium), and reportStatus says unavailable. When the report is present its own `degraded` array is copied, and a report without one has no degradations to carry. Either way the acknowledgement keeps the exact outcome and the idempotency key.",
     ),
 ];
 
@@ -4061,6 +4166,15 @@ fn cfg_test_only_files_are_not_scanned_as_product_code() -> TestResult {
         problems.push(
             "src/core/ask_privacy_tests.rs is included behind #[cfg(test)] from \
              src/core/ask_corpus.rs and must be recognised as test-only"
+                .to_owned(),
+        );
+    }
+    // The include! shape: pasted in from inside curate.rs's cfg(test) module.
+    if !gated.contains("src/core/curate_source_admission_tests.rs") {
+        problems.push(
+            "src/core/curate_source_admission_tests.rs is include!d inside \
+             #[cfg(test)] mod tests in src/core/curate.rs and must be recognised \
+             as test-only"
                 .to_owned(),
         );
     }
@@ -4884,10 +4998,34 @@ impl InventoryRule {
 /// findings sat in any of them, so this closes a latent hole rather than
 /// rewriting live debt — which is the cheap moment to close it, before a
 /// spurious entry gets baselined and has to be unpicked.
+///
+/// A third shape pastes the file in with `include!`, from inside a module that
+/// is already behind `#[cfg(test)]`, so the included file carries no cfg of
+/// its own:
+///
+/// ```ignore
+/// // src/core/curate.rs
+/// #[cfg(test)]
+/// mod tests {
+///     mod source_admission_tests {
+///         include!("curate_source_admission_tests.rs");
+///     }
+/// }
+/// ```
+///
+/// Measured 2026-11-26, a test helper in that file
+/// (`src/core/curate_source_admission_tests.rs:854`) was the only finding in
+/// any file included this way, and it turned the unclassified ratchet red. An
+/// `include!` counts only from inside a `#[cfg(test)]` span or from a file that
+/// is already test-only, so `include!("context_test_module.rs")` at the top
+/// level of src/core/context.rs gates nothing; that file opens its own
+/// `#[cfg(test)]` module.
 fn cfg_test_only_files() -> Result<BTreeSet<String>, String> {
     let mut files = Vec::new();
     collect_rust_files(&repo_path("src"), &mut files)?;
     let mut gated = BTreeSet::new();
+    // (includer, included, whether the `include!` sits in a cfg(test) span)
+    let mut includes: Vec<(String, String, bool)> = Vec::new();
 
     for path in &files {
         let source = fs::read_to_string(path)
@@ -4896,6 +5034,25 @@ fn cfg_test_only_files() -> Result<BTreeSet<String>, String> {
         let parent = path
             .parent()
             .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+
+        let (code, deltas) = scan_code_and_brace_deltas(&source);
+        let ignored = ignored_test_module_lines(&code, &deltas);
+        let includer = relative_path(path)?;
+        for (index, line) in code.iter().enumerate() {
+            let Some(rest) = line.trim().strip_prefix("include!(\"") else {
+                continue;
+            };
+            if let Some(name) = rest.split('"').next() {
+                let candidate = parent.join(name);
+                if candidate.is_file() {
+                    includes.push((
+                        includer.clone(),
+                        relative_path(&candidate)?,
+                        ignored.get(index) == Some(&true),
+                    ));
+                }
+            }
+        }
 
         for (index, line) in lines.iter().enumerate() {
             if line.trim() != "#[cfg(test)]" {
@@ -4928,6 +5085,24 @@ fn cfg_test_only_files() -> Result<BTreeSet<String>, String> {
                     gated.insert(relative_path(&candidate)?);
                 }
             }
+        }
+    }
+
+    for (_, included, in_test_span) in &includes {
+        if *in_test_span {
+            gated.insert(included.clone());
+        }
+    }
+    // A file pasted into a test-only file is test-only too, at any depth.
+    loop {
+        let before = gated.len();
+        for (includer, included, _) in &includes {
+            if gated.contains(includer) {
+                gated.insert(included.clone());
+            }
+        }
+        if gated.len() == before {
+            break;
         }
     }
 

@@ -193,9 +193,22 @@
 #            right because they are a different operation.
 0	NSF-GRAPH-CAUSAL-CLOSURE-NO-SUCCESSORS
 1	NSF-GRAPH-CAUSAL-TERMINAL-NO-SUCCESSORS
+# 2026-11-26: 2076869fe (fnx algorithm boundaries) produced four symptoms here
+# and one unclassified site; one cause, fixed as one unit, as bd-amhns was.
+#   NO-NODE-ATTRS stays 1 but was owning 2: reachable_causal_subgraph now copies
+#            every node as `graph.node_attrs(node)`, the spelling this
+#            file-scoped rule relied on to stay in build_unit_flow_graph. Now
+#            function-scoped there.
+#   BFS      1 -> 0. Its site is GONE: shortest_path_lengths calls fnx's
+#            single_source_shortest_path_length_directed. Retired to zero.
+#   SCOPED-SUBGRAPH-COPY 3 -> 1. The source and successor attrs copies merged
+#            into one per-node copy, and the successor walk left every
+#            node_attrs window, so it went unclassified. It is split out as
+#            SCOPED-SUBGRAPH-SUCCESSORS rather than swept under a copy reason.
 1	NSF-GRAPH-CAUSAL-NO-NODE-ATTRS
-1	NSF-GRAPH-CAUSAL-BFS-NO-SUCCESSORS
-3	NSF-GRAPH-CAUSAL-SCOPED-SUBGRAPH-COPY
+0	NSF-GRAPH-CAUSAL-BFS-NO-SUCCESSORS
+1	NSF-GRAPH-CAUSAL-SCOPED-SUBGRAPH-COPY
+1	NSF-GRAPH-CAUSAL-SCOPED-SUBGRAPH-SUCCESSORS
 1	NSF-GRAPH-CAUSAL-SEED-WALK-SUCCESSORS
 1	NSF-OUTPUT-FIELD-SELECTOR-COMMAND
 1	NSF-PACK-COORDINATION-SCHEMA
@@ -209,13 +222,21 @@
 1	NSF-POLICY-ENV-PROFILE
 1	NSF-STEWARD-RESOURCE-SUMMARY
 4	NSF-INSIGHTS-GRAPH-DATA-ABSENT
-8	NSF-INSIGHTS-NO-WORKSPACE
-7	NSF-INSIGHTS-NO-DATABASE
+# 2026-11-26: 3de57777f made the proximity-hotspot loader and builder return a
+# (reports, degradation) pair, so their early returns became
+# `Ok((Vec::new(), None))`, a shape this scanner does not match. Four sites left
+# the scan: the loader's no-workspace and no-database returns (NO-WORKSPACE
+# 8 -> 7, NO-DATABASE 7 -> 6) and the builder's only NO-LINKS and
+# GOMORY-HU-MIN-NODES sites (1 -> 0 each, retired). Those returns behave as
+# before. The scale-policy skip that also returned an empty list now carries a
+# degradation instead.
+7	NSF-INSIGHTS-NO-WORKSPACE
+6	NSF-INSIGHTS-NO-DATABASE
 6	NSF-INSIGHTS-NO-WORKSPACE-ID
 1	NSF-INSIGHTS-NO-RUST-PATHS
 1	NSF-INSIGHTS-OPTIONAL-GRAPH-MEMORIES
-1	NSF-INSIGHTS-NO-LINKS
-1	NSF-INSIGHTS-GOMORY-HU-MIN-NODES
+0	NSF-INSIGHTS-NO-LINKS
+0	NSF-INSIGHTS-GOMORY-HU-MIN-NODES
 1	NSF-INSIGHTS-BRIDGE-MIN-NODES
 1	NSF-INSIGHTS-NO-CONTRADICTIONS
 1	NSF-INSIGHTS-GAPS-EMPTY-GRAPH
@@ -308,7 +329,10 @@
 1	NSF-CORE-SANDBOX-SESSION-LOAD
 0	NSF-CORE-SOURCE-RUN-STDERR-TAIL
 1	NSF-CORE-QOS-REGISTRY-DEFAULT
-1	NSF-CORE-PLAN-CLOCK-FALLBACK
+# PLAN-CLOCK-FALLBACK 1 -> 0 (2026-11-26): its site is GONE. d929b31b9 made
+# planId a blake3 digest of the plan's inputs and deleted rand_id, whose
+# pre-epoch clock default this rule justified. Retired to zero.
+0	NSF-CORE-PLAN-CLOCK-FALLBACK
 1	NSF-DOMINANCE-FRONTIER-ABSENT
 2	NSF-DOMINANCE-DEGREE-CHECKS
 1	NSF-DOMINANCE-BFS-PREDECESSORS
@@ -829,7 +853,10 @@
 1	NSF-POLICY-DOWNLOAD-SHELL-PROGRAM
 1	NSF-CORE-REMOTE-EMBED-ZERO-INPUTS
 0	NSF-CORE-GLOBAL-FALLBACK-PRECONDITION
-1	NSF-CORE-GLOBAL-FALLBACK-ADMISSION
+# GLOBAL-FALLBACK-ADMISSION 1 -> 0 (2026-11-26): its site is GONE. f53320496
+# bound global retrieval to source snapshots and dropped the
+# `.map(..).unwrap_or_default()` admission; see the rule. Retired to zero.
+0	NSF-CORE-GLOBAL-FALLBACK-ADMISSION
 1	NSF-CORE-ASK-TARGETS-NO-PATHS
 1	NSF-CORE-ASK-ADMISSION-EMPTY-PAGE
 1	NSF-DB-MEMORY-RECENT-ZERO-LIMIT
@@ -880,3 +907,14 @@
 1	NSF-SERVE-SEARCH-DEDUPE-DEFAULT
 1	NSF-SERVE-CONTEXT-TASK-PATHS-ABSENT
 3	NSF-SERVE-PARSE-OPTIONAL-QUERY-PARAMS
+# 2026-11-26: the sixteen sites added since this gate last ran on the lane.
+1	NSF-CLI-PLAN-GOAL-HUMAN-TEXT
+1	NSF-CORE-PACK-DRIFT-ANCHOR-BATCH-ABSENT
+1	NSF-CORE-PACK-CANDIDATE-SEAL-BATCH-FALLBACK
+1	NSF-SEARCH-REVALIDATE-NO-LOCAL-PRELOAD
+1	NSF-SEARCH-REVALIDATE-NO-GLOBAL-HITS
+2	NSF-SEARCH-TOMBSTONE-SNAPSHOT-EMPTY
+5	NSF-SEARCH-TOMBSTONE-SNAPSHOT-DEGRADED
+2	NSF-SWARM-BRIEF-RESERVATION-OPTIONAL-FIELDS
+1	NSF-SWARM-BRIEF-EVIDENCE-HASH-OPTIONAL
+1	NSF-DAEMON-KEYED-ACK-DEGRADED-COPY
