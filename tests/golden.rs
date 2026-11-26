@@ -198,9 +198,13 @@ mod tests {
         }
     }
 
+    // Both plain helpers drop an inherited EE_WORKSPACE (bd-uuaa3): an exported
+    // one would redirect every spawn that names no workspace, and no test here
+    // can set it itself, since unsafe_code is forbidden.
     fn run_ee(args: &[&str]) -> Result<Output, String> {
         Command::new(ee_binary_path()?)
             .args(args)
+            .env_remove("EE_WORKSPACE")
             .output()
             .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
     }
@@ -269,6 +273,7 @@ mod tests {
     fn run_ee_offline(args: &[&str]) -> Result<Output, String> {
         Command::new(ee_binary_path()?)
             .env("EE_EMBED_DOWNLOAD", "off")
+            .env_remove("EE_WORKSPACE")
             .args(args)
             .output()
             .map_err(|error| format!("failed to run offline ee {}: {error}", args.join(" ")))
