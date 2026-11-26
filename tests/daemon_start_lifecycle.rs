@@ -115,8 +115,21 @@ fn isolated_root_for_socket(socket_path: &Path) -> PathBuf {
     base_dir.join(format!(".ee-isolated-{stem}"))
 }
 
+/// `ee daemon start` resolves a workspace even with `--socket`, and the
+/// detached child is re-run as `ee --workspace <that root> daemon start ...`.
+/// Each spawn here runs from the isolated root beside the socket, under
+/// `/tmp`, so that root is the workspace instead of the checkout cargo runs
+/// in (bd-uuaa3). The root outlives each call, which a per-call temp dir
+/// would not: a detached daemon keeps its cwd until the test stops it.
+fn daemon_command(socket_path: &Path) -> Result<std::process::Command, String> {
+    let root = isolated_root_for_socket(socket_path);
+    let mut command = crate::isolated_ee::isolated_ee_command(&root)?;
+    command.current_dir(&root);
+    Ok(command)
+}
+
 fn run_daemon_start(socket_path: &Path) -> Result<Value, String> {
-    let output = crate::isolated_ee::isolated_ee_command(&isolated_root_for_socket(socket_path))?
+    let output = daemon_command(socket_path)?
         .args(["daemon", "start", "--json", "--socket"])
         .arg(socket_path)
         .env("NO_COLOR", "1")
@@ -142,7 +155,7 @@ fn run_daemon_start(socket_path: &Path) -> Result<Value, String> {
 }
 
 fn run_daemon_stop(socket_path: &Path) -> Result<Value, String> {
-    let output = crate::isolated_ee::isolated_ee_command(&isolated_root_for_socket(socket_path))?
+    let output = daemon_command(socket_path)?
         .args(["daemon", "stop", "--json", "--socket"])
         .arg(socket_path)
         .env("NO_COLOR", "1")
@@ -345,16 +358,15 @@ fn combine_test_results(result: TestResult, cleanup: TestResult) -> TestResult {
 #[test]
 fn daemon_start_foreground_sigterm_shuts_down_and_unlinks_socket() -> TestResult {
     let socket_path = secure_socket_path("ee-daemon-foreground-sigterm.sock")?;
-    let mut child =
-        crate::isolated_ee::isolated_ee_command(&isolated_root_for_socket(&socket_path))?
-            .args(["daemon", "start", "--foreground", "--socket"])
-            .arg(&socket_path)
-            .env("NO_COLOR", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("spawn foreground daemon: {error}"))?;
+    let mut child = daemon_command(&socket_path)?
+        .args(["daemon", "start", "--foreground", "--socket"])
+        .arg(&socket_path)
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("spawn foreground daemon: {error}"))?;
 
     let result: TestResult = (|| {
         let stdout = child
