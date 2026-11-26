@@ -3647,15 +3647,8 @@ fn eval_run_pack_quality_reports_fixture_comparison_without_unavailable_sentinel
         ],
     )?;
 
-    // bd-tzlmo: the pack-quality comparison runs an eval whose fixture models
-    // failures, so EvalFailure is the designed exit (see EVAL_FAILURE_EXIT).
-    // This test's purpose is the unavailable-sentinel clause, not the exit
-    // value.
-    ensure_equal(
-        &result.exit_code,
-        &EVAL_FAILURE_EXIT,
-        "eval run pack-quality exit code",
-    )?;
+    // The exit code and success flag follow the verdict, so they are checked
+    // against it below rather than pinned here.
     ensure(
         result.stderr.is_empty(),
         "eval run pack-quality JSON response must keep stderr empty",
@@ -3666,12 +3659,6 @@ fn eval_run_pack_quality_reports_fixture_comparison_without_unavailable_sentinel
         "/schema",
         json!("ee.response.v2"),
         "eval run pack-quality response schema",
-    )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/success",
-        json!(false),
-        "eval run pack-quality success flag",
     )?;
     ensure_json_pointer(
         &result.parsed,
@@ -3697,37 +3684,36 @@ fn eval_run_pack_quality_reports_fixture_comparison_without_unavailable_sentinel
         json!("fx.release_failure.v1"),
         "eval run pack-quality fixture id",
     )?;
-    // bd-tzlmo: the verdict is not independent of the environment. This test
-    // already asserts a `semantic_disabled` degraded branch below, i.e. it runs
-    // where no embedding model is present; with semantic retrieval off the
-    // pack-quality comparison regresses, so `regression` is the consistent
-    // verdict and `within` was only reachable with models loaded. Derive the
-    // expectation from that same degraded branch rather than hardcoding either
-    // value, so the verdict and its cause cannot drift apart -- a bare
-    // `regression` here would bake a model-less worker into the contract.
-    let semantic_disabled = result
+    // The verdict is a retrieval-quality reading, and
+    // pack_quality_contracts' stable-fields snapshot pins it for this
+    // scenario. bd-tzlmo derived it from the semantic branch instead:
+    // `regression` without a model and exit 9, `within` with one. Since
+    // 0020c40a6 the model-less run reports `drift` with no regressed case,
+    // which passes, so the process exits 0 and the derived expectation went
+    // stale. This test's claim is honesty, so it checks that the exit code
+    // and the success flag agree with the verdict, using the mapping
+    // handle_eval_pack_quality_run applies.
+    let verdict = result
         .parsed
-        .pointer("/data/degradedBranches")
-        .and_then(Value::as_array)
-        .is_some_and(|branches| {
-            branches.iter().any(|branch| {
-                branch
-                    .get("code")
-                    .and_then(Value::as_str)
-                    .is_some_and(|code| {
-                        matches!(code, "semantic_disabled" | "embed_model_unavailable")
-                    })
-            })
-        });
+        .pointer("/data/report/aggregate_verdict")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "eval run pack-quality must report an aggregate verdict".to_owned())?;
+    let (expected_exit, expected_success) = match verdict {
+        "within" | "drift" => (0, true),
+        "regression" => (EVAL_FAILURE_EXIT, false),
+        "inconclusive" => (UNSATISFIED_DEGRADED_MODE_EXIT, false),
+        other => return Err(format!("unknown pack-quality verdict `{other}`")),
+    };
+    ensure_equal(
+        &result.exit_code,
+        &expected_exit,
+        &format!("eval run pack-quality exit code for verdict `{verdict}`"),
+    )?;
     ensure_json_pointer(
         &result.parsed,
-        "/data/report/aggregate_verdict",
-        json!(if semantic_disabled {
-            "regression"
-        } else {
-            "within"
-        }),
-        "eval run pack-quality verdict",
+        "/success",
+        json!(expected_success),
+        "eval run pack-quality success flag",
     )?;
     // bd-tzlmo: the old expectation was the literal string
     // "target/ee-e2e/usr_pre_task_brief/<run-id>/04-context.stdout.json",

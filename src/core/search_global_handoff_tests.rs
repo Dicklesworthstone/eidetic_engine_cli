@@ -391,7 +391,12 @@ fn global_tombstones_survive_live_rebuilds_in_search_and_pack() {
         return;
     }
     let fixture = Fixture::new();
-    let reference = Utc::now();
+    // After every setup write. tombstone_memory stamps updated_at with the
+    // wall clock, and the pack bounds row bookkeeping by as_of
+    // (temporal_record_matches), so a reference taken before the tombstones
+    // excluded the retired row from the pack while search still returned it
+    // (bd-9ct8b: "context_temporal_filtered_results", empty pack).
+    let reference = Utc::now() + chrono::Duration::minutes(5);
     let created = reference - chrono::Duration::days(1);
     fixture.memory_with_content(900, 1.0, 1.0, created, "Unrelated workspace instructions.");
     include_global(&fixture, true);
