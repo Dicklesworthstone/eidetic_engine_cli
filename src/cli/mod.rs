@@ -85381,11 +85381,11 @@ mod tests {
             "status": "computed",
             "communityCount": 2,
         });
-        mark_graph_louvain_declined(&mut data);
+        super::mark_graph_louvain_declined(&mut data);
 
         ensure_equal(&data["status"], &serde_json::json!("declined"), "status")?;
         ensure_equal(&data["communityCount"], &serde_json::json!(2), "data kept")?;
-        let lifted = top_level_degraded_from_data(&data);
+        let lifted = super::top_level_degraded_from_data(&data);
         let entries = lifted
             .as_array()
             .ok_or("top-level degraded must be an array")?;
@@ -85402,7 +85402,7 @@ mod tests {
         )?;
         ensure_equal(
             &entries[0]["repair"],
-            &serde_json::json!(GRAPH_LOUVAIN_DECLINED_REPAIR),
+            &serde_json::json!(super::GRAPH_LOUVAIN_DECLINED_REPAIR),
             "repair",
         )?;
         ensure(
