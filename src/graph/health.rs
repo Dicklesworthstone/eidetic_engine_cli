@@ -151,6 +151,15 @@ pub fn detect_louvain_communities(graph: &Graph) -> LouvainPartition {
     )
 }
 
+/// The FrankenNetworkX version in ee's dependency contract, the row
+/// `linked_dependency_diagnostic_versions_match_cargo_lock` pins to Cargo.lock.
+fn franken_networkx_version() -> &'static str {
+    crate::core::doctor::DEPENDENCY_CONTRACT_ENTRIES
+        .iter()
+        .find(|entry| entry.name == "franken_networkx")
+        .map_or("unrecorded", |entry| entry.source.version)
+}
+
 /// Louvain over the `weight` edge attribute, summing plainly as fnx 0.3.0 did.
 ///
 /// fnx 0.4 returns `None` where networkx would raise. ee's edges carry float
@@ -184,6 +193,7 @@ pub fn louvain_partition(
     tracing::warn!(
         target: "ee::graph",
         algorithm = "louvain",
+        fnx_version = franken_networkx_version(),
         declined = true,
         degraded_code = GRAPH_LOUVAIN_DECLINED_CODE,
         node_count = graph.node_count(),
@@ -472,6 +482,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(singletons.len(), 6);
         assert_eq!(partition.communities, singletons);
+        // The warning's fnx_version comes from the dependency contract row,
+        // which the doctor tests pin to Cargo.lock.
+        assert_ne!(franken_networkx_version(), "unrecorded");
         Ok(())
     }
 
