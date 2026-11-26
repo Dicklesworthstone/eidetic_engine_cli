@@ -739,11 +739,12 @@ mod transcript_publication {
         let expected_spans = source_spans
             .iter()
             .map(|span| {
-                let admitted =
-                    span.is_derivation_admitted_for_session(&workspace_id, &source_session);
-                let mut row = BackupCassEvidenceRecord::from_stored(span);
-                row.redact_for_export(RedactionLevel::None, admitted);
-                row
+                BackupCassEvidenceRecord::for_export(
+                    span,
+                    &workspace_id,
+                    Some(&source_session),
+                    RedactionLevel::None,
+                )
             })
             .collect();
         db.close().map_err(|e| e.to_string())?;
