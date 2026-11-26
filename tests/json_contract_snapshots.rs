@@ -124,7 +124,23 @@ fn has_git_ancestor(path: &Path) -> bool {
         .any(|ancestor| ancestor.join(".git").exists())
 }
 
-/// A base directory for fixture artifacts that is NOT inside a git repository.
+/// Whether `ee` run from inside `path` can see a checkout above it, through
+/// either channel that reaches a contract:
+/// - a `.git`, which workspace scope discovery reads (bd-b3bhh);
+/// - a `Cargo.toml`, which doctor's install-freshness check reads. It walks up
+///   from the cwd to the first eidetic package manifest
+///   (`detect_cargo_toml_source_version` in src/core/install.rs).
+///
+/// The pinned RCH export carries no `.git` (rch excludes it), so there
+/// `has_git_ancestor` passes the in-checkout `TMPDIR`. Doctor then found the
+/// source version, and the doctor contract gained a second
+/// `binary_not_on_path` finding that the recording never had.
+fn inside_a_checkout(path: &Path) -> bool {
+    path.ancestors()
+        .any(|ancestor| ancestor.join(".git").exists() || ancestor.join("Cargo.toml").is_file())
+}
+
+/// A base directory for fixture artifacts that is NOT inside a checkout.
 ///
 /// The default temp dir is not safe to assume here. On the RCH lane `TMPDIR`
 /// points at `.rch-tmp/` INSIDE the synced checkout, so `tempfile` lands the
@@ -135,10 +151,11 @@ fn has_git_ancestor(path: &Path) -> bool {
 /// `scopeKind` legitimately changes VALUE and `diagnostics` legitimately gains
 /// an entry. The fixture's location is the thing that has to change.
 ///
-/// Candidates are tried in order and the first one outside a repository wins.
-/// If every candidate is inside one, this FAILS LOUDLY rather than silently
-/// recording a nested shape: inverting the snapshot would simply move the bug
-/// onto anyone whose temp dir is outside a repository.
+/// Candidates are tried in order and the first one outside a checkout (see
+/// [`inside_a_checkout`]) wins. If every candidate is inside one, this FAILS
+/// LOUDLY rather than silently recording a nested shape: inverting the
+/// snapshot would simply move the bug onto anyone whose temp dir is outside a
+/// checkout.
 fn repo_free_artifact_base() -> Result<PathBuf, String> {
     let mut candidates = vec![std::env::temp_dir()];
     for fallback in ["/tmp", "/var/tmp"] {
@@ -150,7 +167,7 @@ fn repo_free_artifact_base() -> Result<PathBuf, String> {
 
     let mut rejected = Vec::new();
     for candidate in candidates {
-        if has_git_ancestor(&candidate) {
+        if inside_a_checkout(&candidate) {
             rejected.push(candidate.display().to_string());
         } else {
             return Ok(candidate);
@@ -158,10 +175,10 @@ fn repo_free_artifact_base() -> Result<PathBuf, String> {
     }
 
     Err(format!(
-        "every candidate artifact base is inside a git repository, so the status \
-         contract would record a `subproject` scope that belongs to this machine \
-         rather than to the product (bd-b3bhh). Rejected: {}. Point TMPDIR at a \
-         directory outside any checkout.",
+        "every candidate artifact base is inside a checkout (a .git or Cargo.toml \
+         above it), so the status and doctor contracts would record a scope and an \
+         install posture that belong to this machine rather than to the product \
+         (bd-b3bhh). Rejected: {}. Point TMPDIR at a directory outside any checkout.",
         rejected.join(", ")
     ))
 }

@@ -10784,6 +10784,49 @@ mod tests {
         (options, kind, filters)
     }
 
+    /// A read's results as JSON with each hit's quality-scoring
+    /// `referenceTime` removed, so that two reads can be compared. The stamp
+    /// is the request's own clock. Two uncoalesced reads a moment apart
+    /// already differ there, and a coalesced follower carries its leader's.
+    /// Pinning `as_of` instead makes the read historical, and a historical
+    /// read refuses the index-free lexical source these fixtures search
+    /// ("explicit historical/reference-time retrieval retains its indexed
+    /// view"), which is how pinning it failed every baseline with "Search
+    /// index not found". Scoring reads the clock only by the minute
+    /// (`recencyReferenceUnixMinute`), which stays in the comparison; see
+    /// [`start_clear_of_a_minute_boundary`].
+    fn results_without_reference_time<T: serde::Serialize>(results: &T) -> serde_json::Value {
+        fn strip(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    if let Some(serde_json::Value::Object(scoring)) =
+                        object.get_mut("_ee_quality_scoring")
+                    {
+                        scoring.remove("referenceTime");
+                    }
+                    object.values_mut().for_each(strip);
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        let mut value = serde_json::to_value(results).expect("encode results");
+        strip(&mut value);
+        value
+    }
+
+    /// Recency is scored from the minute of the request's clock, so a
+    /// comparison whose reads straddle a minute boundary differs for a
+    /// reason that has nothing to do with coalescing. Start at least twenty
+    /// seconds before the next boundary.
+    fn start_clear_of_a_minute_boundary() {
+        use chrono::Timelike;
+        let second = chrono::Utc::now().second();
+        if second >= 40 {
+            thread::sleep(Duration::from_secs(u64::from(61 - second)));
+        }
+    }
+
     /// bd-d67os.9: a search may be shared only by requests it would have
     /// answered the same. The key moves with the exact query (not just its
     /// lowercased shape), with any option and with a write to the store. A
@@ -10940,9 +10983,7 @@ mod tests {
         let (mut options, kind, filters) =
             singleflight_search_parts(&workspace_path, "release checksums", 5);
         options.no_global = true;
-        // Pin the reference time stamped into every hit, or the baseline and
-        // the fallback below differ by the second between them.
-        options.as_of = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+        start_clear_of_a_minute_boundary();
         assert!(daemon_search_singleflight_key(&options, kind.as_deref(), &filters).is_some());
         // A directory is consistently unreadable as a JSONL file even when
         // tests run as root. The canonical search reports its normal gap.
@@ -10958,8 +10999,8 @@ mod tests {
                 .expect("uncoalesced fallback");
         assert!(codes.is_empty());
         assert_eq!(
-            serde_json::to_value(&fallback.report.results).unwrap(),
-            serde_json::to_value(&baseline.report.results).unwrap()
+            results_without_reference_time(&fallback.report.results),
+            results_without_reference_time(&baseline.report.results)
         );
         assert_eq!(
             serde_json::to_value(&fallback.report.degraded).unwrap(),
@@ -11291,12 +11332,9 @@ mod tests {
     fn coalesced_daemon_searches_return_the_uncoalesced_result_and_audit_each_request() {
         let (_workspace, workspace_path, connection, _workspace_id) =
             singleflight_search_fixture("Daemon singleflight coalescing parity memory");
-        let (mut options, kind, filters) =
+        let (options, kind, filters) =
             singleflight_search_parts(&workspace_path, "singleflight coalescing parity", 5);
-        // Every hit stamps its quality-scoring reference time, which is the
-        // request's own clock unless as_of pins it. Two uncoalesced searches
-        // a second apart already differ there, so pin it to compare runs.
-        options.as_of = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+        start_clear_of_a_minute_boundary();
         let executed = || {
             connection
                 .list_audit_by_action(crate::db::audit_actions::SEARCH_EXECUTED, None)
@@ -11317,7 +11355,7 @@ mod tests {
             before + 1,
             "one audit for the uncoalesced search"
         );
-        let expected = serde_json::to_value(&baseline.report.results).expect("encode results");
+        let expected = results_without_reference_time(&baseline.report.results);
 
         const REQUESTS: usize = 4;
         let barrier = std::sync::Barrier::new(REQUESTS);
@@ -11338,7 +11376,7 @@ mod tests {
         for run in runs {
             let (run, _codes) = run.expect("coalesced search");
             assert_eq!(
-                serde_json::to_value(&run.report.results).expect("encode results"),
+                results_without_reference_time(&run.report.results),
                 expected
             );
             let request_totals = run
@@ -11381,7 +11419,7 @@ mod tests {
                 },
             )
             .expect("queued source publication");
-        let (mut options, _, _, _) = DaemonSearchParams::from_value(&serde_json::json!({
+        let (options, _, _, _) = DaemonSearchParams::from_value(&serde_json::json!({
             "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
             "query": "release",
             "workspacePath": workspace_path,
@@ -11393,9 +11431,7 @@ mod tests {
         .expect("pack params")
         .into_search_parts(&workspace_path.display().to_string())
         .expect("pack parts");
-        // The quality-scoring reference time stamped into every hit is the
-        // request's own clock unless as_of pins it; pin it to compare runs.
-        options.as_of = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+        start_clear_of_a_minute_boundary();
 
         let pack_key = |require_cached_local: bool| {
             daemon_pack_search_singleflight_key(&options, require_cached_local, None)
@@ -11420,7 +11456,7 @@ mod tests {
             !baseline.report.results.is_empty(),
             "the fixture memory must be found"
         );
-        let expected = serde_json::to_value(&baseline.report.results).expect("encode results");
+        let expected = results_without_reference_time(&baseline.report.results);
 
         const REQUESTS: usize = 4;
         let barrier = std::sync::Barrier::new(REQUESTS);
@@ -11442,7 +11478,7 @@ mod tests {
         for (handoff, _codes) in retrievals {
             let handoff = handoff.expect("coalesced pack retrieval");
             assert_eq!(
-                serde_json::to_value(&handoff.report.results).expect("encode results"),
+                results_without_reference_time(&handoff.report.results),
                 expected
             );
             assert!(handoff.matches_request(&options), "names its request");
