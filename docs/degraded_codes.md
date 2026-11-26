@@ -1672,7 +1672,7 @@ ee swarm work-packet --workspace . --json
 
 **Expected emission.** Message contains: `no output ... advisory only`
 
-**Repair hint.** br list --status in_progress --json
+**Repair hint.** br list --status in_progress --json --no-auto-import --no-auto-flush --allow-stale
 
 **Fixture.** [`tests/fixtures/failure_modes/beads_no_output.json`](../tests/fixtures/failure_modes/beads_no_output.json)
 
@@ -19626,5 +19626,5 @@ the gap is one of:
 For new degraded codes, follow the J6 fixture-authoring workflow in
 `tests/fixtures/failure_modes/` (see any existing fixture as a
 template), then regenerate.
-<!-- degraded-codes-fingerprint inputs=sha256:8ddefb42c125d3cf0450ec9f04672b3743dd3f41ca869b12d2a39687bc6a787f -->
-<!-- degraded-codes-fingerprint body=sha256:1c83d6c97332ea3114745d404252f4bb15f90a76fd277df1d724b24cd8b58267 -->
+<!-- degraded-codes-fingerprint inputs=sha256:c2dddf147b5b5dd1f04b3a4cde132512769853f224fa9039cc0b71537ac19948 -->
+<!-- degraded-codes-fingerprint body=sha256:19194ecef49b93e386cbbb750bb09804b394441df05f22efe1fa5273c95dec90 -->
