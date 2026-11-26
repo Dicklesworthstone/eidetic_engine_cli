@@ -5047,7 +5047,7 @@ fn run_daemon_search(
 /// audit. Before using a handoff, the client checks its source and calibration
 /// witnesses against its own stores. So a follower's client either uses what
 /// its own retrieval would have returned or rejects the handoff and retrieves
-/// locally, including after a feedback write the key cannot see.
+/// locally if the source changes after its single-flight key was captured.
 fn run_daemon_pack_search(
     options: &SearchOptions,
     loaded: Option<crate::core::index::CachedLocalEmbedder>,
@@ -5095,9 +5095,8 @@ fn daemon_singleflight_error_message(
     }
 }
 
-/// How long building a key waits for its generation-read connection. Each
-/// holder runs one small query, so a burst of identical requests passes
-/// through it quickly.
+/// Bound admission to the separate key-read pool. Its short source snapshot
+/// reads generations and feedback, then releases before search/coalescing.
 const DAEMON_SEARCH_KEY_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// The single-flight key for one daemon search: every `SearchOptions` field,
@@ -5147,6 +5146,8 @@ fn daemon_pack_search_singleflight_key(
 ///   when the read may use it, and the published index generation. A write
 ///   or rebuild that lands before a request arrives therefore keys it apart
 ///   from a read that started earlier;
+/// - complete feedback and calibration identities from each store's pinned
+///   source snapshot, including in-place edits that advance no generation;
 /// - the merged config, which no generation covers.
 fn daemon_read_singleflight_key(
     surface: SingleFlightSurface,
@@ -5154,11 +5155,16 @@ fn daemon_read_singleflight_key(
     options: &SearchOptions,
     request: &str,
 ) -> Option<SingleFlightKey> {
-    let workspace_generation = daemon_search_store_generation(&options.resolve_database_path())?;
-    let global_generation = if options.no_global {
+    let reference_time = options.as_of.unwrap_or_else(chrono::Utc::now);
+    let workspace = daemon_search_store_witness(
+        &options.workspace_path,
+        &options.resolve_database_path(),
+        reference_time,
+    )?;
+    let global = if options.no_global {
         None
     } else {
-        daemon_search_global_generation()?
+        daemon_search_global_witness(reference_time)?
     };
     let index_generation =
         crate::core::index::published_index_generation(&options.resolve_index_dir());
@@ -5166,18 +5172,22 @@ fn daemon_read_singleflight_key(
         .ok()?
         .values;
 
-    let global_generation = format!("{global_generation:?}");
+    let global = format!("{global:?}");
     let config = format!("{config:?}");
     let option_pairs = [
         ("request", request),
-        ("global_generation", global_generation.as_str()),
+        (
+            "workspace_calibration",
+            workspace.calibration_input_identity.as_str(),
+        ),
+        ("global_witness", global.as_str()),
         ("merged_config", config.as_str()),
     ];
     let workspace_identity = options.workspace_path.to_string_lossy();
     let mut input = SingleFlightKeyInput::new(
         surface,
         &workspace_identity,
-        workspace_generation,
+        workspace.generation,
         response_schema,
     );
     input.index_generation = index_generation;
@@ -5187,34 +5197,59 @@ fn daemon_read_singleflight_key(
     Some(SingleFlightKey::from_input(&input))
 }
 
-/// The user-global store's generation: `Some(None)` when there is no global
-/// store for the search to read, `None` when one exists but cannot be read.
-fn daemon_search_global_generation() -> Option<Option<u64>> {
-    let Ok(paths) = crate::core::global_store::default_global_store_paths_from_env() else {
-        return Some(None);
-    };
-    if !paths.database_path.exists() {
-        return Some(None);
-    }
-    daemon_search_store_generation(&paths.database_path).map(Some)
+#[derive(Debug, Eq, PartialEq)]
+struct DaemonSearchStoreWitness {
+    generation: u64,
+    calibration_input_identity: String,
 }
 
-/// A store's total generation, or `None` when the store is missing or cannot
-/// be read.
+/// `Some(None)` means the optional store is confirmed absent. Resolution or
+/// read failure supplies no witness and must fall back to uncoalesced work.
+fn daemon_search_global_witness(
+    reference_time: chrono::DateTime<chrono::Utc>,
+) -> Option<Option<DaemonSearchStoreWitness>> {
+    let paths = crate::core::global_store::default_global_store_paths_from_env().ok()?;
+    if !paths.database_path.try_exists().ok()? {
+        return Some(None);
+    }
+    daemon_search_store_witness(&paths.root, &paths.database_path, reference_time).map(Some)
+}
+
+/// Read a store's generation and complete calibration authority together, or
+/// return no witness when either cannot be established.
 ///
 /// It reads through a pool of its own. The search pins its snapshot on
 /// another pool for as long as it runs, and waiting on that pool would hold
-/// every follower back until its leader had finished.
-fn daemon_search_store_generation(database_path: &Path) -> Option<u64> {
-    if !database_path.exists() {
+/// every follower back until its leader had finished. The key's pin is always
+/// released here; no connection survives into the leader/follower wait.
+fn daemon_search_store_witness(
+    workspace_path: &Path,
+    database_path: &Path,
+    reference_time: chrono::DateTime<chrono::Utc>,
+) -> Option<DaemonSearchStoreWitness> {
+    if !database_path.try_exists().ok()? {
         return None;
     }
     let pool = registered_process_read_pool(
         DatabaseConfig::file(database_path.to_path_buf()),
         PoolConfig::default_single().with_acquire_timeout(DAEMON_SEARCH_KEY_ACQUIRE_TIMEOUT),
     );
-    let connection = pool.acquire().ok()?;
-    connection.total_workspace_generation().ok()
+    let snapshot = pool.pin_snapshot().ok()?;
+    let connection = snapshot.checked_connection().ok()?;
+    crate::core::workspace::addressed_workspace_row(connection, workspace_path, database_path)
+        .ok()?;
+    let generation = connection.total_workspace_generation().ok()?;
+    let calibration_input_identity = crate::core::search::search_calibration_input_identity(
+        workspace_path,
+        database_path,
+        connection,
+        reference_time,
+    )?;
+    snapshot.commit().ok()?;
+    Some(DaemonSearchStoreWitness {
+        generation,
+        calibration_input_identity,
+    })
 }
 
 fn daemon_search_advisory_workspace_id(options: &SearchOptions) -> String {
@@ -10385,12 +10420,28 @@ mod tests {
         let jobs = connection.list_search_index_jobs(bound_id, None).unwrap();
         let registry = connection.list_model_registry_entries(bound_id).unwrap();
         let mut previous = None;
+        let mut key_options = options.clone();
+        key_options.no_global = true;
+        let mut previous_keys: Option<(String, String)> = None;
         for signal in ["neutral", "harmful", "helpful", "harmful", "neutral"] {
             connection
                 .execute_raw(&format!(
                     "UPDATE feedback_events SET signal = '{signal}' WHERE id = 'fb_52000000000000000000000090'"
                 ))
                 .expect("same-count feedback update");
+            let keys = (
+                daemon_search_singleflight_key(&key_options, None, &[])
+                    .expect("bound workspace search witness")
+                    .key_hash,
+                daemon_pack_search_singleflight_key(&key_options, false, None)
+                    .expect("bound workspace pack witness")
+                    .key_hash,
+            );
+            if let Some(previous_keys) = &previous_keys {
+                assert_ne!(keys.0, previous_keys.0, "search uses the stored workspace ID");
+                assert_ne!(keys.1, previous_keys.1, "pack uses the stored workspace ID");
+            }
+            previous_keys = Some(keys);
             if let Some(previous) = &previous {
                 assert!(
                     !crate::core::search::PackSearchHandoff::snapshot_matches(
@@ -10766,6 +10817,255 @@ mod tests {
         );
     }
 
+    #[test]
+    fn daemon_search_singleflight_keys_track_complete_feedback_and_calibration() {
+        let (_workspace, workspace_path, connection, workspace_id) =
+            singleflight_search_fixture("Release checksums require verification.");
+        let (mut options, kind, filters) =
+            singleflight_search_parts(&workspace_path, "release checksums", 5);
+        options.no_global = true;
+        options.as_of = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+        let keys = || {
+            (
+                daemon_search_singleflight_key(&options, kind.as_deref(), &filters)
+                    .expect("search witness")
+                    .key_hash,
+                daemon_pack_search_singleflight_key(&options, false, None)
+                    .expect("pack witness")
+                    .key_hash,
+            )
+        };
+        let generation = connection.total_workspace_generation().expect("generation");
+        let empty = keys();
+        assert_eq!(keys(), empty, "an unchanged empty ledger still coalesces");
+        connection
+            .insert_feedback_event(
+                "fb_01J00000000000000000000091",
+                &crate::db::CreateFeedbackEventInput {
+                    workspace_id: workspace_id.clone(),
+                    target_type: "memory".to_owned(),
+                    target_id: "mem_01J00000000000000000000091".to_owned(),
+                    signal: "neutral".to_owned(),
+                    weight: 1.0,
+                    source_type: "outcome_observed".to_owned(),
+                    source_id: None,
+                    reason: Some("PRIVATE-FEEDBACK-REASON".to_owned()),
+                    evidence_json: None,
+                    session_id: None,
+                },
+            )
+            .expect("neutral non-calibrating feedback");
+        let mut previous = keys();
+        assert_ne!(previous.0, empty.0, "feedback invalidates search");
+        assert_ne!(previous.1, empty.1, "feedback invalidates pack retrieval");
+        let append_fingerprint = connection
+            .feedback_events_fingerprint(&workspace_id)
+            .expect("append fingerprint");
+        assert!(
+            connection
+                .apply_feedback_event_at(
+                    "fb_01J00000000000000000000091",
+                    "2026-11-26T12:00:00Z",
+                )
+                .expect("apply feedback")
+        );
+        for update in [
+            None,
+            Some("UPDATE feedback_events SET signal = 'harmful'"),
+            Some(
+                "UPDATE feedback_events SET evidence_json = '{\"score\":0.8,\"groundTruthRelevance\":0.2}'",
+            ),
+        ] {
+            if let Some(update) = update {
+                connection.execute_raw(update).expect("same-count edit");
+            }
+            let changed = keys();
+            assert_ne!(changed.0, previous.0, "every row edit invalidates search");
+            assert_ne!(changed.1, previous.1, "every row edit invalidates pack retrieval");
+            assert_eq!(keys(), changed, "unchanged feedback still coalesces");
+            assert_eq!(
+                connection
+                    .feedback_events_fingerprint(&workspace_id)
+                    .expect("same append fingerprint"),
+                append_fingerprint
+            );
+            previous = changed;
+        }
+
+        let path = workspace_path.join(".ee/search/calibration.jsonl");
+        fs::create_dir_all(path.parent().expect("calibration parent")).expect("search dir");
+        let first = "{\"score\":0.8,\"groundTruthRelevance\":0.8}\n".repeat(24);
+        let second = "{\"score\":0.8,\"groundTruthRelevance\":0.2}\n".repeat(24);
+        assert_eq!(first.len(), second.len());
+        fs::write(&path, &first).expect("initial calibration");
+        let first_key = keys();
+        assert_ne!(first_key.0, previous.0, "calibration creation invalidates search");
+        assert_ne!(first_key.1, previous.1, "calibration creation invalidates pack");
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, second).expect("same-size replacement");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        let changed = keys();
+        assert_ne!(changed.0, first_key.0, "search binds bytes, not metadata");
+        assert_ne!(changed.1, first_key.1, "pack binds bytes, not metadata");
+        assert_eq!(
+            connection.total_workspace_generation().expect("generation"),
+            generation,
+            "none of these edits advances the old generation-only key"
+        );
+        let key = daemon_search_singleflight_key(&options, kind.as_deref(), &filters).unwrap();
+        let encoded = serde_json::to_string(&key).unwrap();
+        assert!(!encoded.contains("PRIVATE-FEEDBACK-REASON"));
+        assert!(!encoded.contains("fb_01J00000000000000000000091"));
+    }
+
+    #[test]
+    fn daemon_search_singleflight_unavailable_witness_uses_canonical_execution() {
+        let (_workspace, workspace_path, connection, _workspace_id) =
+            singleflight_search_fixture("Release checksums require verification.");
+        let (mut options, kind, filters) =
+            singleflight_search_parts(&workspace_path, "release checksums", 5);
+        options.no_global = true;
+        assert!(daemon_search_singleflight_key(&options, kind.as_deref(), &filters).is_some());
+        // A directory is consistently unreadable as a JSONL file even when
+        // tests run as root. The canonical search reports its normal gap.
+        fs::create_dir_all(workspace_path.join(".ee/search/calibration.jsonl"))
+            .expect("unreadable calibration fixture");
+        assert!(daemon_search_singleflight_key(&options, kind.as_deref(), &filters).is_none());
+        assert!(daemon_pack_search_singleflight_key(&options, false, None).is_none());
+        let (baseline, _) =
+            run_daemon_search(&options, kind.as_deref(), &filters, None, None, false)
+                .expect("canonical search");
+        let (fallback, codes) =
+            run_daemon_search(&options, kind.as_deref(), &filters, None, None, true)
+                .expect("uncoalesced fallback");
+        assert!(codes.is_empty());
+        assert_eq!(
+            serde_json::to_value(&fallback.report.results).unwrap(),
+            serde_json::to_value(&baseline.report.results).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&fallback.report.degraded).unwrap(),
+            serde_json::to_value(&baseline.report.degraded).unwrap()
+        );
+        // Keep the unavailable-file arm separate from the ledger-read arm.
+        let (_other, other_path, other_db, _) =
+            singleflight_search_fixture("Separate feedback authority fixture");
+        let (mut other_options, _, _) = singleflight_search_parts(&other_path, "feedback", 5);
+        other_options.no_global = true;
+        other_db
+            .execute_raw("ALTER TABLE feedback_events RENAME TO withheld_feedback_events")
+            .expect("withhold ledger without deleting it");
+        assert!(other_db.total_workspace_generation().is_ok());
+        assert!(daemon_search_singleflight_key(&other_options, None, &[]).is_none());
+        assert!(daemon_pack_search_singleflight_key(&other_options, false, None).is_none());
+        assert!(connection.total_workspace_generation().is_ok());
+    }
+
+    #[test]
+    fn daemon_search_singleflight_keys_track_global_feedback() {
+        const CHILD_MARKER: &str = "EIDETIC_TEST_DAEMON_SINGLEFLIGHT_GLOBAL_FEEDBACK";
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            let root = tempfile::tempdir().expect("isolated user data");
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("daemon::server::tests::daemon_search_singleflight_keys_track_global_feedback")
+                .arg("--nocapture")
+                .env(CHILD_MARKER, "1")
+                .env("XDG_DATA_HOME", root.path())
+                .env("XDG_CONFIG_HOME", root.path())
+                .env("LOCALAPPDATA", root.path())
+                .output()
+                .expect("isolated global test");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"));
+            return;
+        }
+        let (_workspace, workspace_path, _local, _) =
+            singleflight_search_fixture("Local release provenance");
+        let (mut options, _, _) = singleflight_search_parts(&workspace_path, "release", 5);
+        options.memory_scope = MemoryScope::Swarm;
+        options.as_of = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+        let keys = |options: &SearchOptions| {
+            (
+                daemon_search_singleflight_key(options, None, &[])
+                    .expect("search witness")
+                    .key_hash,
+                daemon_pack_search_singleflight_key(options, false, None)
+                    .expect("pack witness")
+                    .key_hash,
+            )
+        };
+        let absent = keys(&options);
+        let mut excluded = options.clone();
+        excluded.no_global = true;
+        let excluded_keys = keys(&excluded);
+        let paths = crate::core::global_store::default_global_store_paths_from_env().unwrap();
+        assert!(
+            !paths.database_path.exists(),
+            "key reads must not create a global store"
+        );
+        let (global, workspace_id) =
+            crate::core::global_store::open_or_create_global_store(&paths).unwrap();
+        let present = keys(&options);
+        assert_ne!(present.0, absent.0, "present search authority differs");
+        assert_ne!(present.1, absent.1, "present pack authority differs");
+        let generation = global.total_workspace_generation().unwrap();
+        global
+            .insert_feedback_event(
+                "fb_01J00000000000000000000093",
+                &crate::db::CreateFeedbackEventInput {
+                    workspace_id: workspace_id.clone(),
+                    target_type: "memory".to_owned(),
+                    target_id: "mem_01J00000000000000000000093".to_owned(),
+                    signal: "neutral".to_owned(),
+                    weight: 1.0,
+                    source_type: "outcome_observed".to_owned(),
+                    source_id: None,
+                    reason: None,
+                    evidence_json: None,
+                    session_id: None,
+                },
+            )
+            .expect("global feedback");
+        let inserted = keys(&options);
+        assert_ne!(inserted.0, present.0, "global feedback invalidates search");
+        assert_ne!(inserted.1, present.1, "global feedback invalidates pack");
+        let append_fingerprint = global.feedback_events_fingerprint(&workspace_id).unwrap();
+        global
+            .execute_raw("UPDATE feedback_events SET signal = 'harmful'")
+            .expect("same-count global feedback edit");
+        let changed = keys(&options);
+        assert_ne!(changed.0, inserted.0, "global row edits invalidate search");
+        assert_ne!(changed.1, inserted.1, "global row edits invalidate pack");
+        assert_eq!(
+            global.feedback_events_fingerprint(&workspace_id).unwrap(),
+            append_fingerprint
+        );
+        assert_eq!(global.total_workspace_generation().unwrap(), generation);
+        assert_eq!(
+            keys(&excluded),
+            excluded_keys,
+            "excluded global feedback is irrelevant"
+        );
+        global
+            .execute_raw("ALTER TABLE feedback_events RENAME TO withheld_feedback_events")
+            .expect("withhold global ledger");
+        assert!(daemon_search_singleflight_key(&options, None, &[]).is_none());
+        assert!(daemon_pack_search_singleflight_key(&options, false, None).is_none());
+        assert_eq!(keys(&excluded), excluded_keys);
+    }
+
     /// bd-d67os.9: requests that share a search get what an uncoalesced
     /// request gets, and each records its own retrieval audit, as that many
     /// uncoalesced requests would. Whether the requests below overlap depends
@@ -10836,9 +11136,9 @@ mod tests {
 
     /// bd-d67os.9: identical concurrent pack retrievals hand each request a
     /// handoff its client accepts, holding what an uncoalesced retrieval
-    /// returns, and a pack retrieval never shares a search's key. A feedback
-    /// write moves no key, so the last assertion pins the client check that
-    /// catches it: a handoff taken before the write no longer validates.
+    /// returns, and a pack retrieval never shares a search's key. Client
+    /// validation remains necessary if feedback changes after the daemon
+    /// captured its key: a handoff taken before the write no longer validates.
     #[test]
     fn coalesced_daemon_pack_searches_return_handoffs_the_client_accepts() {
         let (_workspace, workspace_path, connection, workspace_id) =

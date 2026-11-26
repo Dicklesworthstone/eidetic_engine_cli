@@ -59,10 +59,15 @@ retrieval (bd-d67os.9). It is off by default.
 
 - **The key** holds the exact query and every search option, the workspace
   store's generation, the user-global store's generation when the read may use
-  it, the published index generation and the merged config. A search key adds
+  it, the published index generation and the merged config. It also binds each
+  store's complete feedback ledger and the calibration bytes used by retrieval.
+  Inserts, same-count edits, application markers, and same-size calibration-file
+  replacements distinguish requests even when no generation advances. These
+  witnesses use the same identity rules as pack handoffs and short pinned
+  database snapshots, released before waiting for a leader. A search key adds
   the kind and typed field filters. A pack retrieval key adds whether a cached
-  local model is required and which model is loaded. A request whose store is
-  missing or whose generation cannot be read runs on its own.
+  local model is required and which model is loaded. Missing or unreadable
+  authority disables coalescing for that request; canonical retrieval still runs.
 - **Audit.** The shared search runs without its retrieval audit, and every
   request then records its own. N coalesced requests leave N
   `search.executed` rows, as N uncoalesced ones do. Pack retrieval writes
@@ -72,18 +77,12 @@ retrieval (bd-d67os.9). It is off by default.
   runs the brief as a command, so no process ever computes two briefs at
   once.
 
-Two things a search follower can see that an uncoalesced request would not,
-both bounded by the leader's run time:
-
-- **Feedback edits.** Score calibration reads the feedback ledger, and no
-  generation covers that ledger. A feedback event written while an identical
-  search is running does not key the next request apart from it
-  (bd-coalesced-search-key-misses-feedback-4lneh). A pack retrieval is not
-  exposed to this: its client checks the handoff's calibration witness
-  against its own store and retrieves again locally when they differ.
-- **Reference time.** A request without `as_of` evaluates validity windows at
-  the moment its search starts. A follower gets the leader's moment, which is
-  slightly before its own arrival.
+A default-time follower evaluates validity windows at the leader's search
+instant, slightly before its own arrival. This difference remains bounded by
+the leader's run time. Explicit `as_of` requests carry their reference time in
+the key. Pack clients also revalidate source and calibration witnesses before
+using a handoff, so a change after the daemon captured its key can still force
+fresh local retrieval.
 
 ## Agent UX
 
@@ -96,9 +95,10 @@ What an agent can rely on today:
   does not coalesce across the two processes. If you want the savings, batch the
   work inside one invocation, or send both searches through a daemon running
   with `EE_DAEMON_SEARCH_SINGLEFLIGHT=on` (`ee search --use-daemon`).
-- **Writes are safe.** A coalesced read can never return data from before a
-  write you just made in the same workspace: the generation in the key changes,
-  so post-write reads re-run.
+- **Changed inputs run independently.** Source/index generation changes and
+  complete feedback/calibration witnesses distinguish post-write requests from
+  earlier in-flight work. The key carries hashes, never raw feedback reasons or
+  calibration rows.
 - **Observe it.** The hidden e2e harness exercises the live coalescer with the
   real binary:
 
