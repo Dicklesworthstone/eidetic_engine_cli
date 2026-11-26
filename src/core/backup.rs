@@ -1388,8 +1388,8 @@ impl BackupCassSessionRecord {
     }
 
     fn from_stored(session: &StoredSession) -> Self {
-        let (source_locator_hash, source_metadata_hash) =
-            Self::restored_source_hashes(session).unwrap_or_else(|| {
+        let (source_locator_hash, source_metadata_hash) = Self::restored_source_hashes(session)
+            .unwrap_or_else(|| {
                 (
                     hash_bytes(session.cass_session_id.as_bytes()),
                     session
@@ -15142,7 +15142,10 @@ mod tests {
             "a genuine portable session preserves both digests",
         )?;
         let original: JsonValue = serde_json::from_str(
-            portable.metadata_json.as_deref().ok_or("recovery metadata")?,
+            portable
+                .metadata_json
+                .as_deref()
+                .ok_or("recovery metadata")?,
         )
         .map_err(|e| e.to_string())?;
         let local_id = portable.cass_session_id.as_str();
@@ -15161,7 +15164,12 @@ mod tests {
             ),
             (local_id, None, "sourceLocatorPolicy", "other"),
             (local_id, None, "sourceLocatorHash", "/private/canary"),
-            (local_id, None, "sourceMetadataHash", "blake3:private-canary"),
+            (
+                local_id,
+                None,
+                "sourceMetadataHash",
+                "blake3:private-canary",
+            ),
         ] {
             let mut row = portable.clone();
             row.cass_session_id = locator.to_owned();
@@ -21602,11 +21610,14 @@ mod tests {
                 .get_evidence_span(&evidence_id)
                 .map_err(|e| e.to_string())?
                 .ok_or("source span")?;
-            let metadata = evidence.metadata_json.ok_or("canonical metadata")?.replacen(
-                '{',
-                r#"{"secretRedactionStatus":"api_key=curation-metadata-canary","#,
-                1,
-            );
+            let metadata = evidence
+                .metadata_json
+                .ok_or("canonical metadata")?
+                .replacen(
+                    '{',
+                    r#"{"secretRedactionStatus":"api_key=curation-metadata-canary","#,
+                    1,
+                );
             db.execute(
                 "UPDATE evidence_spans SET metadata_json = ?1 WHERE id = ?2",
                 &[
@@ -21631,9 +21642,12 @@ mod tests {
             let mut transcript = derived.clone();
             transcript.id = recovery_candidate(&workspace_id, 15).id;
             transcript.source_id = Some(evidence_id.clone());
-            transcript.derivation_source_refs_json = Some(json!([
-                {"kind":"evidence_span", "id":evidence_id, "contentHash":evidence_hash}
-            ]).to_string());
+            transcript.derivation_source_refs_json = Some(
+                json!([
+                    {"kind":"evidence_span", "id":evidence_id, "contentHash":evidence_hash}
+                ])
+                .to_string(),
+            );
             let mut secret = recovery_candidate(&workspace_id, 8);
             secret.proposed_content = Some("api_key=curation-proposal-canary".to_owned());
             secret.reason = "api_key=curation-reason-canary".to_owned();
