@@ -116,10 +116,6 @@ use crate::pack::{
     budget_classifier::{AdaptiveBudgetDecision, AdaptiveBudgetInput, classify_adaptive_budget},
     estimate_tokens_default, pack_item_provenance_json, redact_pack_provenance_text,
 };
-// The production PPR rerank is cfg(test)-only until the pinned FrankenNetworkX
-// release exposes deterministic personalized PageRank; the breakdown type is
-// only constructed on that path.
-#[cfg(test)]
 use crate::pack::PackScoreBreakdown;
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::search::RuleIndexProjection;
