@@ -11075,6 +11075,211 @@ mod tests {
         assert_eq!(keys(&excluded), excluded_keys);
     }
 
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn daemon_quarantine_witness_covers_foreign_global_memory_in_the_same_store() {
+        const MEMORY: &str = "mem_01J00000000000000000000094";
+        const REVIEW: &str = "fq_01J00000000000000000000094";
+        const CONTENT: &str = "Copper kestrel release validation requires integration checks.";
+        let directory = tempfile::tempdir().expect("reader workspace");
+        let workspace = fs::canonicalize(directory.path()).expect("canonical reader workspace");
+        let owner = workspace.join("owner");
+        fs::create_dir_all(workspace.join(".ee")).expect("reader state directory");
+        fs::create_dir(&owner).expect("owner workspace");
+        fs::write(
+            workspace.join(".ee/config.toml"),
+            "[memory]\ninclude_global = false\n",
+        )
+        .expect("disable separate global store");
+        let database = workspace.join(".ee/ee.db");
+        let index = workspace.join(".ee/index");
+        let reader_id = crate::core::workspace::stable_workspace_id(&workspace);
+        let owner_id = crate::core::workspace::stable_workspace_id(&owner);
+        let connection =
+            crate::db::DbConnection::open_file(&database).expect("shared source store");
+        connection.migrate().expect("schema");
+        for (id, path) in [(&reader_id, &workspace), (&owner_id, &owner)] {
+            connection
+                .insert_workspace(
+                    id,
+                    &crate::db::CreateWorkspaceInput {
+                        path: path.display().to_string(),
+                        name: None,
+                    },
+                )
+                .expect("workspace binding");
+        }
+        insert_singleflight_memory(&connection, &owner_id, MEMORY, CONTENT);
+        connection
+            .add_memory_tags(MEMORY, &[crate::models::GLOBAL_MEMORY_SCOPE_TAG.to_owned()])
+            .expect("share owner memory with global scope");
+        connection.close().expect("close source writer");
+        let _embedder = crate::core::index::install_test_hash_workspace_embedder(&reader_id);
+        let rebuilt = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index.clone()),
+            dry_run: false,
+        })
+        .expect("build reader index");
+        assert_eq!(
+            rebuilt.status,
+            crate::core::index::IndexRebuildStatus::Success
+        );
+        assert_eq!(rebuilt.memories_indexed, 1);
+        let connection =
+            crate::db::DbConnection::open_file(&database).expect("shared source writer");
+        let (mut options, kind, filters) = singleflight_search_parts(&workspace, CONTENT, 5);
+        options.memory_scope = MemoryScope::Global;
+        options.no_global = true;
+        options.relevance_floor = Some(0.0);
+        options.strict_source_mode = true;
+        options.as_of = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+        let generations = (
+            connection.get_workspace_generation(&reader_id).unwrap(),
+            connection.get_workspace_generation(&owner_id).unwrap(),
+        );
+        let jobs = (
+            connection.list_search_index_jobs(&reader_id, None).unwrap(),
+            connection.list_search_index_jobs(&owner_id, None).unwrap(),
+        );
+        let metadata = fs::read(index.join("meta.json")).expect("published reader index");
+        let assert_sources_unchanged = || {
+            assert_eq!(
+                (
+                    connection.get_workspace_generation(&reader_id).unwrap(),
+                    connection.get_workspace_generation(&owner_id).unwrap(),
+                ),
+                generations,
+                "pending review is separate from indexed source generations"
+            );
+            assert_eq!(
+                (
+                    connection.list_search_index_jobs(&reader_id, None).unwrap(),
+                    connection.list_search_index_jobs(&owner_id, None).unwrap(),
+                ),
+                jobs,
+                "review-only changes must not create or consume index jobs"
+            );
+            assert_eq!(fs::read(index.join("meta.json")).unwrap(), metadata);
+            let status =
+                crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                    workspace_path: workspace.clone(),
+                    database_path: Some(database.clone()),
+                    index_dir: Some(index.clone()),
+                })
+                .expect("reader index status");
+            assert_eq!(status.health, crate::core::index::IndexHealth::Ready);
+            assert_eq!(status.db_generation, generations.0);
+            assert_eq!(status.index_generation, generations.0);
+            assert!(
+                connection
+                    .list_feedback_quarantine(&reader_id, None)
+                    .unwrap()
+                    .is_empty(),
+                "the held memory belongs to a different workspace in this same store"
+            );
+        };
+        let keys = || {
+            (
+                daemon_search_singleflight_key(&options, kind.as_deref(), &filters)
+                    .expect("search witness")
+                    .key_hash,
+                daemon_pack_search_singleflight_key(&options, false, None)
+                    .expect("pack witness")
+                    .key_hash,
+            )
+        };
+        let retrieve = || {
+            let (handoff, codes) = run_daemon_pack_search(&options, None, None, false, true);
+            assert!(codes.is_empty(), "{codes:?}");
+            let handoff = handoff.expect("global-scope pack retrieval");
+            assert!(handoff.snapshot_matches(&options, &connection));
+            handoff
+        };
+        let searchable = || {
+            let (run, _) = run_daemon_search(&options, kind.as_deref(), &filters, None, None, true)
+                .expect("global-scope daemon search");
+            run.report.results.iter().any(|hit| hit.doc_id == MEMORY)
+        };
+        let before = retrieve();
+        assert!(before.report.results.iter().any(|hit| hit.doc_id == MEMORY));
+        assert!(
+            searchable(),
+            "the foreign owner memory is admitted before review"
+        );
+        let before_keys = keys();
+        assert_sources_unchanged();
+
+        connection
+            .insert_feedback_quarantine(
+                REVIEW,
+                &crate::db::CreateFeedbackQuarantineInput {
+                    workspace_id: owner_id.clone(),
+                    source_id: "agent:foreign-global-review".to_owned(),
+                    target_type: "memory".to_owned(),
+                    target_id: MEMORY.to_owned(),
+                    signal: "harmful".to_owned(),
+                    weight: 1.0,
+                    source_type: "outcome_observed".to_owned(),
+                    proposed_event_id: None,
+                    recorded_at: "2026-11-26T00:00:00Z".to_owned(),
+                    reason: "pending owner review".to_owned(),
+                    event_reason: None,
+                    evidence_json: None,
+                    session_id: None,
+                    raw_event_hash: format!("blake3:{}", "a".repeat(64)),
+                },
+            )
+            .expect("hold in the foreign owner's workspace");
+        let held_keys = keys();
+        assert_ne!(
+            held_keys.0, before_keys.0,
+            "search must bind the foreign owner's hold"
+        );
+        assert_ne!(
+            held_keys.1, before_keys.1,
+            "pack must bind the foreign owner's hold"
+        );
+        assert!(!before.snapshot_matches(&options, &connection));
+        let held = retrieve();
+        assert!(!held.report.results.iter().any(|hit| hit.doc_id == MEMORY));
+        assert!(
+            !searchable(),
+            "fresh search must honor the foreign owner's hold"
+        );
+        assert_sources_unchanged();
+
+        assert!(
+            connection
+                .update_feedback_quarantine_status(REVIEW, "released", Some("operator"), None)
+                .expect("release owner review")
+        );
+        let released_keys = keys();
+        assert_ne!(released_keys.0, held_keys.0, "release must refresh search");
+        assert_ne!(
+            released_keys.1, held_keys.1,
+            "release must refresh pack retrieval"
+        );
+        assert!(
+            !held.snapshot_matches(&options, &connection),
+            "the previously omitted foreign memory needs a fresh candidate set"
+        );
+        let released = retrieve();
+        assert!(
+            released
+                .report
+                .results
+                .iter()
+                .any(|hit| hit.doc_id == MEMORY)
+        );
+        assert!(
+            searchable(),
+            "fresh search must restore the released foreign memory"
+        );
+        assert_sources_unchanged();
+    }
+
     /// bd-d67os.9: requests that share a search get what an uncoalesced
     /// request gets, and each records its own retrieval audit, as that many
     /// uncoalesced requests would. Whether the requests below overlap depends
@@ -11328,7 +11533,9 @@ mod tests {
         };
         let baseline_keys = keys();
         let generation = connection.total_workspace_generation().unwrap();
-        let feedback = connection.feedback_events_fingerprint(&workspace_id).unwrap();
+        let feedback = connection
+            .feedback_events_fingerprint(&workspace_id)
+            .unwrap();
         let mut previous = retrieve();
         assert_eq!(previous.report.results.len(), 1);
         let first_id = previous.report.results[0].doc_id.clone();
@@ -11375,19 +11582,17 @@ mod tests {
                 "refill beyond the held top hit"
             );
             assert_ne!(held.report.results[0].doc_id, first_id);
-            let (canonical, _) =
-                run_daemon_search(&options, None, &[], None, None, false).unwrap();
+            let (canonical, _) = run_daemon_search(&options, None, &[], None, None, false).unwrap();
             assert_eq!(canonical.report.results.len(), 1);
             assert_eq!(
                 canonical.report.results[0].doc_id,
                 held.report.results[0].doc_id
             );
+            assert_eq!(connection.total_workspace_generation().unwrap(), generation);
             assert_eq!(
-                connection.total_workspace_generation().unwrap(),
-                generation
-            );
-            assert_eq!(
-                connection.feedback_events_fingerprint(&workspace_id).unwrap(),
+                connection
+                    .feedback_events_fingerprint(&workspace_id)
+                    .unwrap(),
                 feedback,
                 "quarantined feedback never entered the accepted ledger"
             );
@@ -11411,12 +11616,11 @@ mod tests {
             assert!(previous.snapshot_matches(&options, &connection));
             assert_eq!(previous.report.results.len(), 1);
             assert_eq!(previous.report.results[0].doc_id, first_id);
+            assert_eq!(connection.total_workspace_generation().unwrap(), generation);
             assert_eq!(
-                connection.total_workspace_generation().unwrap(),
-                generation
-            );
-            assert_eq!(
-                connection.feedback_events_fingerprint(&workspace_id).unwrap(),
+                connection
+                    .feedback_events_fingerprint(&workspace_id)
+                    .unwrap(),
                 feedback
             );
         }

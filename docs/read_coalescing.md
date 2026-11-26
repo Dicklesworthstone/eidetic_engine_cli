@@ -86,8 +86,12 @@ using a handoff, so a change after the daemon captured its key can still force
 fresh local retrieval. Pending quarantine holds participate in that identity:
 a new hold cannot reuse an earlier candidate pool, and removing a hold triggers
 fresh selection instead of retaining a pool that omitted the held memory.
-Only hold IDs, owning workspace, target types and target IDs enter the hash;
-review reasons, source identities and quarantined payloads are never read for it.
+Review identity covers every workspace in the addressed database: globally
+visible memories may be owned by a workspace other than the one making the
+request. Only hold IDs, owning workspace, target types and target IDs enter the
+hash; review reasons, source identities and quarantined payloads are never read
+for it. These admission checks leave indexed-content generations and index jobs
+unchanged.
 
 ## Agent UX
 

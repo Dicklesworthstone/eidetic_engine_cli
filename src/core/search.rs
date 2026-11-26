@@ -1137,7 +1137,7 @@ impl SearchOptions {
             .unwrap_or_else(|| default_workspace_database_path(&self.workspace_path))
     }
 
-    fn resolve_index_dir(&self) -> PathBuf {
+    pub(crate) fn resolve_index_dir(&self) -> PathBuf {
         crate::config::workspace::resolve_store_index_dir(
             &self.workspace_path,
             self.database_path.as_deref(),
@@ -5423,23 +5423,25 @@ fn search_score_calibration_with_feedback<'a>(
             &feedback_events.events,
         )
         .ok()
-        .and_then(|feedback_hash| match &feedback_events.pending_quarantine_identity {
-            // Preserve the identity when this source view observed no holds.
-            // Test-only empty-hold factories remain equivalent to live readers.
-            Ok(None) => Some(feedback_hash),
-            Ok(Some(quarantine_hash)) => {
-                let mut hasher = blake3::Hasher::new();
-                hasher.update(b"ee.search.feedback_authority.v1\0");
-                for value in [feedback_hash.as_str(), quarantine_hash.as_str()] {
-                    hasher.update(&(value.len() as u64).to_be_bytes());
-                    hasher.update(value.as_bytes());
+        .and_then(
+            |feedback_hash| match &feedback_events.pending_quarantine_identity {
+                // Preserve the identity when this source view observed no holds.
+                // Test-only empty-hold factories remain equivalent to live readers.
+                Ok(None) => Some(feedback_hash),
+                Ok(Some(quarantine_hash)) => {
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update(b"ee.search.feedback_authority.v1\0");
+                    for value in [feedback_hash.as_str(), quarantine_hash.as_str()] {
+                        hasher.update(&(value.len() as u64).to_be_bytes());
+                        hasher.update(value.as_bytes());
+                    }
+                    Some(format!("blake3:{}", hasher.finalize().to_hex()))
                 }
-                Some(format!("blake3:{}", hasher.finalize().to_hex()))
-            }
-            // Valid feedback can calibrate this request, but unreadable hold
-            // authority cannot admit cached or handed-off candidates.
-            Err(()) => None,
-        })
+                // Valid feedback can calibrate this request, but unreadable hold
+                // authority cannot admit cached or handed-off candidates.
+                Err(()) => None,
+            },
+        )
     } else {
         None
     };
@@ -6329,7 +6331,7 @@ fn search_score_calibration_feedback_events_with_workspace_id(
         Ok(events) => SearchScoreCalibrationFeedbackEvents::available(
             events,
             connection
-                .pending_feedback_quarantine_fingerprint(workspace_id)
+                .pending_feedback_quarantine_fingerprint(None)
                 .map_err(|_| ()),
         ),
         Err(_error) => {

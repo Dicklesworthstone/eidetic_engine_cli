@@ -24886,34 +24886,43 @@ impl DbConnection {
             .collect()
     }
 
-    /// Fingerprint pending review holds for one owning workspace.
+    /// Fingerprint pending review holds for an owning workspace or the store.
     ///
-    /// `None` means the complete scoped query observed no pending holds.
-    /// Errors must not be treated as observed emptiness. Callers composing
-    /// this identity with other source authority must hold one read snapshot
-    /// across those reads.
+    /// A None workspace scope includes every owning workspace in this
+    /// addressed database. Retrieval uses it when foreign-workspace memories
+    /// with global scope can participate in the same candidate pool.
+    ///
+    /// An Ok(None) result means the complete requested scope observed no
+    /// pending holds. Errors must not be treated as observed emptiness.
+    /// Callers composing this identity with other source authority must hold
+    /// one read snapshot across those reads.
     ///
     /// Only admission metadata is read; quarantined feedback payloads,
     /// reasons and source identities never enter this fingerprint.
     pub(crate) fn pending_feedback_quarantine_fingerprint(
         &self,
-        workspace_id: &str,
+        workspace_id: Option<&str>,
     ) -> Result<Option<String>> {
         const PAGE_SIZE: usize = 256;
 
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"ee.feedback_quarantine.pending.v1\0");
-        hasher.update(&(workspace_id.len() as u64).to_be_bytes());
-        hasher.update(workspace_id.as_bytes());
+        if let Some(workspace_id) = workspace_id {
+            // Preserve the existing workspace-scoped identity byte for byte.
+            hasher.update(b"ee.feedback_quarantine.pending.v1\0");
+            hasher.update(&(workspace_id.len() as u64).to_be_bytes());
+            hasher.update(workspace_id.as_bytes());
+        } else {
+            hasher.update(b"ee.feedback_quarantine.pending_store.v1\0");
+        }
 
         let mut after_id: Option<String> = None;
         let mut observed_pending = false;
         loop {
             let rows = self.query_for(
                 DbOperation::Query,
-                "SELECT id, target_type, target_id FROM feedback_quarantine WHERE workspace_id = ?1 AND status = 'pending' AND (?2 IS NULL OR id > ?2) ORDER BY id ASC LIMIT 256",
+                "SELECT id, workspace_id, target_type, target_id FROM feedback_quarantine WHERE (?1 IS NULL OR workspace_id = ?1) AND status = 'pending' AND (?2 IS NULL OR id > ?2) ORDER BY id ASC LIMIT 256",
                 &[
-                    Value::Text(workspace_id.to_owned()),
+                    workspace_id.map_or(Value::Null, |id| Value::Text(id.to_owned())),
                     after_id.clone().map_or(Value::Null, Value::Text),
                 ],
             )?;
@@ -24923,8 +24932,13 @@ impl DbConnection {
 
             for row in &rows {
                 let id = required_text(row, 0, DbOperation::Query, "id")?;
-                let target_type = required_text(row, 1, DbOperation::Query, "target_type")?;
-                let target_id = required_text(row, 2, DbOperation::Query, "target_id")?;
+                let owner = required_text(row, 1, DbOperation::Query, "workspace_id")?;
+                let target_type = required_text(row, 2, DbOperation::Query, "target_type")?;
+                let target_id = required_text(row, 3, DbOperation::Query, "target_id")?;
+                if workspace_id.is_none() {
+                    hasher.update(&(owner.len() as u64).to_be_bytes());
+                    hasher.update(owner.as_bytes());
+                }
                 for value in [id, target_type, target_id] {
                     hasher.update(&(value.len() as u64).to_be_bytes());
                     hasher.update(value.as_bytes());
@@ -63472,24 +63486,27 @@ UPDATE memories
         };
         let generation = connection.total_workspace_generation()?;
         ensure_equal(
-            &connection.pending_feedback_quarantine_fingerprint(WORKSPACE)?,
+            &connection.pending_feedback_quarantine_fingerprint(Some(WORKSPACE))?,
             &None,
             "an observed empty review set has no hold fingerprint",
         )?;
+        ensure_equal(
+            &connection.pending_feedback_quarantine_fingerprint(None)?,
+            &None,
+            "an empty addressed store preserves the empty identity",
+        )?;
         connection.with_transaction(|| {
             for number in 0..257 {
-                connection.insert_feedback_quarantine(
-                    &format!("fq_{number:026}"),
-                    &input(WORKSPACE),
-                )?;
+                connection
+                    .insert_feedback_quarantine(&format!("fq_{number:026}"), &input(WORKSPACE))?;
             }
             Ok(())
         })?;
         let initial = connection
-            .pending_feedback_quarantine_fingerprint(WORKSPACE)?
+            .pending_feedback_quarantine_fingerprint(Some(WORKSPACE))?
             .ok_or_else(|| TestFailure::new("pending holds need a fingerprint"))?;
         ensure_equal(
-            &connection.pending_feedback_quarantine_fingerprint(WORKSPACE)?,
+            &connection.pending_feedback_quarantine_fingerprint(Some(WORKSPACE))?,
             &Some(initial.clone()),
             "unchanged complete pages have a stable identity",
         )?;
@@ -63504,10 +63521,15 @@ UPDATE memories
                 Value::Text(format!("fq_{:026}", 256)),
             ],
         )?;
-        let retargeted = connection.pending_feedback_quarantine_fingerprint(WORKSPACE)?;
+        let retargeted = connection.pending_feedback_quarantine_fingerprint(Some(WORKSPACE))?;
         ensure(
             retargeted.as_ref() != Some(&initial),
             "a same-count edit on the second page changes admission identity",
+        )?;
+        let store_retargeted = connection.pending_feedback_quarantine_fingerprint(None)?;
+        ensure(
+            store_retargeted.is_some() && store_retargeted != retargeted,
+            "whole-store and workspace-scoped identities use distinct domains",
         )?;
         connection.execute(
             "UPDATE feedback_quarantine SET reason = ?1, evidence_json = ?2 WHERE id = ?3",
@@ -63518,24 +63540,85 @@ UPDATE memories
             ],
         )?;
         ensure_equal(
-            &connection.pending_feedback_quarantine_fingerprint(WORKSPACE)?,
+            &connection.pending_feedback_quarantine_fingerprint(Some(WORKSPACE))?,
             &retargeted,
             "review payload edits do not change which targets are held",
         )?;
+        ensure_equal(
+            &connection.pending_feedback_quarantine_fingerprint(None)?,
+            &store_retargeted,
+            "whole-store admission also excludes review payloads",
+        )?;
         connection.insert_feedback_quarantine(&format!("fq_{:026}", 999), &input(OTHER))?;
         ensure_equal(
-            &connection.pending_feedback_quarantine_fingerprint(WORKSPACE)?,
+            &connection.pending_feedback_quarantine_fingerprint(Some(WORKSPACE))?,
             &retargeted,
             "a foreign workspace cannot change this admission identity",
+        )?;
+        let foreign_store = connection.pending_feedback_quarantine_fingerprint(None)?;
+        ensure(
+            foreign_store != store_retargeted,
+            "a foreign hold on the second page changes whole-store authority",
+        )?;
+        connection.execute(
+            "UPDATE feedback_quarantine SET workspace_id = ?1 WHERE id = ?2",
+            &[
+                Value::Text(WORKSPACE.to_owned()),
+                Value::Text(format!("fq_{:026}", 999)),
+            ],
+        )?;
+        ensure(
+            connection.pending_feedback_quarantine_fingerprint(None)? != foreign_store,
+            "reassigning the same hold must change its owning-store authority",
+        )?;
+        connection.execute(
+            "UPDATE feedback_quarantine SET workspace_id = ?1 WHERE id = ?2",
+            &[
+                Value::Text(OTHER.to_owned()),
+                Value::Text(format!("fq_{:026}", 999)),
+            ],
+        )?;
+        ensure_equal(
+            &connection.pending_feedback_quarantine_fingerprint(None)?,
+            &foreign_store,
+            "restoring the owner restores whole-store authority",
+        )?;
+        connection.execute(
+            "UPDATE feedback_quarantine SET target_type = 'rule' WHERE id = ?1",
+            &[Value::Text(format!("fq_{:026}", 999))],
+        )?;
+        ensure(
+            connection.pending_feedback_quarantine_fingerprint(None)? != foreign_store,
+            "same-count foreign target edits beyond the first page invalidate reuse",
+        )?;
+        ensure_equal(
+            &connection.pending_feedback_quarantine_fingerprint(Some(WORKSPACE))?,
+            &retargeted,
+            "foreign changes still leave explicitly scoped authority untouched",
         )?;
         connection.execute(
             "UPDATE feedback_quarantine SET status = 'rejected' WHERE workspace_id = ?1",
             &[Value::Text(WORKSPACE.to_owned())],
         )?;
         ensure_equal(
-            &connection.pending_feedback_quarantine_fingerprint(WORKSPACE)?,
+            &connection.pending_feedback_quarantine_fingerprint(Some(WORKSPACE))?,
             &None,
             "reviewed rows no longer hold candidates",
+        )?;
+        ensure(
+            connection
+                .pending_feedback_quarantine_fingerprint(None)?
+                .is_some(),
+            "foreign pending authority survives a local review",
+        )?;
+        connection.execute(
+            "UPDATE feedback_quarantine SET status = 'rejected' WHERE workspace_id = ?1",
+            &[Value::Text(OTHER.to_owned())],
+        )?;
+        ensure_equal(
+            &connection.pending_feedback_quarantine_fingerprint(None)?,
+            &None,
+            "reviewing the final foreign hold restores the empty identity",
         )?;
         ensure_equal(
             &connection.total_workspace_generation()?,
@@ -63546,14 +63629,19 @@ UPDATE memories
             connection.list_feedback_events(WORKSPACE)?.is_empty(),
             "pending review is not accepted feedback",
         )?;
-        connection.execute_raw(
-            "ALTER TABLE feedback_quarantine RENAME TO withheld_review_holds",
+        connection
+            .execute_raw("ALTER TABLE feedback_quarantine RENAME TO withheld_review_holds")?;
+        ensure(
+            connection
+                .pending_feedback_quarantine_fingerprint(Some(WORKSPACE))
+                .is_err(),
+            "an unreadable review set must not look empty",
         )?;
         ensure(
             connection
-                .pending_feedback_quarantine_fingerprint(WORKSPACE)
+                .pending_feedback_quarantine_fingerprint(None)
                 .is_err(),
-            "an unreadable review set must not look empty",
+            "unreadable whole-store authority must not look empty",
         )
     }
 
