@@ -20,7 +20,7 @@
     "severity": "warning",
     "message_contains": ["no output", "advisory only"],
     "repair_contains": "br",
-    "repair_string": "br list --status in_progress --json",
+    "repair_string": "br list --status in_progress --json --no-auto-import --no-auto-flush --allow-stale",
     "repair_command_regex": "(?<cmd>br [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

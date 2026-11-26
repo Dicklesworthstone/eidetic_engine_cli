@@ -111,6 +111,46 @@ const BEADS_READY_ARGS: [&str; 7] = [
 ];
 const BEADS_READY_COMMAND: &str =
     "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale";
+// Every bucket read carries the same three flags as ready (bd-c9om2). Without
+// --no-auto-import, br imports a newer issues.jsonl into beads.db before
+// answering. The first bare read then writes the tracker DB, and every bucket
+// after it reads a different state from ready, while the freshness probe
+// still reports the stale one it saw.
+const BEADS_BLOCKED_ARGS: [&str; 5] = [
+    "blocked",
+    "--json",
+    "--no-auto-import",
+    "--no-auto-flush",
+    "--allow-stale",
+];
+const BEADS_IN_PROGRESS_ARGS: [&str; 7] = [
+    "list",
+    "--status",
+    "in_progress",
+    "--json",
+    "--no-auto-import",
+    "--no-auto-flush",
+    "--allow-stale",
+];
+const BEADS_DEFERRED_ARGS: [&str; 7] = [
+    "list",
+    "--status",
+    "deferred",
+    "--json",
+    "--no-auto-import",
+    "--no-auto-flush",
+    "--allow-stale",
+];
+const BEADS_DEP_CYCLES_ARGS: [&str; 6] = [
+    "dep",
+    "cycles",
+    "--json",
+    "--no-auto-import",
+    "--no-auto-flush",
+    "--allow-stale",
+];
+const BEADS_DEP_CYCLES_COMMAND: &str =
+    "br dep cycles --json --no-auto-import --no-auto-flush --allow-stale";
 const BV_COMMAND_TIMEOUT_CODE: &str = "bv_command_timeout";
 const BV_NO_OUTPUT_CODE: &str = "bv_no_output";
 const BV_UNAVAILABLE_CODE: &str = "bv_unavailable";
@@ -2002,21 +2042,21 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for BeadsSourceAdapter<
         let blocked = collect_beads_bucket(
             self.runner,
             options,
-            &["blocked", "--json"],
+            &BEADS_BLOCKED_ARGS,
             "blocked",
             &mut bucket_degraded,
         );
         let in_progress = collect_beads_bucket(
             self.runner,
             options,
-            &["list", "--status", "in_progress", "--json"],
+            &BEADS_IN_PROGRESS_ARGS,
             "in_progress",
             &mut bucket_degraded,
         );
         let deferred = collect_beads_bucket(
             self.runner,
             options,
-            &["list", "--status", "deferred", "--json"],
+            &BEADS_DEFERRED_ARGS,
             "deferred",
             &mut bucket_degraded,
         );
@@ -2075,10 +2115,14 @@ fn collect_beads_dependency_cycles<R: SwarmBriefCommandRunner>(
     options: &SwarmBriefCollectOptions,
     degraded: &mut Vec<SwarmBriefDegradation>,
 ) -> Option<SwarmBriefBeadsDependencyCycleSummary> {
-    let args = ["dep", "cycles", "--json"];
-    match runner.run("br", &args, &options.workspace, options.command_timeout_ms) {
+    match runner.run(
+        "br",
+        &BEADS_DEP_CYCLES_ARGS,
+        &options.workspace,
+        options.command_timeout_ms,
+    ) {
         Ok(output) if output.stdout.trim().is_empty() => {
-            degraded.push(beads_no_output_degradation("br dep cycles --json"));
+            degraded.push(beads_no_output_degradation(BEADS_DEP_CYCLES_COMMAND));
             None
         }
         Ok(output) => match parse_beads_dependency_cycles_json(&output.stdout) {
@@ -2088,7 +2132,7 @@ fn collect_beads_dependency_cycles<R: SwarmBriefCommandRunner>(
                     SwarmBriefSourceKind::Beads,
                     BEADS_UNAVAILABLE_CODE,
                     message,
-                    Some("br dep cycles --json".to_string()),
+                    Some(BEADS_DEP_CYCLES_COMMAND.to_string()),
                 ));
                 None
             }
@@ -2096,7 +2140,7 @@ fn collect_beads_dependency_cycles<R: SwarmBriefCommandRunner>(
         Err(error) => {
             degraded.push(beads_command_error_to_degradation(
                 &error,
-                "br dep cycles --json",
+                BEADS_DEP_CYCLES_COMMAND,
             ));
             None
         }
@@ -14322,14 +14366,10 @@ mod tests {
                 r#"{"jsonl_newer":false,"db_newer":false}"#,
             )
             .with_output("br", &BEADS_READY_ARGS, &ready_json)
-            .with_output("br", &["blocked", "--json"], "[]")
-            .with_output("br", &["list", "--status", "in_progress", "--json"], "[]")
-            .with_output("br", &["list", "--status", "deferred", "--json"], "[]")
-            .with_output(
-                "br",
-                &["dep", "cycles", "--json"],
-                r#"{"cycles":[],"count":0}"#,
-            );
+            .with_output("br", &BEADS_BLOCKED_ARGS, "[]")
+            .with_output("br", &BEADS_IN_PROGRESS_ARGS, "[]")
+            .with_output("br", &BEADS_DEFERRED_ARGS, "[]")
+            .with_output("br", &BEADS_DEP_CYCLES_ARGS, r#"{"cycles":[],"count":0}"#);
 
         let output = BeadsSourceAdapter { runner: &runner }.collect(&options);
 
@@ -14386,10 +14426,10 @@ mod tests {
                 &BEADS_READY_ARGS,
                 r#"[{"id":"bd-ready","title":"Ready work","status":"open"}]"#,
             )
-            .with_output("br", &["blocked", "--json"], "[]")
-            .with_output("br", &["list", "--status", "in_progress", "--json"], "[]")
-            .with_output("br", &["list", "--status", "deferred", "--json"], "[]")
-            .with_output("br", &["dep", "cycles", "--json"], r#"{"cycles":[],"count":0}"#);
+            .with_output("br", &BEADS_BLOCKED_ARGS, "[]")
+            .with_output("br", &BEADS_IN_PROGRESS_ARGS, "[]")
+            .with_output("br", &BEADS_DEFERRED_ARGS, "[]")
+            .with_output("br", &BEADS_DEP_CYCLES_ARGS, r#"{"cycles":[],"count":0}"#);
 
         let output = BeadsSourceAdapter { runner: &runner }.collect(&options);
 
@@ -14441,10 +14481,10 @@ mod tests {
                 &BEADS_READY_ARGS,
                 r#"[{"id":"bd-ready","title":"Ready work","status":"open"}]"#,
             )
-            .with_output("br", &["blocked", "--json"], "[]")
-            .with_output("br", &["list", "--status", "in_progress", "--json"], "[]")
-            .with_output("br", &["list", "--status", "deferred", "--json"], "[]")
-            .with_output("br", &["dep", "cycles", "--json"], r#"{"cycles":[],"count":0}"#);
+            .with_output("br", &BEADS_BLOCKED_ARGS, "[]")
+            .with_output("br", &BEADS_IN_PROGRESS_ARGS, "[]")
+            .with_output("br", &BEADS_DEFERRED_ARGS, "[]")
+            .with_output("br", &BEADS_DEP_CYCLES_ARGS, r#"{"cycles":[],"count":0}"#);
 
         let output = BeadsSourceAdapter { runner: &runner }.collect(&options);
 
@@ -14497,10 +14537,10 @@ mod tests {
                 &BEADS_READY_ARGS,
                 r#"[{"id":"bd-ready","title":"Ready work","status":"open"}]"#,
             )
-            .with_output("br", &["blocked", "--json"], "[]")
-            .with_output("br", &["list", "--status", "in_progress", "--json"], "[]")
-            .with_output("br", &["list", "--status", "deferred", "--json"], "[]")
-            .with_output("br", &["dep", "cycles", "--json"], r#"{"cycles":[],"count":0}"#);
+            .with_output("br", &BEADS_BLOCKED_ARGS, "[]")
+            .with_output("br", &BEADS_IN_PROGRESS_ARGS, "[]")
+            .with_output("br", &BEADS_DEFERRED_ARGS, "[]")
+            .with_output("br", &BEADS_DEP_CYCLES_ARGS, r#"{"cycles":[],"count":0}"#);
 
         let output = BeadsSourceAdapter { runner: &runner }.collect(&options);
 
@@ -14542,14 +14582,10 @@ mod tests {
                 &BEADS_READY_ARGS,
                 r#"[{"id":"bd-ready","title":"Ready work","status":"open"}]"#,
             )
-            .with_output("br", &["blocked", "--json"], "[]")
-            .with_output("br", &["list", "--status", "in_progress", "--json"], "[]")
-            .with_output("br", &["list", "--status", "deferred", "--json"], "[]")
-            .with_output(
-                "br",
-                &["dep", "cycles", "--json"],
-                r#"{"cycles":[],"count":0}"#,
-            );
+            .with_output("br", &BEADS_BLOCKED_ARGS, "[]")
+            .with_output("br", &BEADS_IN_PROGRESS_ARGS, "[]")
+            .with_output("br", &BEADS_DEFERRED_ARGS, "[]")
+            .with_output("br", &BEADS_DEP_CYCLES_ARGS, r#"{"cycles":[],"count":0}"#);
 
         let output = BeadsSourceAdapter { runner: &runner }.collect(&options);
 
@@ -14588,12 +14624,12 @@ mod tests {
                 &BEADS_READY_ARGS,
                 r#"[{"id":"bd-ready","title":"Ready work","status":"open"}]"#,
             )
-            .with_output("br", &["blocked", "--json"], "[]")
-            .with_output("br", &["list", "--status", "in_progress", "--json"], "[]")
-            .with_output("br", &["list", "--status", "deferred", "--json"], "[]")
+            .with_output("br", &BEADS_BLOCKED_ARGS, "[]")
+            .with_output("br", &BEADS_IN_PROGRESS_ARGS, "[]")
+            .with_output("br", &BEADS_DEFERRED_ARGS, "[]")
             .with_output(
                 "br",
-                &["dep", "cycles", "--json"],
+                &BEADS_DEP_CYCLES_ARGS,
                 r#"{"cycles":[["bd-b","bd-a","bd-b"],["bd-z","bd-y","bd-z"]],"count":2}"#,
             );
 
@@ -14639,17 +14675,17 @@ mod tests {
             )
             .with_error(
                 "br",
-                &["blocked", "--json"],
+                &BEADS_BLOCKED_ARGS,
                 SwarmBriefCommandError::Unavailable("br blocked failed".to_string()),
             )
             .with_error(
                 "br",
-                &["list", "--status", "in_progress", "--json"],
+                &BEADS_IN_PROGRESS_ARGS,
                 SwarmBriefCommandError::Unavailable("br in_progress failed".to_string()),
             )
             .with_error(
                 "br",
-                &["list", "--status", "deferred", "--json"],
+                &BEADS_DEFERRED_ARGS,
                 SwarmBriefCommandError::Unavailable("br deferred failed".to_string()),
             );
 
@@ -15483,17 +15519,13 @@ mod tests {
     #[test]
     fn beads_empty_stdout_uses_specific_source_health_code() {
         let options = SwarmBriefCollectOptions::for_workspace(".");
-        let runner = FakeRunner::default().with_output(
-            "br",
-            &["list", "--status", "in_progress", "--json"],
-            "",
-        );
+        let runner = FakeRunner::default().with_output("br", &BEADS_IN_PROGRESS_ARGS, "");
         let mut degraded = Vec::new();
 
         let beads = collect_beads_bucket(
             &runner,
             &options,
-            &["list", "--status", "in_progress", "--json"],
+            &BEADS_IN_PROGRESS_ARGS,
             "in_progress",
             &mut degraded,
         );
@@ -15503,7 +15535,9 @@ mod tests {
         assert_eq!(degraded[0].code, BEADS_NO_OUTPUT_CODE);
         assert_eq!(
             degraded[0].repair.as_deref(),
-            Some("br list --status in_progress --json")
+            Some(
+                "br list --status in_progress --json --no-auto-import --no-auto-flush --allow-stale"
+            )
         );
         assert!(degraded[0].message.contains("no output"));
         assert!(degraded[0].message.contains("advisory only"));
@@ -15589,17 +15623,17 @@ mod tests {
             )
             .with_error(
                 "br",
-                &["blocked", "--json"],
+                &BEADS_BLOCKED_ARGS,
                 SwarmBriefCommandError::TimedOut { timeout_ms: 1_500 },
             )
             .with_error(
                 "br",
-                &["list", "--status", "in_progress", "--json"],
+                &BEADS_IN_PROGRESS_ARGS,
                 SwarmBriefCommandError::TimedOut { timeout_ms: 1_500 },
             )
             .with_error(
                 "br",
-                &["list", "--status", "deferred", "--json"],
+                &BEADS_DEFERRED_ARGS,
                 SwarmBriefCommandError::TimedOut { timeout_ms: 1_500 },
             )
             .with_error(

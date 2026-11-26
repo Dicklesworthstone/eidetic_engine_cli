@@ -16834,14 +16834,13 @@ mod tests {
         match (program, args.as_slice()) {
             (_, ["--version"]) | ("which", ["-a", _]) => true,
             ("git", [verb, ..]) => matches!(*verb, "rev-parse" | "status" | "log" | "ls-files"),
-            // Too permissive: br auto-imports issues.jsonl into beads.db on
-            // any call without --no-auto-import, and the brief's blocked,
-            // list and dep cycles reads omit it. Require the flag once
-            // bd-c9om2 adds it.
+            // br imports a newer issues.jsonl into beads.db on any call
+            // without --no-auto-import (bd-c9om2), so a br read counts only
+            // when it carries that flag. doctor --no-db never opens the DB.
             ("br", ["ready" | "blocked" | "list" | "show", ..])
             | ("br", ["dep", "cycles", ..])
-            | ("br", ["sync", "--status", ..]) => true,
-            ("br", ["doctor", rest @ ..]) => !rest.contains(&"--fix"),
+            | ("br", ["sync", "--status", ..]) => args.contains(&"--no-auto-import"),
+            ("br", ["doctor", rest @ ..]) => !rest.contains(&"--fix") && rest.contains(&"--no-db"),
             ("bv", flags) => {
                 !flags.is_empty() && flags.iter().all(|flag| flag.starts_with("--robot-"))
             }

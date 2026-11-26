@@ -383,22 +383,38 @@
     },
     {
       "program": "br",
-      "args": ["blocked", "--json"],
+      "args": ["blocked", "--json", "--no-auto-import", "--no-auto-flush", "--allow-stale"],
       "outputPointer": "/sourceOutputs/blocked"
     },
     {
       "program": "br",
-      "args": ["list", "--status", "in_progress", "--json"],
+      "args": [
+        "list",
+        "--status",
+        "in_progress",
+        "--json",
+        "--no-auto-import",
+        "--no-auto-flush",
+        "--allow-stale"
+      ],
       "outputPointer": "/sourceOutputs/inProgress"
     },
     {
       "program": "br",
-      "args": ["list", "--status", "deferred", "--json"],
+      "args": [
+        "list",
+        "--status",
+        "deferred",
+        "--json",
+        "--no-auto-import",
+        "--no-auto-flush",
+        "--allow-stale"
+      ],
       "outputPointer": "/sourceOutputs/deferred"
     },
     {
       "program": "br",
-      "args": ["dep", "cycles", "--json"],
+      "args": ["dep", "cycles", "--json", "--no-auto-import", "--no-auto-flush", "--allow-stale"],
       "outputPointer": "/sourceOutputs/dependencyCycles"
     },
     {
