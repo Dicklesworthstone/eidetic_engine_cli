@@ -68,12 +68,39 @@ ENOUGH. With prose stripped, `--range HEAD~600..HEAD` still reported
 
 a name that used to be a function and is now a LOCAL BINDING. Both occurrences
 are real code, so no amount of comment stripping separates them. The predicate
-therefore requires a CALL SHAPE -- `(?<![.\w])NAME\s*\(` -- which additionally
-drops `.name(` method calls, a different namespace, while still matching
-`::name(`, since a qualified path to a deleted free function is a real orphan.
-The cost is one accepted fail-open, pinned by the
-`function_as_value_is_a_known_fail_open` arm: `xs.map(gone_fn)` passes a
-function without calling it and is not seen.
+therefore requires a CALL SHAPE -- `(?<![.\w])NAME\s*\(` for a free call, which
+still matches `::name(` since a qualified path to a deleted free function is a
+real orphan, or `.NAME(` for a method call (METHOD CALLS below). The cost is one
+accepted fail-open, pinned by the `function_as_value_is_a_known_fail_open` arm:
+`xs.map(gone_fn)` passes a function without calling it and is not seen.
+
+METHOD CALLS, ADDED 2026-11-26 AFTER THE GATE MISSED ONE. `9d0787964` removed
+`fn redact_for_export`, an inherent method, and left
+
+    src/core/backup_history_recovery_tests.rs:745
+        row.redact_for_export(RedactionLevel::None, admitted);
+
+so the lib test target stopped compiling (`error[E0599]: no method named`)
+until `908894b6c`. The gate passed it: the free-call shape excluded `.name(` as
+a different namespace. The risk that exclusion guarded against is real: a
+generic method name (`len`, `get`, `name`) is often a method on a FOREIGN type,
+so no definition in this tree clears it, and deleting a local `fn len` would
+fire on every `Vec::len` call. So it was measured before it was added, the
+method shape `\.\s*NAME\s*(?:::<[^>]*>)?\s*\(` alone, with nothing else changed:
+
+    per commit, 300 commits touching the scan dirs, 76 removing a definition
+        fires 2, both 9d0787964 (once directly, once through the merge that
+        brought it into main), both TRUE
+    endpoint ranges, the audit above
+        HEAD~50..HEAD     2 removed,   1 undefined now   0 fires
+        HEAD~200..HEAD   46 removed,  14 undefined now   0 fires
+        HEAD~600..HEAD  246 removed,  62 undefined now   0 fires
+        HEAD~1200..HEAD 371 removed, 103 undefined now   0 fires
+
+So: one real E0599 caught, no false fire in 103 deleted-and-undefined names.
+The foreign-type collision has not happened in that history, but it is the
+known false-FIRE class of the method shape, and it is loud: the quoted line
+names the receiver, and the pre-commit front end reports without blocking.
 
 Two false-positive classes found within an hour, each by widening the
 measurement rather than by reasoning, is also why the pre-commit front end at
@@ -135,8 +162,9 @@ which is a compiler. Function-local declarations make it worse: their scope is
 one body, so "defined somewhere in the tree" is simply the wrong question for
 them, and their names are generic (`Sources`, `Row`, `Args`) and collide often.
 
-Snake_case free functions are the one population where the flat predicate is
-accurate enough to be worth running. Do not widen this gate; dispatch a build.
+Snake_case functions, called free or as methods, are the one population where
+the flat predicate is accurate enough to be worth running. Do not widen this
+gate to other kinds; dispatch a build.
 
 THE KNOWN FAIL-OPEN, stated so it is not mistaken for coverage. Resolution here
 is tree-wide, so a top-level `fn foo` removed from one file while an unrelated
@@ -300,17 +328,19 @@ def find_orphans(
         defined |= defined_names(clean)
     orphans = []
     for name in sorted(removed - defined):
-        # A CALL SHAPE, not the bare word. `(?<![.\w])` drops `.name(` method
-        # calls, which live in a different namespace, and drops `_name(`;
-        # `\s*\(` drops every non-call occurrence -- a local binding, a match
-        # arm, a struct field, an enum variant, a `vec![name, ..]` element.
-        # `::name(` still matches, because a qualified path to a deleted free
-        # function is an orphan.
+        # A CALL SHAPE, not the bare word. `(?<![.\w])` keeps `_name(` out of
+        # the free-call shape; `\s*\(` drops every non-call occurrence -- a
+        # local binding, a match arm, a struct field, an enum variant, a
+        # `vec![name, ..]` element. `::name(` still matches, because a
+        # qualified path to a deleted free function is an orphan. A method
+        # call `.name(` (optionally `.name::<T>(`) is the second shape; see
+        # METHOD CALLS in the module docstring for why it is included.
         word = re.compile(rf"(?<![.\w]){re.escape(name)}\s*\(")
+        method = re.compile(rf"\.\s*{re.escape(name)}\s*(?:::<[^>]*>)?\s*\(")
         hits = []
         for path in sorted(stripped):
             for lineno, line in enumerate(stripped[path].splitlines(), 1):
-                if word.search(line):
+                if word.search(line) or method.search(line):
                     hits.append((path, lineno, line.strip()[:120]))
         if hits:
             orphans.append((name, hits))
@@ -444,9 +474,11 @@ def emit(report: dict) -> None:
         for ref in item["references"]:
             print(f"    {ref['file']}:{ref['line']}  {ref['text']}")
     print(
-        "\nThis is rustc E0425. Either restore a definition, or remove the call.\n"
+        "\nThis is rustc E0425, or E0599 for a `.name(` method call. Either restore\n"
+        "a definition, or remove the call. A method call on a foreign type (`len`,\n"
+        "`get`) is this gate's known false fire; read the receiver before acting.\n"
         "A `#[path]` sibling with `use super::*` is invisible to a `mod` grep, so\n"
-        "grep the SYMBOL across the tree before deleting a free function."
+        "grep the SYMBOL across the tree before deleting a function."
     )
 
 
@@ -653,12 +685,46 @@ def self_test() -> int:
         == set(),
     )
 
-    # 17. A method call is a different namespace from a free function, and for
-    #     a generic name (`len`, `get`, `name`) the method is often on a foreign
-    #     type, so no definition exists in this tree to clear it.
+    # 17. A method call to a deleted method whose name is defined nowhere is an
+    #     orphan: 9d0787964 left `row.redact_for_export(..)` behind (E0599).
     arm(
-        "method_call_is_not_a_free_function",
+        "method_call_to_a_deleted_method_fires",
         orphan_names(["gone_fn"], {"src/a.rs": "fn k(x: T) { x.gone_fn(); }\n"})
+        == {"gone_fn"},
+    )
+
+    # 17b. rustfmt's chained form and a turbofish are still method calls.
+    arm(
+        "chained_and_turbofish_method_calls_fire",
+        orphan_names(
+            ["gone_fn"],
+            {"src/a.rs": "fn k(x: T) {\n    x\n        .gone_fn::<u8>(1);\n}\n"},
+        )
+        == {"gone_fn"},
+    )
+
+    # 17c. The method shape needs a dot: a same-named field read or a longer
+    #     name that ends in it is not a call to it.
+    arm(
+        "field_and_suffix_are_not_method_calls",
+        orphan_names(
+            ["gone_fn"],
+            {"src/a.rs": "fn k(x: T) { let _ = x.gone_fn; x.not_gone_fn(); }\n"},
+        )
+        == set(),
+    )
+
+    # 17d. A surviving definition anywhere clears a method call, as it does a
+    #     free call -- a trait impl or a move to another file.
+    arm(
+        "method_call_cleared_by_surviving_definition",
+        orphan_names(
+            ["gone_fn"],
+            {
+                "src/a.rs": "fn k(x: T) { x.gone_fn(); }\n",
+                "src/b.rs": "impl T {\n    pub fn gone_fn(&self) {}\n}\n",
+            },
+        )
         == set(),
     )
 
