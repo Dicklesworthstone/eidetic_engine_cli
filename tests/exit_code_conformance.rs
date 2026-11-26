@@ -65,6 +65,19 @@ fn run_ee_with_env(args: &[&str], envs: &[(&str, &Path)]) -> Result<Output, Stri
     for (key, value) in envs {
         command.env(key, value);
     }
+    // A caller that names no workspace runs from a dir workspace discovery
+    // cannot climb out of (bd-uuaa3). Inheriting cargo's cwd resolved to the
+    // checkout, so `preflight run` wrote `.ee/preflight_runs.json` into it and
+    // the store-reading callers saw whatever store the checkout held. The
+    // expectations below are the no-store ones: an empty procedure list, and
+    // `preflight_evidence_unavailable`.
+    let _cwd_guard = if args.contains(&"--workspace") {
+        None
+    } else {
+        let cwd = crate::isolated_ee::outside_workspace_tempdir()?;
+        command.current_dir(cwd.path());
+        Some(cwd)
+    };
     command
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
