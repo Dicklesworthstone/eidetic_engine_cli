@@ -26,10 +26,20 @@ fn ensure(haystack: &str, needle: &str, context: &str) -> TestResult {
 
 #[test]
 fn readme_and_agent_docs_present_neural_local_as_default() -> TestResult {
+    // The quick example shows `ee init`, so it must carry the line
+    // InitReport::human_summary prints (src/core/init.rs). This needle was
+    // `ready (neural_local, potion-multilingual-128M)`, a line no ee surface
+    // prints; 446c33f30 replaced it in the README with the real output, and
+    // the default model is pinned by the hybrid-retrieval row instead.
     ensure(
         README,
-        "ready (neural_local, potion-multilingual-128M)",
+        "  Semantic retrieval: ready\n",
         "README quick example",
+    )?;
+    ensure(
+        README,
+        "default builds use the pinned `potion-multilingual-128M` Model2Vec embedder",
+        "README default model",
     )?;
     ensure(
         README,
