@@ -13,23 +13,32 @@ type TestResult = Result<(), String>;
 const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 6;
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
-    let isolated_root = args
-        .windows(2)
-        .find_map(|window| {
-            (window[0] == "--workspace").then(|| {
-                let ws = Path::new(window[1]);
-                let name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("ws");
-                ws.parent()
-                    .unwrap_or(ws)
-                    .join(format!(".ee-isolated-{name}"))
-            })
+    let named_root = args.windows(2).find_map(|window| {
+        (window[0] == "--workspace").then(|| {
+            let ws = Path::new(window[1]);
+            let name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("ws");
+            ws.parent()
+                .unwrap_or(ws)
+                .join(format!(".ee-isolated-{name}"))
         })
-        .unwrap_or_else(|| temp.path().to_path_buf());
-    crate::isolated_ee::isolated_ee_command(&isolated_root)?
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    });
+    let output = if let Some(isolated_root) = named_root {
+        crate::isolated_ee::isolated_ee_command(&isolated_root)?
+            .args(args)
+            .output()
+    } else {
+        // No workspace named, so run from a dir workspace discovery cannot
+        // climb out of (bd-uuaa3). Inheriting cargo's cwd resolved every such
+        // spawn to the checkout, so they shared its `.ee/`: the bare
+        // `preflight run` wrote the run store there that the bare
+        // `preflight close` and `preflight show` callers then read.
+        let temp = crate::isolated_ee::outside_workspace_tempdir()?;
+        crate::isolated_ee::isolated_ee_command(temp.path())?
+            .current_dir(temp.path())
+            .args(args)
+            .output()
+    };
+    output.map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
