@@ -445,13 +445,39 @@ mod tests {
         Ok(graph)
     }
 
+    /// Runs Louvain under the graph tests' event capture and returns the
+    /// partition with the fields of every `ee::graph` event naming a degraded
+    /// code.
+    #[cfg(feature = "graph")]
+    fn louvain_with_degradation_events(
+        graph: &Graph,
+    ) -> (
+        LouvainPartition,
+        Vec<std::collections::BTreeMap<String, String>>,
+    ) {
+        let (partition, events) =
+            crate::graph::tests::capture_graph_events(|| detect_louvain_communities(graph));
+        let degradations = events
+            .into_iter()
+            .filter(|event| {
+                event.target == "ee::graph" && event.fields.contains_key("degraded_code")
+            })
+            .map(|event| event.fields)
+            .collect();
+        (partition, degradations)
+    }
+
     /// bd-reality-core-convergence-1azkt.82, the admitted twin: a weighted
     /// graph partitions and is not marked declined. An edgeless graph is not a
-    /// decline either, because networkx yields its singletons.
+    /// decline either, because networkx yields its singletons. Neither logs a
+    /// degraded code.
+    #[cfg(feature = "graph")]
     #[test]
     fn louvain_partition_admits_weighted_and_edgeless_graphs() -> Result<(), String> {
-        let partition = detect_louvain_communities(&two_triangles_weighted(1.0)?);
+        let (partition, degradations) =
+            louvain_with_degradation_events(&two_triangles_weighted(1.0)?);
         assert!(!partition.declined, "{partition:?}");
+        assert!(degradations.is_empty(), "{degradations:?}");
         let mut communities = partition.communities;
         for community in &mut communities {
             community.sort();
@@ -462,19 +488,45 @@ mod tests {
         let mut edgeless = Graph::new(CompatibilityMode::Strict);
         edgeless.add_node("a");
         edgeless.add_node("b");
-        let partition = detect_louvain_communities(&edgeless);
+        let (partition, degradations) = louvain_with_degradation_events(&edgeless);
         assert!(!partition.declined, "{partition:?}");
+        assert!(degradations.is_empty(), "{degradations:?}");
         assert_eq!(partition.communities, vec![vec!["a"], vec!["b"]]);
         Ok(())
     }
 
     /// The decline twin: when every link weighs 0, modularity divides by a
-    /// zero m**2, so fnx declines and every node stands alone.
+    /// zero m**2, so fnx declines and every node stands alone. Of the six
+    /// callers only `graph louvain` reports the decline in its output; the
+    /// rest have this one warning, so its fields are pinned here.
+    #[cfg(feature = "graph")]
     #[test]
     fn louvain_partition_reports_a_decline_when_every_link_weighs_zero() -> Result<(), String> {
         let graph = two_triangles_weighted(0.0)?;
-        let partition = detect_louvain_communities(&graph);
+        let (partition, degradations) = louvain_with_degradation_events(&graph);
         assert!(partition.declined, "{partition:?}");
+        let [fields] = degradations.as_slice() else {
+            return Err(format!(
+                "expected one decline warning, got {degradations:?}"
+            ));
+        };
+        let field = |name: &str| fields.get(name).map(String::as_str);
+        assert_eq!(field("algorithm"), Some("louvain"), "{fields:?}");
+        assert_eq!(field("declined"), Some("true"), "{fields:?}");
+        assert_eq!(
+            field("degraded_code"),
+            Some(GRAPH_LOUVAIN_DECLINED_CODE),
+            "{fields:?}"
+        );
+        let node_count = graph.node_count().to_string();
+        let edge_count = graph.edge_count().to_string();
+        assert_eq!(field("node_count"), Some(node_count.as_str()), "{fields:?}");
+        assert_eq!(field("edge_count"), Some(edge_count.as_str()), "{fields:?}");
+        assert_eq!(
+            field("fnx_version"),
+            Some(franken_networkx_version()),
+            "{fields:?}"
+        );
         let singletons = graph
             .nodes_ordered()
             .into_iter()
