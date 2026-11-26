@@ -273,17 +273,7 @@ fn docs_schema_files_are_strict_draft_2020_12_documents() -> TestResult {
 /// them, ee.hotset_manifest.v1, could not be validated at all as a result.
 #[test]
 fn docs_schema_patterns_compile_with_regex_lite() -> TestResult {
-    let schema_dir = repo_root().join("docs").join("schemas");
-    let mut paths = fs::read_dir(&schema_dir)
-        .map_err(|error| format!("read {}: {error}", schema_dir.display()))?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("list {}: {error}", schema_dir.display()))?;
-    paths.retain(|path| {
-        path.extension()
-            .is_some_and(|extension| extension == "json")
-    });
-    paths.sort();
+    let paths = docs_schema_json_paths()?;
     let mut checked = 0_usize;
     let mut failures = Vec::new();
     for path in &paths {
@@ -310,6 +300,63 @@ fn docs_schema_patterns_compile_with_regex_lite() -> TestResult {
             failures.join("\n")
         ))
     }
+}
+
+/// Every example a published schema carries must satisfy that schema under
+/// ee's own validator. `schema_drift` checks only ee.response.* and ee.error.*
+/// envelope examples, so nothing else was checked, and
+/// ee.host_calibration.recommendation.v1's example said `"configMutation":
+/// "never"` against its own `{"type": "boolean", "const": false}`. The
+/// validator ignores `if`/`then`/`else` and `not`, so this can miss a
+/// violation but cannot invent one.
+#[test]
+fn docs_schema_examples_validate_against_their_own_schema() -> TestResult {
+    let paths = docs_schema_json_paths()?;
+    let mut checked = 0_usize;
+    let mut failures = Vec::new();
+    for path in &paths {
+        let schema = read_json(path)?;
+        let Some(examples) = schema.get("examples").and_then(Value::as_array) else {
+            continue;
+        };
+        for (index, example) in examples.iter().enumerate() {
+            checked += 1;
+            if let Err(error) = ee::testing::validate_json_schema_instance(example, &schema) {
+                failures.push(format!("{} examples[{index}]: {error}", path.display()));
+            }
+        }
+    }
+    if checked == 0 {
+        return Err(format!(
+            "found no examples in {} schema files; the walk is broken",
+            paths.len()
+        ));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} of {checked} schema examples violate their own schema:\n{}",
+            failures.len(),
+            failures.join("\n")
+        ))
+    }
+}
+
+/// Every `docs/schemas/*.json`, sorted so failures list in a stable order.
+fn docs_schema_json_paths() -> Result<Vec<PathBuf>, String> {
+    let schema_dir = repo_root().join("docs").join("schemas");
+    let mut paths = fs::read_dir(&schema_dir)
+        .map_err(|error| format!("read {}: {error}", schema_dir.display()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("list {}: {error}", schema_dir.display()))?;
+    paths.retain(|path| {
+        path.extension()
+            .is_some_and(|extension| extension == "json")
+    });
+    paths.sort();
+    Ok(paths)
 }
 
 fn check_schema_pattern(pattern: &str, at: &str, checked: &mut usize, failures: &mut Vec<String>) {

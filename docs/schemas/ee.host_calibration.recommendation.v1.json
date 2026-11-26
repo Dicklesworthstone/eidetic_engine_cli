@@ -263,7 +263,7 @@
     {
       "schema": "ee.host_calibration.recommendation.v1",
       "sideEffectFree": true,
-      "configMutation": "never",
+      "configMutation": false,
       "hostProfileSchema": "ee.host_profile.v1",
       "configuredProfile": null,
       "recommendedProfile": "swarm",
