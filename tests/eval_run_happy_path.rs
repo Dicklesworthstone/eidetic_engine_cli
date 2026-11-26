@@ -770,10 +770,15 @@ fn pack_quality_executes_real_packs_independently_of_expected_answers() -> TestR
         "preserves_success_signal":true
     }));
     let data_home = root.join("data");
+    // The global write still resolves a workspace (handle_remember passes it to
+    // the global path). Name it as well as using it as the cwd (bd-uuaa3): a
+    // tempdir under a dir holding .ee/ would otherwise resolve to that store.
     let global = Command::new(env!("CARGO_BIN_EXE_ee"))
         .current_dir(&root)
         .env("XDG_DATA_HOME", &data_home)
         .env("EE_EMBED_DOWNLOAD", "off")
+        .arg("--workspace")
+        .arg(&root)
         .args([
             "remember",
             "--global",
