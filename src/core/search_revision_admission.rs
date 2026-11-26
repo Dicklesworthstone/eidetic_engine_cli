@@ -482,6 +482,35 @@ mod seal_tests {
         Ok((temp, options, db))
     }
 
+    /// One DDL statement of the unavailable-authority simulation, retried on
+    /// the transient contention every product write retries (bd-obslc).
+    ///
+    /// On some workers the rename back, after admit_hits, fails with `database
+    /// is busy (snapshot conflict on pages: )`. At the pinned fsqlite (0.4.10)
+    /// an empty page list is raised only for a commit refused because another
+    /// commit landed after its snapshot or write-generation sample. fsqlite
+    /// expects callers to retry that, and ee classifies it as retryable
+    /// (`sqlite_contention_message_is_retryable`). `execute_raw` is the one
+    /// path that does not retry, because a batch could partially apply; a
+    /// single RENAME cannot. Each retry is printed, so a lane log shows
+    /// whether a green needed one.
+    fn simulate_ddl(db: &DbConnection, sql: &str, step: &str) -> TestResult {
+        const ATTEMPTS: u64 = 5;
+        for attempt in 1..=ATTEMPTS {
+            match db.execute_raw(sql) {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if attempt < ATTEMPTS && error.to_string().contains("snapshot conflict") =>
+                {
+                    eprintln!("bd-obslc: {step}: attempt {attempt} refused, retrying: {error}");
+                    std::thread::sleep(std::time::Duration::from_millis(20 * attempt));
+                }
+                Err(error) => return Err(format!("{step} (attempt {attempt}): {error}")),
+            }
+        }
+        Err(format!("{step}: no attempt ran"))
+    }
+
     fn seal(db: &DbConnection, id: &str) -> TestResult {
         db.insert_memory_seal(id, &format!("blake3:{}", "a".repeat(64)), TIME)
             .map(|_| ())
@@ -762,10 +791,13 @@ mod seal_tests {
     #[test]
     fn unavailable_quarantine_authority_withholds_memories_and_similarity_seeds() -> TestResult {
         let (_temp, options, db) = fixture()?;
-        // Each DDL names its step: both tests fail deterministically with `database
-        // is busy` and the bare error did not say which rename (bd-obslc).
-        db.execute_raw("ALTER TABLE feedback_quarantine RENAME TO private_unavailable_quarantine")
-            .map_err(|error| format!("rename quarantine away, before admit_hits: {error}"))?;
+        // Each DDL names its step and retries transient contention (bd-obslc;
+        // see simulate_ddl).
+        simulate_ddl(
+            &db,
+            "ALTER TABLE feedback_quarantine RENAME TO private_unavailable_quarantine",
+            "rename quarantine away, before admit_hits",
+        )?;
         let mut degraded = Vec::new();
         let visible = admit_hits(
             &options,
@@ -782,8 +814,11 @@ mod seal_tests {
                 .contains("private_unavailable_quarantine")
         );
         assert!(seed_is_visible(&db, HIDDEN, instant(TIME)?).is_err());
-        db.execute_raw("ALTER TABLE private_unavailable_quarantine RENAME TO feedback_quarantine")
-            .map_err(|error| format!("rename quarantine back, after admit_hits: {error}"))?;
+        simulate_ddl(
+            &db,
+            "ALTER TABLE private_unavailable_quarantine RENAME TO feedback_quarantine",
+            "rename quarantine back, after admit_hits",
+        )?;
         assert_eq!(
             ids(&admit_hits(
                 &options,
@@ -1081,9 +1116,13 @@ mod seal_tests {
     #[test]
     fn unavailable_seal_authority_withholds_memories_not_other_entity_types() -> TestResult {
         let (_temp, options, db) = fixture()?;
-        // Each DDL names its step (bd-obslc); see the quarantine variant.
-        db.execute_raw("ALTER TABLE memory_seals RENAME TO private_unavailable_seals")
-            .map_err(|error| format!("rename seals away, before admit_hits: {error}"))?;
+        // Each DDL names its step and retries transient contention (bd-obslc;
+        // see simulate_ddl).
+        simulate_ddl(
+            &db,
+            "ALTER TABLE memory_seals RENAME TO private_unavailable_seals",
+            "rename seals away, before admit_hits",
+        )?;
         let mut degraded = Vec::new();
         let visible = admit_hits(
             &options,
@@ -1096,8 +1135,11 @@ mod seal_tests {
         assert_eq!(degraded[0].code, UNAVAILABLE);
         assert!(!degraded[0].message.contains("private_unavailable_seals"));
         assert!(!degraded[0].message.contains(HIDDEN));
-        db.execute_raw("ALTER TABLE private_unavailable_seals RENAME TO memory_seals")
-            .map_err(|error| format!("rename seals back, after admit_hits: {error}"))?;
+        simulate_ddl(
+            &db,
+            "ALTER TABLE private_unavailable_seals RENAME TO memory_seals",
+            "rename seals back, after admit_hits",
+        )?;
         assert_eq!(
             admit_hits(&options, vec![hit(HIDDEN)], &mut Vec::new(), None).len(),
             1
