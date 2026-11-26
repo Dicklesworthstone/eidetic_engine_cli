@@ -11,6 +11,7 @@
 //! 3. Whitespace-trimmed parses agree with the original. Today the parser
 //!    trims; this invariant pins that behavior so a future change to drop
 //!    trimming won't silently regress.
+//! 4. `scheme()` names the scheme the rendered URI starts with.
 //!
 //! No assumptions are made about which inputs succeed — the fuzzer drives
 //! that. The goal is panic-freedom and round-trip stability on the
@@ -58,25 +59,19 @@ fuzz_target!(|data: &[u8]| {
             );
         }
 
-        // (4) Scheme is non-empty for every accepted URI and is one of the
-        // documented values.
+        // (4) The scheme accessor names the scheme the URI renders with. With
+        // (2), which reparses `rendered`, that makes it a scheme the parser
+        // accepts. Comparing against the parser's own output, not a copied
+        // list, keeps this from drifting: a hard-coded list of 11 schemes
+        // reported every registered external scheme (`journal`,
+        // `jsonl-import`, `sec-filing`, ...) as a crash.
         let scheme = uri.scheme();
         assert!(
-            matches!(
-                scheme,
-                "cass-session"
-                    | "file"
-                    | "ee-mem"
-                    | "http"
-                    | "https"
-                    | "agent-mail"
-                    | "manual"
-                    | "bench-run"
-                    | "git-sha"
-                    | "flamegraph"
-                    | "ee-reflect"
-            ),
-            "unexpected scheme `{scheme}` for URI `{rendered}`"
+            !scheme.is_empty()
+                && rendered
+                    .strip_prefix(scheme)
+                    .is_some_and(|rest| rest.starts_with("://")),
+            "scheme `{scheme}` does not prefix the rendered URI `{rendered}`"
         );
     }
 });

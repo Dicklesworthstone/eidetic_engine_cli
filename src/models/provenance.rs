@@ -611,7 +611,7 @@ mod tests {
     use std::str::FromStr;
 
     use super::super::id::MemoryId;
-    use super::{LineSpan, ProvenanceUri, ProvenanceUriError};
+    use super::{LineSpan, ProvenanceUri, ProvenanceUriError, REGISTERED_EXTERNAL_SCHEMES};
 
     fn must_parse(input: &str) -> ProvenanceUri {
         match ProvenanceUri::from_str(input) {
@@ -1169,6 +1169,44 @@ mod tests {
             must_parse("salesforce://opportunity/006").scheme(),
             "salesforce"
         );
+    }
+
+    /// Invariant 4 of fuzz/fuzz_targets/provenance_uri.rs, executed here
+    /// because nothing runs the fuzz target: for every accepted scheme,
+    /// `scheme()` names the scheme the URI renders with. The external half
+    /// iterates the parser's own registry, so a scheme added there is covered
+    /// without editing this test.
+    #[test]
+    fn scheme_accessor_prefixes_the_rendered_uri_for_every_accepted_scheme() {
+        let mut inputs = vec![
+            "cass-session://abc#L40-50".to_owned(),
+            "file:///x#L7-7".to_owned(),
+            format!("ee-mem://{}", MemoryId::from_uuid(uuid_with_seed(9))),
+            "http://example.com/".to_owned(),
+            "https://example.com/".to_owned(),
+            "agent-mail://br-123/msg-42".to_owned(),
+            "journal://jrn_018ff8dc-3d85-7cc0-a6fd-a2d479e6d401".to_owned(),
+        ];
+        // `journal` is registered but dispatched to its own parser, which
+        // requires a v7 journal id, so it is covered by the line above.
+        inputs.extend(
+            REGISTERED_EXTERNAL_SCHEMES
+                .iter()
+                .filter(|scheme| **scheme != "journal")
+                .map(|scheme| format!("{scheme}://fixture-body")),
+        );
+        for input in inputs {
+            let parsed = must_parse(&input);
+            let rendered = parsed.to_string();
+            let scheme = parsed.scheme();
+            assert!(
+                !scheme.is_empty()
+                    && rendered
+                        .strip_prefix(scheme)
+                        .is_some_and(|rest| rest.starts_with("://")),
+                "scheme `{scheme}` does not prefix `{rendered}` (input `{input}`)"
+            );
+        }
     }
 
     fn uuid_with_seed(seed: u8) -> uuid::Uuid {
