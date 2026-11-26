@@ -109,23 +109,31 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
 }
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
-    let isolated_root = args
-        .windows(2)
-        .find_map(|window| {
-            (window[0] == "--workspace").then(|| {
-                let ws = Path::new(window[1]);
-                let name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("ws");
-                ws.parent()
-                    .unwrap_or(ws)
-                    .join(format!(".ee-isolated-{name}"))
-            })
+    let named_root = args.windows(2).find_map(|window| {
+        (window[0] == "--workspace").then(|| {
+            let ws = Path::new(window[1]);
+            let name = ws.file_name().and_then(|n| n.to_str()).unwrap_or("ws");
+            ws.parent()
+                .unwrap_or(ws)
+                .join(format!(".ee-isolated-{name}"))
         })
-        .unwrap_or_else(|| temp.path().to_path_buf());
-    crate::isolated_ee::isolated_ee_command(&isolated_root)?
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    });
+    let output = if let Some(isolated_root) = named_root {
+        crate::isolated_ee::isolated_ee_command(&isolated_root)?
+            .args(args)
+            .output()
+    } else {
+        // No workspace named, so run from a dir workspace discovery cannot
+        // climb out of. Inheriting cargo's cwd read the checkout's own `.ee/`
+        // store (bd-uuaa3). These callers are all `--json status`, and the
+        // boundary-log validators read only its schema and JSON shape.
+        let temp = crate::isolated_ee::outside_workspace_tempdir()?;
+        crate::isolated_ee::isolated_ee_command(temp.path())?
+            .current_dir(temp.path())
+            .args(args)
+            .output()
+    };
+    output.map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
 fn unique_dossier_dir(scenario: &str) -> Result<PathBuf, String> {
