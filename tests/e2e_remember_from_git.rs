@@ -448,6 +448,19 @@ fn assert_persisted_anchors(workspace: &Path, log_path: &Path, memory_id: &str) 
             "kinds": anchors.iter().map(|anchor| anchor.anchor_kind.as_str()).collect::<Vec<_>>(),
             "redactedValues": anchors.iter().map(|anchor| anchor.redacted_anchor_value.as_str()).collect::<Vec<_>>(),
             "allHashesStable": all_hashes_stable,
+            // Per anchor, the three terms all_hashes_stable combines, so a red
+            // names the failing one (the lane run at 23525cf36 could not).
+            // Hashes are classified rather than printed: a malformed one may
+            // be a raw value.
+            "sources": anchors.iter().map(|anchor| anchor.source.as_str()).collect::<Vec<_>>(),
+            "valueHashIsBlake3": anchors
+                .iter()
+                .map(|anchor| anchor.anchor_value_hash.starts_with("blake3:"))
+                .collect::<Vec<_>>(),
+            "spanHashIsBlake3": anchors
+                .iter()
+                .map(|anchor| anchor.captured_span_hash.starts_with("blake3:"))
+                .collect::<Vec<_>>(),
             "databasePathHash": hash_bytes(database_path.display().to_string().as_bytes()),
         }),
     )
