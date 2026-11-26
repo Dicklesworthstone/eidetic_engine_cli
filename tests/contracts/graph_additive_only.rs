@@ -4,7 +4,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
 use ee::db::{
     CreateMemoryInput, CreatePackItemInput, CreatePackRecordInput, CreateWorkspaceInput,
     DbConnection,
@@ -377,6 +376,8 @@ fn graph_payload_for_baseline_rejects_bare_health_payload() {
 /// resolves the default model. Live status then omits
 /// `embed_model_unavailable` from `degradationsApplied` and `degraded[]`, and
 /// this gate reports it as a removal on any host where the model resolves.
+/// The fixture's index is built through here too (see `build_search_index`),
+/// so it cannot be built for a different embedder than status selects.
 fn run_ee(args: &[String]) -> Result<Output, String> {
     crate::common_spawn::serialized_real_ee_with(|command| {
         command
@@ -466,8 +467,15 @@ fn assert_additive_shape(
                         let Some(found) = actual_items.iter().find(|item| {
                             entry_identity(item).as_deref() == Some(identity.as_str())
                         }) else {
+                            // Name what IS there. The missing identity alone
+                            // cannot say what replaced it: on the lane at
+                            // d796547ef this read "removed
+                            // $.degraded[embed_model_unavailable]" and the
+                            // entries present had to be inferred from source.
+                            let present: Vec<String> =
+                                actual_items.iter().filter_map(entry_identity).collect();
                             return Err(format!(
-                                "{surface} removed array entry {path}[{identity}]"
+                                "{surface} removed array entry {path}[{identity}]; present: {present:?}"
                             ));
                         };
                         (format!("{path}[{identity}]"), found)
@@ -543,6 +551,13 @@ fn additive_shape_accepts_a_prepended_entry_but_still_rejects_a_removed_one() ->
     if !message.contains("embed_model_unavailable") {
         return Err(format!(
             "the removal failure must name the missing entry; got: {message}"
+        ));
+    }
+    if !message.contains("neural_local_unconfirmed")
+        || !message.contains("context_evidence_freshness_missing_source")
+    {
+        return Err(format!(
+            "the removal failure must name the entries that are present; got: {message}"
         ));
     }
     Ok(())
@@ -710,25 +725,57 @@ fn stable_workspace_id(workspace: &Path) -> String {
     WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
 }
 
+/// Build the index through `run_ee`, under the same posture as every command
+/// this test compares, then check it the way the borrowed baselines' producer
+/// checks its own (`build_search_index` in tests/json_contract_snapshots.rs).
+///
+/// This used to call `rebuild_index` in-process, so the index was built under
+/// the test process's environment while the commands ran under `run_ee`'s.
+/// Where the test process resolves an embedding model, those differ. Status
+/// adds `embed_model_unavailable` only when search is ready, and otherwise
+/// reports `search_index_degraded` and `search_unavailable`. On the lane at
+/// d796547ef, status carried at least two degraded entries, none of them
+/// `embed_model_unavailable`. That fits the mismatch, but it was not
+/// observed directly. If it recurs, the check below names the index health
+/// and the embedder instead of a shape difference.
 fn build_search_index(workspace: &Path, database: &Path, index_dir: &Path) -> TestResult {
-    let report = rebuild_index(&IndexRebuildOptions {
-        workspace_path: workspace.to_path_buf(),
-        database_path: Some(database.to_path_buf()),
-        index_dir: Some(index_dir.to_path_buf()),
-        dry_run: false,
-    })
-    .map_err(|error| error.to_string())?;
+    let workspace = workspace.to_string_lossy().into_owned();
+    let database = database.to_string_lossy().into_owned();
+    let index_dir = index_dir.to_string_lossy().into_owned();
+    let index_args = |subcommand: &str| {
+        vec![
+            "--json".to_owned(),
+            "--workspace".to_owned(),
+            workspace.clone(),
+            "index".to_owned(),
+            subcommand.to_owned(),
+            "--database".to_owned(),
+            database.clone(),
+            "--index-dir".to_owned(),
+            index_dir.clone(),
+        ]
+    };
 
-    if report.status != IndexRebuildStatus::Success {
-        return Err(format!(
-            "index rebuild failed with status {:?}",
-            report.status
-        ));
+    let report = run_json(&index_args("rebuild"))?;
+    if report["data"]["status"] != "success" {
+        return Err(format!("index rebuild failed: {}", bounded_json(&report)));
     }
-    if report.documents_total != 1 {
+    if report["data"]["documents_total"] != 1 {
         return Err(format!(
             "expected one indexed document, got {}",
-            report.documents_total
+            report["data"]["documents_total"]
+        ));
+    }
+
+    let status = run_json(&index_args("status"))?;
+    if status["data"]["health"] != "ready"
+        || status["data"]["embedding"]["mode"] != "deterministic_hash"
+    {
+        return Err(format!(
+            "the fixture index must be ready under the hash embedder the borrowed baselines \
+             were recorded with; got health {} and embedding {}",
+            status["data"]["health"],
+            bounded_json(&status["data"]["embedding"])
         ));
     }
     Ok(())
