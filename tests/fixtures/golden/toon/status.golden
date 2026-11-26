@@ -54,9 +54,10 @@ data:
     followerTimeoutCount: 0
     leaderFailureCount: 0
     reusedResultCount: 0
-    surfaces[2]{surface,status,configured,activeLeaderCount,leaderStartCount,completedLeaderCount,followerJoinCount,followerTimeoutCount,leaderFailureCount,reusedResultCount,statePoisonedCount,followerTimeoutMs,lastKey,suggestedAction}:
+    surfaces[3]{surface,status,configured,activeLeaderCount,leaderStartCount,completedLeaderCount,followerJoinCount,followerTimeoutCount,leaderFailureCount,reusedResultCount,statePoisonedCount,followerTimeoutMs,lastKey,suggestedAction}:
       graph_feature_enrichment,idle,true,0,0,0,0,0,0,0,0,30000,null,no action; single-flight is available for duplicate read-heavy work
       search,unconfigured,false,0,0,0,0,0,0,0,0,60000,null,enable a configured single-flight surface before expecting coalescing
+      context,unconfigured,false,0,0,0,0,0,0,0,0,60000,null,enable a configured single-flight surface before expecting coalescing
   writeGroupCommit:
     schema: ee.write_group_commit.v1
     generatedAt: "2026-06-15T04:22:00Z"
