@@ -6605,6 +6605,53 @@ fn synthetic_transport_failure_does_not_promote_warning_span_to_first_error() ->
 }
 
 #[test]
+fn synthetic_disk_budget_admission_refusal_is_retryable_capacity() -> TestResult {
+    // RCH-E330 is refused at admission before any test runs. As `remote_failure`
+    // the proof-broker ledger recorded it proof_unusable with no expiry, which the
+    // pinned lane cannot bypass, so the identical rerun was refused for good.
+    let (status, stdout, _stderr) = run_script_with_env(
+        &["--", "cargo", "check", "--all-targets"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "[RCH] remote worker-06 stopped [RCH-E330]: remote_build_disk_budget_exceeded: admission (growth 0 bytes, budget 32212254720 bytes, free 115332812800 bytes, protected 10737418240 bytes); free space cannot cover active build reservations and protected floor\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "120"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "36668"),
+        ],
+    )?;
+    if status.success() {
+        return Err("disk-budget refusal should preserve non-zero exit".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse disk-budget refusal: {error}"))?;
+    if report["status"] != "capacity_or_timeout" {
+        return Err(format!(
+            "RCH-E330 should be a retryable capacity refusal, not a remote failure: {report}"
+        ));
+    }
+    if !report["error_codes"]
+        .as_array()
+        .ok_or_else(|| "missing error_codes".to_owned())?
+        .iter()
+        .any(|code| code.as_str() == Some("RCH-E330"))
+    {
+        return Err(format!("missing RCH-E330 error code: {report}"));
+    }
+    if !degraded_contains(&report, "rch_verify_capacity_or_timeout")? {
+        return Err(format!(
+            "disk-budget refusal missing capacity code: {report}"
+        ));
+    }
+    if degraded_contains(&report, "rch_verify_remote_marker_missing")? {
+        return Err(format!(
+            "a refusal before any remote command is not a missing marker: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn synthetic_pre_cargo_disk_full_extracts_selected_worker() -> TestResult {
     let (status, stdout, _stderr) = run_script_with_env(
         &["--", "cargo", "test", "--lib", "task_frame"],

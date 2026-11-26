@@ -2037,6 +2037,14 @@ is_explicit_capacity_admission_output() {
     grep -Eiq '^[[:space:]]*\[RCH\][[:space:]]+local[[:space:]]+\(no admissible workers:[^)]*(critical_pressure|insufficient_slots)[[:space:]]*='
 }
 
+# rch's disk-budget admission refusal: "[RCH] remote <worker> stopped [RCH-E330]:
+# remote_build_disk_budget_exceeded: admission (...); free space cannot cover active
+# build reservations and protected floor". A capacity condition that clears as other
+# builds retire their reservations. No test runs.
+is_remote_disk_budget_refusal_output() {
+    grep -Eq 'RCH-E330|remote_build_disk_budget_exceeded'
+}
+
 is_client_daemon_unknown_variant_output() {
     grep -Eiq "Failed to parse daemon response: unknown variant"
 }
@@ -8083,6 +8091,17 @@ if [ "$exit_code" -ne 0 ] && [ -z "$worker_id" ] &&
         degraded+=("rch_verify_capacity_or_timeout")
         explicit_capacity_refusal=1
     fi
+fi
+# RCH-E330 names its worker, so the worker_id-gated rules above never see it, and
+# it fell through to `remote_failure`. The proof-broker ledger records that status
+# as proof_unusable / inspect_failure_before_rerun with no expiry, and the pinned
+# lane refuses every bypass. One transient refusal therefore blocked the identical
+# rerun on that worker for good (measured 2026-11-26: an E330 at admission, growth 0
+# bytes, then proof_broker_refused on the rerun). As capacity_or_timeout it is
+# recorded as retryable.
+if [ "$exit_code" -ne 0 ] && printf '%s' "$combined_output" | is_remote_disk_budget_refusal_output; then
+    degraded+=("rch_verify_capacity_or_timeout")
+    explicit_capacity_refusal=1
 fi
 if printf '%s' "$combined_output" | is_client_daemon_unknown_variant_output; then
     degraded+=("rch_verify_client_daemon_version_skew")
