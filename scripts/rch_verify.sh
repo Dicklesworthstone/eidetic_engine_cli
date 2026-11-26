@@ -2049,8 +2049,15 @@ is_client_daemon_unknown_variant_output() {
     grep -Eiq "Failed to parse daemon response: unknown variant"
 }
 
+# The last two alternatives are rch saying it does not know the outcome: "Remote
+# execution failed on <worker>; refusing local fallback: remote execution
+# completion is unconfirmed; automatic replay is unsafe: SSH execution exit 255
+# does not prove remote completion", then "[RCH] remote <worker> completion
+# unconfirmed; ownership retained for recovery". Measured 2026-11-26 when the
+# client lost its network 377 crates into a build: exit 1, no test ran. Left as
+# remote_failure, the ledger records it proof_unusable with no expiry.
 is_remote_transport_timeout_output() {
-    grep -Eiq "RCH-E104|SSH command timed out|Remote execution failed .*SSH timeout"
+    grep -Eiq "RCH-E104|SSH command timed out|Remote execution failed .*SSH timeout|completion (is )?unconfirmed|does not prove remote completion"
 }
 
 configured_workers() {

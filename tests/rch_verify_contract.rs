@@ -6652,6 +6652,40 @@ fn synthetic_disk_budget_admission_refusal_is_retryable_capacity() -> TestResult
 }
 
 #[test]
+fn synthetic_unconfirmed_remote_completion_is_retryable_transport() -> TestResult {
+    // rch's own report that it lost the session and does not know the outcome.
+    // As `remote_failure` the proof-broker ledger recorded it proof_unusable with
+    // no expiry, so the identical rerun was refused for good.
+    let (status, stdout, _stderr) = run_script_with_env(
+        &["--", "cargo", "test", "--locked", "--lib"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "   Compiling fsqlite-error v0.4.10\n  WARN rch::hook: Invocation requires recovery before release; retaining build 30125997558858842 ownership\n  WARN rch::hook: Remote execution failed on worker-06; refusing local fallback: remote execution completion is unconfirmed; automatic replay is unsafe: SSH execution exit 255 does not prove remote completion\n[RCH] remote worker-06 completion unconfirmed; ownership retained for recovery (no local fallback)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "196349"),
+        ],
+    )?;
+    if status.success() {
+        return Err("unconfirmed completion should preserve non-zero exit".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse unconfirmed completion: {error}"))?;
+    if report["status"] != "rch_environment_failure" {
+        return Err(format!(
+            "unconfirmed remote completion should be environment-blocked, not a remote failure: {report}"
+        ));
+    }
+    if !degraded_contains(&report, "rch_verify_remote_transport_timeout")? {
+        return Err(format!(
+            "unconfirmed remote completion missing transport code: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn synthetic_pre_cargo_disk_full_extracts_selected_worker() -> TestResult {
     let (status, stdout, _stderr) = run_script_with_env(
         &["--", "cargo", "test", "--lib", "task_frame"],
