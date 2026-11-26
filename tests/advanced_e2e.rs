@@ -10,8 +10,6 @@ use std::process::Output;
 
 type TestResult = Result<(), String>;
 
-const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 6;
-
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     let named_root = args.windows(2).find_map(|window| {
         (window[0] == "--workspace").then(|| {
@@ -794,40 +792,65 @@ fn procedure_promote_without_dry_run_reports_not_found_for_missing_record() -> T
 // Economy Tests (EE-431 - Degraded until DB-backed metrics exist)
 // ============================================================================
 
+/// The economy payloads serialize `degraded` as aggregated entries with a `code`.
+fn ensure_economy_degraded_code(payload: &serde_json::Value, code: &str) -> TestResult {
+    let codes: Vec<&str> = payload["degraded"]
+        .as_array()
+        .ok_or_else(|| format!("economy payload has no degraded array: {payload}"))?
+        .iter()
+        .filter_map(|entry| entry["code"].as_str())
+        .collect();
+    ensure(
+        codes.contains(&code),
+        format!("economy degraded codes {codes:?} must include {code}"),
+    )
+}
+
+// The four economy rows below run against an initialised store holding no
+// memory rows. There the economy surfaces abstain: success, `status: abstain`,
+// nothing scored, and a payload degradation naming why. That is the contract
+// core::economy pins (economy_report_empty_db_abstains_without_seed_artifacts,
+// since 827b2db55). These rows asserted exit 6 instead. That code is reachable
+// only when the store cannot be opened or read, so they never passed: first
+// against a missing store (10 since 91cf7bcbd), then, from c51165089, against
+// this abstention (bd-23nel).
+
 #[test]
 fn economy_report_degrades_until_db_backed_metrics_exist() -> TestResult {
-    // Asserts exit 6 (unsatisfied_degraded_mode), which requires a STORE
-    // that has no db-backed metrics yet. Since 91cf7bcbd an uninitialised
-    // directory answers 10 (WorkspaceStoreMissing) instead, so the degraded
-    // machinery this test exists to check was never reached.
     let (_tempdir, workspace) = initialized_workspace()?;
     let output = run_ee(&["--workspace", &workspace, "economy", "report", "--json"])?;
-    ensure_equal(
-        &output.status.code(),
-        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
-        "exit code",
-    )?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v2"),
+        &serde_json::json!("ee.response.v2"),
         "response schema",
     )?;
+    let report = &json["data"]["report"];
     ensure_equal(
-        &json["error"]["code"],
-        &serde_json::json!("unsatisfied_degraded_mode"),
-        "degraded code",
-    )
+        &report["status"],
+        &serde_json::json!("abstain"),
+        "report status",
+    )?;
+    ensure_equal(
+        &report["totalArtifacts"],
+        &serde_json::json!(0),
+        "total artifacts",
+    )?;
+    ensure_equal(
+        &report["scoredArtifactIds"],
+        &serde_json::json!([]),
+        "scored artifact ids",
+    )?;
+    ensure_economy_degraded_code(report, "economy_metrics_empty")
 }
 
 #[test]
 fn economy_score_degrades_instead_of_scoring_seed_artifacts() -> TestResult {
-    // Asserts exit 6 (unsatisfied_degraded_mode), which requires a STORE
-    // that has no db-backed metrics yet. Since 91cf7bcbd an uninitialised
-    // directory answers 10 (WorkspaceStoreMissing) instead, so the degraded
-    // machinery this test exists to check was never reached.
+    // With no memory rows there is nothing to score, so the id is not_found
+    // (exit 1) rather than scored from seed data.
     let (_tempdir, workspace) = initialized_workspace()?;
     let output = run_ee(&[
         "--workspace",
@@ -837,26 +860,23 @@ fn economy_score_degrades_instead_of_scoring_seed_artifacts() -> TestResult {
         "mem_nonexistent",
         "--json",
     ])?;
-    ensure_equal(
-        &output.status.code(),
-        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
-        "exit code",
-    )?;
+    ensure_equal(&output.status.code(), &Some(1), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     let json = stdout_json(&output)?;
     ensure_equal(
+        &json["schema"],
+        &serde_json::json!("ee.error.v2"),
+        "error schema",
+    )?;
+    ensure_equal(
         &json["error"]["code"],
-        &serde_json::json!("unsatisfied_degraded_mode"),
-        "degraded code",
+        &serde_json::json!("not_found"),
+        "error code",
     )
 }
 
 #[test]
 fn economy_simulate_degrades_instead_of_ranking_seed_artifacts() -> TestResult {
-    // Asserts exit 6 (unsatisfied_degraded_mode), which requires a STORE
-    // that has no db-backed metrics yet. Since 91cf7bcbd an uninitialised
-    // directory answers 10 (WorkspaceStoreMissing) instead, so the degraded
-    // machinery this test exists to check was never reached.
     let (_tempdir, workspace) = initialized_workspace()?;
     let output = run_ee(&[
         "--workspace",
@@ -871,11 +891,7 @@ fn economy_simulate_degrades_instead_of_ranking_seed_artifacts() -> TestResult {
         "8000",
         "--json",
     ])?;
-    ensure_equal(
-        &output.status.code(),
-        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
-        "exit code",
-    )?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
@@ -886,14 +902,26 @@ fn economy_simulate_degrades_instead_of_ranking_seed_artifacts() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v2"),
+        &serde_json::json!("ee.response.v2"),
         "response schema",
     )?;
+    let simulation = &json["data"]["simulation"];
     ensure_equal(
-        &json["error"]["code"],
-        &serde_json::json!("unsatisfied_degraded_mode"),
-        "degraded code",
-    )
+        &simulation["status"],
+        &serde_json::json!("abstain"),
+        "simulation status",
+    )?;
+    ensure_equal(
+        &simulation["scoredArtifactIds"],
+        &serde_json::json!([]),
+        "scored artifact ids",
+    )?;
+    ensure_equal(
+        &simulation["rankingStateUnchanged"],
+        &serde_json::json!(true),
+        "ranking state unchanged",
+    )?;
+    ensure_economy_degraded_code(simulation, "economy_metrics_empty")
 }
 
 #[test]
@@ -921,10 +949,6 @@ fn economy_simulate_rejects_zero_budget() -> TestResult {
 
 #[test]
 fn economy_prune_plan_dry_run_degrades_until_db_backed_metrics_exist() -> TestResult {
-    // Asserts exit 6 (unsatisfied_degraded_mode), which requires a STORE
-    // that has no db-backed metrics yet. Since 91cf7bcbd an uninitialised
-    // directory answers 10 (WorkspaceStoreMissing) instead, so the degraded
-    // machinery this test exists to check was never reached.
     let (_tempdir, workspace) = initialized_workspace()?;
     let output = run_ee(&[
         "--workspace",
@@ -936,25 +960,28 @@ fn economy_prune_plan_dry_run_degrades_until_db_backed_metrics_exist() -> TestRe
         "5",
         "--json",
     ])?;
-    ensure_equal(
-        &output.status.code(),
-        &Some(UNSATISFIED_DEGRADED_MODE_EXIT),
-        "exit code",
-    )?;
+    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
 
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.error.v2"),
+        &serde_json::json!("ee.response.v2"),
         "response schema",
     )?;
+    let plan = &json["data"]["prunePlan"];
     ensure_equal(
-        &json["error"]["code"],
-        &serde_json::json!("unsatisfied_degraded_mode"),
-        "degraded code",
-    )
+        &plan["status"],
+        &serde_json::json!("abstain"),
+        "plan status",
+    )?;
+    ensure_equal(
+        &plan["recommendations"],
+        &serde_json::json!([]),
+        "recommendations",
+    )?;
+    ensure_economy_degraded_code(plan, "economy_no_prune_candidates")
 }
 
 #[test]
