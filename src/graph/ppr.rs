@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::{OnceLock, RwLock};
 
@@ -17,14 +17,17 @@ use crate::graph::ppr_prefetch_cache::{
     PprPrefetchCache, PprPrefetchCacheKey, PprPrefetchCacheResultHit,
 };
 use crate::graph::{
-    ComplexityWitnessCounters, GraphResult, emit_complexity_witness, graph_algorithm_params_hash,
+    ComplexityWitnessCounters, GraphError, GraphResult, emit_complexity_witness,
+    graph_algorithm_params_hash,
 };
 use crate::models::MemoryId;
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 pub const DEFAULT_PERSONALIZED_PAGERANK_ALPHA: f64 = 0.85;
-pub const DEFAULT_PERSONALIZED_PAGERANK_MAX_ITERATIONS: usize = 50;
-pub const DEFAULT_PERSONALIZED_PAGERANK_TOLERANCE: f64 = 1.0e-3;
+/// networkx's `pagerank` defaults, which fnx's power iteration follows: it
+/// stops once the L1 change between iterations is below `|V| * tolerance`.
+pub const DEFAULT_PERSONALIZED_PAGERANK_MAX_ITERATIONS: usize = 100;
+pub const DEFAULT_PERSONALIZED_PAGERANK_TOLERANCE: f64 = 1.0e-6;
 pub const DEFAULT_PPR_PREFETCH_CACHE_ENTRIES: usize = 4096;
 
 const MAX_PERSONALIZED_PAGERANK_ALPHA: f64 = 1.0 - f64::EPSILON;
@@ -34,7 +37,12 @@ const RELATION_WEIGHT_RELATED: f64 = 0.6;
 const RELATION_WEIGHT_CO_TAG: f64 = 0.4;
 const RELATION_WEIGHT_CO_MENTION: f64 = 0.3;
 const RELATION_WEIGHT_ZERO: f64 = 0.0;
-const ACL_COMPLEXITY_CLAIM_PREFIX: &str = "O(1/epsilon * 1/(1-alpha)) local push";
+/// fnx's own witness name and claim, reused for the no-seed result that never
+/// calls it, so every result reads as one algorithm.
+const PPR_ALGORITHM: &str = "personalized_pagerank_power_iteration";
+const PPR_COMPLEXITY_CLAIM: &str = "O(k * (|V| + |E|))";
+/// The one edge attribute fnx ranks by, written by the projection.
+const PPR_PROJECTION_WEIGHT_ATTR: &str = "ppr_weight";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PersonalizedPageRankPolicy {
@@ -195,7 +203,7 @@ pub fn compute_personalized_pagerank_result_with_cx<Caps>(
         "personalized_pagerank",
         DEFAULT_FOREGROUND_BUDGET,
         move || compute_personalized_pagerank_result_unbudgeted(&graph, &seed_map, policy),
-    )
+    )?
 }
 
 pub fn compute_personalized_pagerank_result_cached(
@@ -317,19 +325,26 @@ fn store_ppr_prefetch_result(key: PprPrefetchCacheKey, result: &PageRankResult) 
     );
 }
 
+/// Personalized PageRank by FrankenNetworkX's power iteration
+/// (`personalized_pagerank`, fnx 0.4.1; bd-reality-core-convergence-1azkt.82).
+///
+/// fnx ranks by one edge attribute, so the graph is projected first: the same
+/// nodes, and an edge wherever this module's ranking weight (relation weight
+/// x stored weight x confidence) is positive. Zero-weight relations
+/// (contradicts, supersedes) carry no rank, and a node left without an
+/// out-edge teleports through the seed vector, as the ACL-push kernel this
+/// replaced did. Scores come back in radix public-id order.
 fn compute_personalized_pagerank_result_unbudgeted(
     graph: &DiGraph,
     seed_map: &BTreeMap<String, f64>,
     policy: PersonalizedPageRankPolicy,
-) -> PageRankResult {
+) -> GraphResult<PageRankResult> {
     let policy = policy.sanitized();
     let mut nodes = graph.nodes_ordered();
     sort_by_ulid_payload_or_lexical(&mut nodes, |node| *node);
-    let node_count = nodes.len();
-    if node_count == 0 {
-        return personalized_pagerank_result(Vec::new(), true, 0, 0, 0, 0.0);
-    }
 
+    // No usable seed (or no node at all): nothing to personalize, every node
+    // scores zero, and fnx is not asked, since it refuses an empty seed set.
     let personalization = normalized_seed_weights(graph, seed_map);
     if personalization.is_empty() {
         let scores = nodes
@@ -339,124 +354,91 @@ fn compute_personalized_pagerank_result_unbudgeted(
                 score: 0.0,
             })
             .collect();
-        return personalized_pagerank_result(scores, true, 0, 0, 0, 0.0);
+        return Ok(PageRankResult {
+            scores,
+            converged: true,
+            witness: ComplexityWitness {
+                algorithm: PPR_ALGORITHM.to_owned(),
+                complexity_claim: PPR_COMPLEXITY_CLAIM.to_owned(),
+                nodes_touched: 0,
+                edges_scanned: 0,
+                queue_peak: 0,
+            },
+        });
     }
 
-    let node_index = nodes
+    let projected = ranking_weight_projection(graph, &nodes)?;
+    let seeds = personalization
         .iter()
-        .enumerate()
-        .map(|(index, node)| (*node, index))
-        .collect::<BTreeMap<&str, usize>>();
-    let outgoing = weighted_outgoing_edges(graph, &nodes, &node_index);
-    let alpha = policy.alpha;
-    let teleport_scale = 1.0 - alpha;
-    let max_pushes = policy.max_iterations.saturating_mul(node_count).max(1);
-    let mut estimates = vec![0.0; node_count];
-    let mut residuals = vec![0.0; node_count];
-    let mut active = BTreeSet::new();
-    for (node, seed_weight) in &personalization {
-        if let Some(index) = node_index.get(node.as_str()) {
-            residuals[*index] += *seed_weight;
-            maybe_activate_node(
-                *index,
-                residuals[*index],
-                outgoing[*index].len(),
-                &mut active,
-                policy,
-            );
-        }
-    }
+        .map(|(node, weight)| (node.as_str(), *weight))
+        .collect::<Vec<_>>();
+    let result = fnx_algorithms::personalized_pagerank(
+        &projected,
+        policy.alpha,
+        policy.max_iterations,
+        policy.tolerance,
+        Some(PPR_PROJECTION_WEIGHT_ATTR),
+        &seeds,
+    )
+    .map_err(|error| GraphError::GraphEngine {
+        operation: "personalized pagerank",
+        source: error.to_string(),
+    })?;
 
-    let mut pushes = 0_usize;
-    let mut edges_scanned = 0_usize;
-    let mut queue_peak = active.len();
-
-    while let Some(source_index) = active.pop_first() {
-        if pushes >= max_pushes {
-            break;
-        }
-        let residual = residuals[source_index];
-        residuals[source_index] = 0.0;
-        if !should_push_residual(residual, outgoing[source_index].len(), policy) {
-            continue;
-        }
-
-        pushes = pushes.saturating_add(1);
-        estimates[source_index] += teleport_scale * residual;
-        let push = alpha * residual;
-        if push <= 0.0 {
-            continue;
-        }
-
-        if outgoing[source_index].is_empty() {
-            for (node, seed_weight) in &personalization {
-                if let Some(target_index) = node_index.get(node.as_str()) {
-                    residuals[*target_index] += push * seed_weight;
-                    maybe_activate_node(
-                        *target_index,
-                        residuals[*target_index],
-                        outgoing[*target_index].len(),
-                        &mut active,
-                        policy,
-                    );
-                }
-            }
-        } else {
-            edges_scanned = edges_scanned.saturating_add(outgoing[source_index].len());
-            for (target_index, weight_share) in &outgoing[source_index] {
-                residuals[*target_index] += push * weight_share;
-                maybe_activate_node(
-                    *target_index,
-                    residuals[*target_index],
-                    outgoing[*target_index].len(),
-                    &mut active,
-                    policy,
-                );
-            }
-        }
-        queue_peak = queue_peak.max(active.len());
-    }
-
-    let converged = active.is_empty();
-    let final_residual_l1 = residuals.iter().copied().sum::<f64>();
-
+    let mut by_node = result
+        .scores
+        .into_iter()
+        .map(|score| (score.node, score.score))
+        .collect::<BTreeMap<_, _>>();
     let scores = nodes
         .iter()
-        .enumerate()
-        .map(|(index, node)| CentralityScore {
+        .map(|node| CentralityScore {
             node: (*node).to_owned(),
-            score: estimates[index],
+            score: by_node.remove(*node).unwrap_or(0.0),
         })
         .collect();
-    personalized_pagerank_result(
+    Ok(PageRankResult {
         scores,
-        converged,
-        pushes,
-        edges_scanned,
-        queue_peak,
-        final_residual_l1,
-    )
+        converged: result.converged,
+        witness: result.witness,
+    })
 }
 
-fn should_push_residual(
-    residual: f64,
-    outgoing_edge_count: usize,
-    policy: PersonalizedPageRankPolicy,
-) -> bool {
-    let degree_scale = outgoing_edge_count.max(1) as f64;
-    residual > policy.tolerance.max(0.0) * degree_scale
-}
-
-fn maybe_activate_node(
-    index: usize,
-    residual: f64,
-    outgoing_edge_count: usize,
-    active: &mut BTreeSet<usize>,
-    policy: PersonalizedPageRankPolicy,
-) {
-    if should_push_residual(residual, outgoing_edge_count, policy) {
-        active.insert(index);
+/// `graph` with each edge's ranking weight as its only attribute, leaving out
+/// edges that weigh nothing. Nodes are added in `nodes` order first, so an
+/// isolated node keeps its place and its (teleport-only) score.
+fn ranking_weight_projection(graph: &DiGraph, nodes: &[&str]) -> GraphResult<DiGraph> {
+    let mut projected = DiGraph::strict();
+    for node in nodes {
+        projected.add_node(*node);
     }
+    for source in nodes {
+        let Some(targets) = graph.neighbors_iter(source) else {
+            continue;
+        };
+        let mut targets = targets.collect::<Vec<_>>();
+        sort_by_ulid_payload_or_lexical(&mut targets, |target| *target);
+        for target in targets {
+            let weight = edge_weight(graph, source, target);
+            if !(weight.is_finite() && weight > 0.0) {
+                continue;
+            }
+            projected
+                .add_edge_with_attrs(
+                    *source,
+                    target,
+                    fnx_runtime::AttrMap::from([(
+                        PPR_PROJECTION_WEIGHT_ATTR.to_owned(),
+                        fnx_runtime::CgseValue::Float(weight),
+                    )]),
+                )
+                .map_err(|error| GraphError::GraphEngine {
+                    operation: "project personalized pagerank graph",
+                    source: error.to_string(),
+                })?;
+        }
+    }
+    Ok(projected)
 }
 
 pub fn emit_personalized_pagerank_witness(
@@ -470,8 +452,7 @@ pub fn emit_personalized_pagerank_witness(
         result.witness.nodes_touched,
         result.witness.edges_scanned,
         result.witness.queue_peak,
-    )
-    .with_final_residual_l1(personalized_pagerank_final_residual_l1(result));
+    );
     emit_complexity_witness(
         spec.conn,
         spec.workspace_id,
@@ -481,38 +462,6 @@ pub fn emit_personalized_pagerank_witness(
         spec.params,
         &counters,
     )
-}
-
-fn weighted_outgoing_edges(
-    graph: &DiGraph,
-    nodes: &[&str],
-    node_index: &BTreeMap<&str, usize>,
-) -> Vec<Vec<(usize, f64)>> {
-    nodes
-        .iter()
-        .map(|source| {
-            let mut edges = graph
-                .neighbors_iter(source)
-                .map(|neighbors| {
-                    neighbors
-                        .filter_map(|target| {
-                            let target_index = node_index.get(target).copied()?;
-                            let weight = edge_weight(graph, source, target);
-                            (weight > 0.0).then_some((target_index, weight))
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            edges.sort_unstable_by_key(|(target_index, _)| *target_index);
-            let total = edges.iter().map(|(_, weight)| *weight).sum::<f64>();
-            if total > 0.0 {
-                for (_, weight) in &mut edges {
-                    *weight /= total;
-                }
-            }
-            edges
-        })
-        .collect()
 }
 
 fn normalized_seed_weights(
@@ -567,41 +516,6 @@ fn relation_weight(relation: &str) -> f64 {
         "contradicts" | "supersedes" => RELATION_WEIGHT_ZERO,
         _ => RELATION_WEIGHT_RELATED,
     }
-}
-
-fn personalized_pagerank_result(
-    scores: Vec<CentralityScore>,
-    converged: bool,
-    nodes_touched: usize,
-    edges_scanned: usize,
-    queue_peak: usize,
-    final_residual_l1: f64,
-) -> PageRankResult {
-    PageRankResult {
-        scores,
-        converged,
-        witness: ComplexityWitness {
-            algorithm: "personalized_pagerank_acl_push".to_owned(),
-            complexity_claim: format!(
-                "{ACL_COMPLEXITY_CLAIM_PREFIX}; final_residual_l1={final_residual_l1:.17e}"
-            ),
-            nodes_touched,
-            edges_scanned,
-            queue_peak,
-        },
-    }
-}
-
-fn personalized_pagerank_final_residual_l1(result: &PageRankResult) -> Option<f64> {
-    let marker = "; final_residual_l1=";
-    result
-        .witness
-        .complexity_claim
-        .strip_prefix(ACL_COMPLEXITY_CLAIM_PREFIX)?
-        .strip_prefix(marker)?
-        .parse::<f64>()
-        .ok()
-        .filter(|value| value.is_finite() && *value >= 0.0)
 }
 
 fn personalized_pagerank_decision_path_hash(
@@ -1117,11 +1031,8 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(second, third);
-        assert_eq!(raw.witness.algorithm, "personalized_pagerank_acl_push");
-        assert!(
-            personalized_pagerank_final_residual_l1(&raw).is_some(),
-            "ACL witness should expose final residual L1 norm"
-        );
+        assert_eq!(raw.witness.algorithm, PPR_ALGORITHM);
+        assert!(raw.converged, "power iteration should converge: {raw:?}");
         Ok(())
     }
 
@@ -1163,7 +1074,11 @@ mod tests {
     }
 
     #[test]
-    fn personalized_pagerank_uses_local_acl_frontier() -> TestResult {
+    /// bd-reality-core-convergence-1azkt.82: PPR is fnx's power iteration,
+    /// which sweeps the whole graph every iteration, where the ACL push it
+    /// replaced stopped at a local frontier. This inverts that test's
+    /// assertions (nodes_touched < chain, tail score exactly 0).
+    fn personalized_pagerank_runs_fnx_power_iteration_over_the_whole_chain() -> TestResult {
         let mut graph = DiGraph::strict();
         let ids = (100..200).map(memory_id).collect::<Vec<_>>();
         for pair in ids.windows(2) {
@@ -1179,31 +1094,34 @@ mod tests {
 
         let result = graph_result(compute_personalized_pagerank_result(&graph, &seeds))?;
 
-        assert_eq!(result.witness.algorithm, "personalized_pagerank_acl_push");
+        assert_eq!(result.witness.algorithm, PPR_ALGORITHM);
+        assert!(result.converged, "chain PPR should converge: {result:?}");
         assert!(
-            result.witness.nodes_touched < ids.len(),
-            "local push should not scan the full chain: {:?}",
+            result.witness.nodes_touched >= ids.len(),
+            "power iteration visits every node each iteration: {:?}",
             result.witness
         );
-        assert!(
-            result.witness.edges_scanned < ids.len(),
-            "local push should not scan every chain edge: {:?}",
-            result.witness
-        );
-        assert_eq!(result.witness.queue_peak, 1);
-        assert!(
+        let score_of = |id: &MemoryId| {
             result
                 .scores
                 .iter()
-                .find(|score| score.node == ids[0].to_string())
-                .is_some_and(|score| score.score > 0.0)
-        );
+                .find(|score| score.node == id.to_string())
+                .map_or(f64::NAN, |score| score.score)
+        };
+        // Along a single chain each hop keeps alpha of the previous node's
+        // rank, so the seed leads and rank falls away from it. The tail is
+        // far below the convergence tolerance, so only the head is ordered.
+        for pair in ids[..4].windows(2) {
+            assert!(
+                score_of(&pair[0]) > score_of(&pair[1]),
+                "rank should fall along the chain near the seed: {:?}",
+                result.scores
+            );
+        }
+        let total = result.scores.iter().map(|score| score.score).sum::<f64>();
         assert!(
-            result
-                .scores
-                .iter()
-                .find(|score| score.node == ids[99].to_string())
-                .is_some_and(|score| score.score == 0.0)
+            (total - 1.0).abs() < 1.0e-3 && result.scores.iter().all(|s| s.score >= 0.0),
+            "PPR is a probability distribution: total {total}"
         );
         Ok(())
     }
@@ -1304,11 +1222,12 @@ mod tests {
             witness["observed_counters"]["queue_peak"],
             result.witness.queue_peak
         );
+        // Power iteration reports no residual, so the witness records none.
         assert!(
-            witness["observed_counters"]["final_residual_l1"]
-                .as_f64()
-                .is_some_and(|value| value >= 0.0),
-            "ACL witness should record final residual L1 norm: {witness}"
+            witness["observed_counters"]
+                .get("final_residual_l1")
+                .is_none(),
+            "fnx power iteration has no residual to record: {witness}"
         );
 
         connection.close().map_err(|error| error.to_string())
@@ -1414,7 +1333,7 @@ mod tests {
             unclamped_params["alpha"]
                 .as_f64()
                 .is_some_and(|alpha| alpha < 1.0 && alpha == MAX_PERSONALIZED_PAGERANK_ALPHA),
-            "PPR alpha must stay below 1.0 so the ACL complexity bound remains finite: {unclamped_params}"
+            "PPR alpha must stay below 1.0, which fnx requires: {unclamped_params}"
         );
         assert_eq!(unclamped_params["tolerance"], serde_json::json!(0.0));
         Ok(())
@@ -1500,10 +1419,6 @@ mod tests {
             seed_score > 0.0 && seed_score.is_finite(),
             "alpha=1.0 should sanitize below one instead of producing zero/undefined PPR mass: {result:?}"
         );
-        assert!(
-            personalized_pagerank_final_residual_l1(&result).is_some(),
-            "sanitized alpha=1.0 must keep the residual witness finite: {result:?}"
-        );
         Ok(())
     }
 
@@ -1544,10 +1459,6 @@ mod tests {
         assert!(
             result.scores.iter().all(|score| score.score.is_finite()),
             "non-finite policy values must not leak NaN scores: {result:?}"
-        );
-        assert!(
-            personalized_pagerank_final_residual_l1(&result).is_some(),
-            "non-finite policy values must not leak NaN residuals: {result:?}"
         );
         Ok(())
     }
