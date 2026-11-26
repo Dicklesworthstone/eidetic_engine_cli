@@ -438,8 +438,16 @@ fn run_ee_with_extra_env(
         }),
     )?;
     let started = Instant::now();
+    // No caller names a workspace, and adding --workspace would switch
+    // capabilities from gather to gather_for_workspace and change the report
+    // under test. So the spawn runs from a dir workspace discovery cannot
+    // climb out of, with EE_WORKSPACE removed (bd-uuaa3). `workspace.path` is
+    // under the target dir, which rch places inside the checkout.
+    let cwd = crate::isolated_ee::outside_workspace_tempdir()?;
     let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
     command
+        .current_dir(cwd.path())
+        .env_remove("EE_WORKSPACE")
         .args(args)
         .env("HOME", &workspace.home)
         .env("XDG_DATA_HOME", &workspace.xdg_data)
