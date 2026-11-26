@@ -213,13 +213,17 @@ The rules below are implemented in
 5. `claimCommandAction` stays `null` unless actionable queue, source
    authority, reservations, and the gate all agree.
 
-Workspaces that do not ship the script fall back to applying the same
-filter contract in-process to the brief's fresh `br ready` rows
+Workspaces that do not ship the script, or ship a copy from before
+bd-cjc4r that refuses the flags below, fall back to applying the same
+filter contract in-process to the brief's `br ready` rows
 (`collectionMode=brief_ready_filter`); the fallback is marked
 `stale_fallback` (advisory) when the underlying Beads read was itself
 degraded or stale. Collection is strictly read-only: the only command the
 collector may spawn is the queue probe, pinned by the
-`no_mutation_read_only` fixture.
+`no_mutation_read_only` fixture. It runs as `scripts/br_retry.sh actionable
+--json --no-auto-import --no-auto-flush --allow-stale`, because the bare
+form imports an issues.jsonl newer than beads.db before it reads. Agents
+keep the bare form, which keeps their queue current after a pull.
 
 ## Source-state taxonomy
 

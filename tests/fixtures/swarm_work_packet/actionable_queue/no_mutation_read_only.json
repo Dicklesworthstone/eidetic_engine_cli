@@ -4,7 +4,14 @@
   "scriptStdout": "[{\"id\":\"bd-aq-leaf\",\"status\":\"open\",\"issue_type\":\"task\"}]",
   "expected": {
     "commandProgram": "bash",
-    "commandArgs": ["scripts/br_retry.sh", "actionable", "--json"],
+    "commandArgs": [
+      "scripts/br_retry.sh",
+      "actionable",
+      "--json",
+      "--no-auto-import",
+      "--no-auto-flush",
+      "--allow-stale"
+    ],
     "commandId": "beads_actionable_queue",
     "displayCommand": "scripts/br_retry.sh actionable --json",
     "mutatesState": false,

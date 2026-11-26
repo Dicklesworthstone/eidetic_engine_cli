@@ -11,6 +11,7 @@ Usage: scripts/br_retry.sh <br-subcommand> [args...]
 Examples:
   scripts/br_retry.sh ready --json
   scripts/br_retry.sh actionable --json
+  scripts/br_retry.sh actionable --json --no-auto-import --no-auto-flush --allow-stale
   scripts/br_retry.sh list --status open --json
   scripts/br_retry.sh stats --json
 
@@ -26,7 +27,9 @@ Retries only transient Beads JSONL partial-write parse signatures:
 All stdout from the successful br invocation is passed through unchanged.
 The synthetic `actionable --json` mode runs `br ready --limit 0 --json` through
 the same retry guard, then emits only open, unassigned, non-epic rows as a JSON
-array.
+array. Like any br read, it first imports an issues.jsonl newer than the
+database. Add --no-auto-import --no-auto-flush --allow-stale after --json to
+read the database as it is and write nothing.
 Diagnostics are emitted to stderr as ee.beads_retry.v1 JSON lines.
 EOF
 }
@@ -221,12 +224,33 @@ subcommand="$1"
 if [ "$subcommand" = "actionable" ]; then
     filter_actionable=true
     shift
-    if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != "--json" ]; }; then
-        echo "br_retry: actionable only supports --json" >&2
-        usage >&2
-        exit 2
+    # After --json, the three flags that keep this read off beads.db pass
+    # through. Without --no-auto-import, br first imports an issues.jsonl that
+    # is newer than the database. Agents want that, because it is what makes
+    # the queue current after a pull, so the bare form keeps it. ee swarm
+    # work-packet passes all three, since it promises not to write
+    # (bd-cjc4r). Copies of this script from before bd-cjc4r refuse them
+    # with exit 2 and "actionable only supports --json". ee falls back to the
+    # brief's queue on that message, so this copy must never print it.
+    if [ "$#" -gt 0 ]; then
+        if [ "$1" != "--json" ]; then
+            echo "br_retry: actionable takes --json first; got: $1" >&2
+            usage >&2
+            exit 2
+        fi
+        shift
     fi
-    set -- ready --limit 0 --json
+    for flag in "$@"; do
+        case "$flag" in
+            --no-auto-import | --no-auto-flush | --allow-stale) ;;
+            *)
+                echo "br_retry: after --json, actionable takes only --no-auto-import, --no-auto-flush and --allow-stale; got: $flag" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
+    set -- ready --limit 0 --json "$@"
 fi
 
 backoffs_ms=(0 50 200 500)

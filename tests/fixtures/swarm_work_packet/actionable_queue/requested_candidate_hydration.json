@@ -424,7 +424,14 @@
     },
     {
       "program": "bash",
-      "args": ["scripts/br_retry.sh", "actionable", "--json"],
+      "args": [
+        "scripts/br_retry.sh",
+        "actionable",
+        "--json",
+        "--no-auto-import",
+        "--no-auto-flush",
+        "--allow-stale"
+      ],
       "outputPointer": "/sourceOutputs/actionable"
     },
     {

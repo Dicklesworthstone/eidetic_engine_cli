@@ -79,6 +79,21 @@ const CLAIM_GATE_INSTALL_FRESHNESS_REPAIR: &str = "Run ee install check --json -
 const ACTIONABLE_QUEUE_COMMAND_ID: &str = "beads_actionable_queue";
 const ACTIONABLE_QUEUE_COMMAND_TEMPLATE: &str = "scripts/br_retry.sh actionable --json";
 const ACTIONABLE_QUEUE_SCRIPT_RELATIVE_PATH: &str = "scripts/br_retry.sh";
+// The template above is what agents run, and its bare `br ready` imports a
+// newer issues.jsonl into beads.db, which keeps their queue current after a
+// pull. The collector promises not to write, so it reads with the three flags
+// instead (bd-cjc4r).
+const ACTIONABLE_QUEUE_PROBE_ARGS: [&str; 6] = [
+    ACTIONABLE_QUEUE_SCRIPT_RELATIVE_PATH,
+    "actionable",
+    "--json",
+    "--no-auto-import",
+    "--no-auto-flush",
+    "--allow-stale",
+];
+// What a copy of the script from before bd-cjc4r prints, with exit 2, when
+// given those flags. The collector runs the target workspace's copy.
+const ACTIONABLE_QUEUE_LEGACY_SCRIPT_REFUSAL: &str = "actionable only supports --json";
 const ACTIONABLE_QUEUE_MAX_CANDIDATE_IDS: usize = 32;
 const ACTIONABLE_QUEUE_MAX_CONTRADICTION_EVIDENCE: usize = 8;
 const ACTIONABLE_QUEUE_STATE_NOT_EVALUATED: &str = "not_evaluated";
@@ -1971,22 +1986,23 @@ fn brief_has_pending_beads_import(brief: &SwarmBriefReport) -> bool {
 
 /// Collect the actionable-queue evidence (bd-3w4pv.7) read-only.
 ///
-/// When the workspace ships `scripts/br_retry.sh`, the queue command
-/// `scripts/br_retry.sh actionable --json` is run through the bounded
-/// source-command timeout (`collection_mode = "br_retry_script"`).
-/// Spawn failure, timeout (runner timeout or the script's own exit 124),
-/// and parse failure stay distinct states — a timed-out read must never
-/// be collapsed into candidate absence.
+/// When the workspace ships `scripts/br_retry.sh`, the queue is read as
+/// `scripts/br_retry.sh actionable --json --no-auto-import --no-auto-flush
+/// --allow-stale` through the bounded source-command timeout
+/// (`collection_mode = "br_retry_script"`). Spawn failure, timeout (runner
+/// timeout or the script's own exit 124), and parse failure stay distinct
+/// states — a timed-out read must never be collapsed into candidate absence.
 ///
-/// Workspaces without the script fall back to applying the same filter
-/// contract (open, unassigned, non-epic) to the brief's fresh `br ready`
-/// rows (`collection_mode = "brief_ready_filter"`); when the brief's
-/// Beads source was itself degraded or stale the fallback evidence is
-/// marked `stale_fallback` and stays advisory.
+/// Workspaces without the script, or with a copy from before bd-cjc4r that
+/// refuses the three flags, fall back to applying the same filter contract
+/// (open, unassigned, non-epic) to the brief's `br ready` rows
+/// (`collection_mode = "brief_ready_filter"`); when the brief's Beads
+/// source was itself degraded or stale the fallback evidence is marked
+/// `stale_fallback` and stays advisory.
 ///
 /// This collector never claims Beads, reserves files, sends Agent Mail,
-/// runs Cargo, or changes git state: the only command it may spawn is the
-/// read-only queue probe.
+/// runs Cargo, changes git state, or writes beads.db: the only command it
+/// may spawn is the queue probe, and the flags stop br from importing.
 #[must_use]
 pub fn collect_work_packet_actionable_queue_evidence(
     options: &SwarmBriefCollectOptions,
@@ -2013,15 +2029,20 @@ pub fn collect_work_packet_actionable_queue_evidence(
     {
         let outcome = runner.run(
             "bash",
-            &[
-                ACTIONABLE_QUEUE_SCRIPT_RELATIVE_PATH,
-                "actionable",
-                "--json",
-            ],
+            &ACTIONABLE_QUEUE_PROBE_ARGS,
             &options.workspace,
             options.command_timeout_ms,
         );
-        actionable_queue_evidence_from_script_outcome(outcome, brief)
+        match outcome {
+            Err(SwarmBriefCommandError::Failed {
+                status: Some(2),
+                stderr,
+                ..
+            }) if stderr.contains(ACTIONABLE_QUEUE_LEGACY_SCRIPT_REFUSAL) => {
+                actionable_queue_evidence_from_brief_fallback(brief)
+            }
+            outcome => actionable_queue_evidence_from_script_outcome(outcome, brief),
+        }
     } else {
         actionable_queue_evidence_from_brief_fallback(brief)
     }
@@ -16848,12 +16869,10 @@ mod tests {
             | ("rch", ["agents", "status", ..] | ["config", "show", ..])
             | ("rch", ["workers", "probe", ..] | ["diagnose", "--dry-run", ..])
             | ("am", ["agents", "list", ..]) => true,
-            // Too permissive: the argv is a read, but the script's actionable
-            // mode runs a bare `br ready`, which imports a newer issues.jsonl
-            // into beads.db (bd-cjc4r). Nothing at this level can see that.
-            ("bash", [script, "actionable", "--json"]) => {
-                *script == ACTIONABLE_QUEUE_SCRIPT_RELATIVE_PATH
-            }
+            // The script's actionable mode hands these flags to its `br
+            // ready`. Without them it imports, as a bare br read does
+            // (bd-cjc4r), so only the flagged form counts.
+            ("bash", probe) => probe == ACTIONABLE_QUEUE_PROBE_ARGS.as_slice(),
             _ => false,
         }
     }
@@ -17179,5 +17198,144 @@ mod tests {
         );
         assert_eq!(unavailable_evidence.exit_class, "unknown");
         assert_eq!(unavailable_evidence.row_count, None);
+    }
+
+    /// Answers the actionable-queue probe with one canned result and records
+    /// each argv, so a test can see which flags reached the script.
+    struct ActionableQueueProbeRunner {
+        result: Result<String, (i32, String)>,
+        calls: std::cell::RefCell<Vec<Vec<String>>>,
+    }
+
+    impl ActionableQueueProbeRunner {
+        fn new(result: Result<String, (i32, String)>) -> Self {
+            Self {
+                result,
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl SwarmBriefCommandRunner for ActionableQueueProbeRunner {
+        fn run(
+            &self,
+            program: &str,
+            args: &[&str],
+            _cwd: &Path,
+            _timeout_ms: u64,
+        ) -> Result<crate::core::swarm_brief::SwarmBriefCommandOutput, SwarmBriefCommandError>
+        {
+            assert_eq!(program, "bash");
+            self.calls
+                .borrow_mut()
+                .push(args.iter().map(|arg| (*arg).to_owned()).collect());
+            match &self.result {
+                Ok(stdout) => Ok(crate::core::swarm_brief::SwarmBriefCommandOutput {
+                    stdout: stdout.clone(),
+                    stderr: String::new(),
+                }),
+                Err((status, stderr)) => Err(SwarmBriefCommandError::Failed {
+                    status: Some(*status),
+                    stdout: String::new(),
+                    stderr: stderr.clone(),
+                }),
+            }
+        }
+    }
+
+    /// A workspace that ships the queue script, and a brief whose Beads
+    /// source read `bd-brief` as ready, from a current tracker.
+    fn actionable_queue_workspace_and_brief()
+    -> Result<(tempfile::TempDir, SwarmBriefReport), String> {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let script = workspace.path().join(ACTIONABLE_QUEUE_SCRIPT_RELATIVE_PATH);
+        let script_dir = script
+            .parent()
+            .ok_or_else(|| "queue script path has no parent".to_owned())?;
+        std::fs::create_dir_all(script_dir).map_err(|error| error.to_string())?;
+        std::fs::write(&script, "#!/usr/bin/env bash\n").map_err(|error| error.to_string())?;
+        let mut brief = SwarmBriefReport::empty(workspace.path());
+        brief.beads.ready = vec![bead("bd-brief", "Ready in the brief", 1)];
+        brief.sources.push(SwarmBriefSourceSnapshot {
+            source: SwarmBriefSourceKind::Beads,
+            status: SwarmBriefSourceStatus::Ready,
+            freshness: SwarmBriefSourceFreshness::current(),
+            provenance: SwarmBriefSourceProvenance::local_probe(),
+            item_count: 1,
+            degraded: Vec::new(),
+        });
+        Ok((workspace, brief))
+    }
+
+    /// The script's bare actionable mode imports a newer issues.jsonl into
+    /// beads.db (bd-cjc4r), so the collector must pass the three flags. The
+    /// argv is spelled out rather than taken from the constant, so the test
+    /// fails if the probe goes back to the bare form.
+    #[test]
+    fn actionable_queue_probe_reads_without_auto_import() -> Result<(), String> {
+        let (workspace, brief) = actionable_queue_workspace_and_brief()?;
+        let options = SwarmBriefCollectOptions::for_workspace(workspace.path());
+        let runner = ActionableQueueProbeRunner::new(Ok(
+            r#"[{"id":"bd-script","status":"open"}]"#.to_owned()
+        ));
+
+        let evidence = collect_work_packet_actionable_queue_evidence(&options, &runner, &brief);
+
+        let expected = [
+            "scripts/br_retry.sh",
+            "actionable",
+            "--json",
+            "--no-auto-import",
+            "--no-auto-flush",
+            "--allow-stale",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        assert_eq!(runner.calls.into_inner(), vec![expected]);
+        assert_eq!(
+            evidence.collection_mode,
+            ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT
+        );
+        assert_eq!(evidence.queue_state, ACTIONABLE_QUEUE_STATE_READY);
+        assert_eq!(evidence.candidate_ids, vec!["bd-script".to_owned()]);
+        Ok(())
+    }
+
+    /// The collector runs the target workspace's copy of the script, and a
+    /// copy from before bd-cjc4r refuses the flags. That refusal reads the
+    /// brief's queue instead; any other exit 2 is still a failed probe.
+    #[test]
+    fn actionable_queue_falls_back_to_the_brief_when_an_older_script_refuses_the_flags()
+    -> Result<(), String> {
+        let (workspace, brief) = actionable_queue_workspace_and_brief()?;
+        let options = SwarmBriefCollectOptions::for_workspace(workspace.path());
+        // What scripts/br_retry.sh printed for these flags before bd-cjc4r.
+        let legacy = ActionableQueueProbeRunner::new(Err((
+            2,
+            "br_retry: actionable only supports --json\nUsage: scripts/br_retry.sh <br-subcommand> [args...]\n"
+                .to_owned(),
+        )));
+
+        let evidence = collect_work_packet_actionable_queue_evidence(&options, &legacy, &brief);
+
+        assert_eq!(
+            evidence.collection_mode,
+            ACTIONABLE_QUEUE_MODE_BRIEF_READY_FILTER
+        );
+        assert_eq!(evidence.queue_state, ACTIONABLE_QUEUE_STATE_READY);
+        assert_eq!(evidence.candidate_ids, vec!["bd-brief".to_owned()]);
+
+        let other = ActionableQueueProbeRunner::new(Err((
+            2,
+            "br_retry: BR_RETRY_TAIL_BYTES must be greater than zero\n".to_owned(),
+        )));
+        let evidence = collect_work_packet_actionable_queue_evidence(&options, &other, &brief);
+        assert_eq!(
+            evidence.collection_mode,
+            ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT
+        );
+        assert_eq!(evidence.queue_state, ACTIONABLE_QUEUE_STATE_UNAVAILABLE);
+        assert!(evidence.candidate_ids.is_empty());
+        Ok(())
     }
 }

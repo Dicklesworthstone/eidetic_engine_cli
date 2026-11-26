@@ -83,9 +83,13 @@ case "$mode" in
         fi
         printf '{"schema":"br.ready.v1","workspace_id":"%s","request_id":"%s","issues":[],"attempt":%s}\n' "${EE_FAKE_BR_WORKSPACE_ID:-br-jsonl-race-fixture}" "${EE_FAKE_BR_REQUEST_ID:-bd-3usjw.73-contract}" "$count"
         ;;
-    actionable)
-        if [ "$#" -ne 4 ] || [ "$1" != "ready" ] || [ "$2" != "--limit" ] || [ "$3" != "0" ] || [ "$4" != "--json" ]; then
-            printf 'expected br ready --limit 0 --json, got:' >&2
+    actionable | actionable_read_only)
+        expected="ready --limit 0 --json"
+        if [ "$mode" = "actionable_read_only" ]; then
+            expected="$expected --no-auto-import --no-auto-flush --allow-stale"
+        fi
+        if [ "$*" != "$expected" ]; then
+            printf 'expected br %s, got:' "$expected" >&2
             printf ' [%s]' "$@" >&2
             printf '\n' >&2
             exit 66
@@ -323,6 +327,55 @@ fn br_retry_actionable_scans_full_ready_queue_before_filtering() -> TestResult {
     )?;
     ensure_json_eq(&body, "/0/id", &json!("bd-actionable"))?;
     ensure_json_eq(&body, "/0/status", &json!("open"))?;
+    Ok(())
+}
+
+/// `ee swarm work-packet` reads the queue with the three flags that stop br
+/// importing issues.jsonl into beads.db (bd-cjc4r). The wrapper must hand
+/// them to `br ready` and refuse anything else before br runs.
+#[test]
+fn br_retry_actionable_passes_the_read_only_flags_to_br_ready() -> TestResult {
+    let root = retained_artifact_root("actionable-read-only")?;
+    let mode = "actionable_read_only";
+    let (output, _) = run_wrapper_with_args(
+        &root,
+        mode,
+        &[
+            "actionable",
+            "--json",
+            "--no-auto-import",
+            "--no-auto-flush",
+            "--allow-stale",
+        ],
+    )?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    ensure(
+        output.status.success(),
+        format!("flagged actionable read should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"),
+    )?;
+    let body: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse stdout JSON: {error}"))?;
+    ensure_json_eq(&body, "/0/id", &json!("bd-actionable"))?;
+
+    let (refused, _) = run_wrapper_with_args(&root, mode, &["actionable", "--json", "--flush"])?;
+    let refused_stderr = String::from_utf8_lossy(&refused.stderr).to_string();
+    ensure(
+        refused.status.code() == Some(2),
+        format!(
+            "an unknown flag must be refused with exit 2, got {:?}\nstderr:\n{refused_stderr}",
+            refused.status.code()
+        ),
+    )?;
+    // The fake br counts its invocations: still 1 means the refusal came
+    // from the wrapper, before br ran.
+    let state_file = root.join(format!("fake-br-state-{mode}"));
+    let count = fs::read_to_string(&state_file)
+        .map_err(|error| format!("read {}: {error}", state_file.display()))?;
+    ensure(
+        count.trim() == "1",
+        format!("br ran for the refused call; invocation count is {count:?}"),
+    )?;
     Ok(())
 }
 
