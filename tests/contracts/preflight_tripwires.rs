@@ -94,8 +94,16 @@ fn assert_cli_preflight_run_stdout_clean(args: &[&str], display: &str, code: &st
     let started = Instant::now();
     trace_trauma_guard_preflight_contract("dispatch", 0, &[]);
 
+    // The one caller names no workspace and expects `preflight_evidence_unavailable`,
+    // so it runs from a dir workspace discovery cannot climb out of (bd-uuaa3).
+    // From cargo's cwd, `preflight run` wrote `.ee/preflight_runs.json` into the
+    // checkout.
+    let cwd = crate::common_spawn::outside_workspace_dir()?;
     let output = crate::common_spawn::serialized_real_ee_with(|command| {
-        command.args(args);
+        command
+            .current_dir(cwd.path())
+            .env_remove("EE_WORKSPACE")
+            .args(args);
     })
     .map_err(|error| format!("failed to run ee {display}: {error}"))?;
     let stdout = String::from_utf8(output.stdout)

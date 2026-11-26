@@ -82,8 +82,23 @@ fn pretty(value: &Value) -> Result<String, String> {
     Ok(rendered)
 }
 
+/// A spawn that names no workspace runs from a dir workspace discovery cannot
+/// climb out of, with `EE_WORKSPACE` removed (bd-uuaa3). From cargo's cwd,
+/// `certificate verify` without a manifest read the persisted records of the
+/// checkout's store, while its test asserts the no-record `not_found`. The other
+/// bare callers pass absolute `--manifest` paths, so the cwd does not reach them.
 fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
-    crate::common_spawn::serialized_real_ee(args)
+    if args.contains(&"--workspace") {
+        return crate::common_spawn::serialized_real_ee(args);
+    }
+    let cwd = crate::common_spawn::outside_workspace_dir()?;
+    crate::common_spawn::serialized_real_ee_with(|command| {
+        command
+            .current_dir(cwd.path())
+            .env_remove("EE_WORKSPACE")
+            .args(args);
+    })
+    .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
 fn parse_stdout_json(output: &std::process::Output) -> Result<Value, String> {
