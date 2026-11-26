@@ -10940,6 +10940,9 @@ mod tests {
         let (mut options, kind, filters) =
             singleflight_search_parts(&workspace_path, "release checksums", 5);
         options.no_global = true;
+        // Pin the reference time stamped into every hit, or the baseline and
+        // the fallback below differ by the second between them.
+        options.as_of = Some(chrono::Utc::now() + chrono::Duration::hours(1));
         assert!(daemon_search_singleflight_key(&options, kind.as_deref(), &filters).is_some());
         // A directory is consistently unreadable as a JSONL file even when
         // tests run as root. The canonical search reports its normal gap.
@@ -11288,8 +11291,12 @@ mod tests {
     fn coalesced_daemon_searches_return_the_uncoalesced_result_and_audit_each_request() {
         let (_workspace, workspace_path, connection, _workspace_id) =
             singleflight_search_fixture("Daemon singleflight coalescing parity memory");
-        let (options, kind, filters) =
+        let (mut options, kind, filters) =
             singleflight_search_parts(&workspace_path, "singleflight coalescing parity", 5);
+        // Every hit stamps its quality-scoring reference time, which is the
+        // request's own clock unless as_of pins it. Two uncoalesced searches
+        // a second apart already differ there, so pin it to compare runs.
+        options.as_of = Some(chrono::Utc::now() + chrono::Duration::hours(1));
         let executed = || {
             connection
                 .list_audit_by_action(crate::db::audit_actions::SEARCH_EXECUTED, None)
@@ -11374,7 +11381,7 @@ mod tests {
                 },
             )
             .expect("queued source publication");
-        let (options, _, _, _) = DaemonSearchParams::from_value(&serde_json::json!({
+        let (mut options, _, _, _) = DaemonSearchParams::from_value(&serde_json::json!({
             "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
             "query": "release",
             "workspacePath": workspace_path,
@@ -11386,6 +11393,9 @@ mod tests {
         .expect("pack params")
         .into_search_parts(&workspace_path.display().to_string())
         .expect("pack parts");
+        // The quality-scoring reference time stamped into every hit is the
+        // request's own clock unless as_of pins it; pin it to compare runs.
+        options.as_of = Some(chrono::Utc::now() + chrono::Duration::hours(1));
 
         let pack_key = |require_cached_local: bool| {
             daemon_pack_search_singleflight_key(&options, require_cached_local, None)
@@ -11625,12 +11635,23 @@ mod tests {
             );
         }
 
-        connection
+        // Withhold the review table on a store that only key reads have
+        // touched. The rename is DDL, and on the store above, after its
+        // searches and pack retrievals, it failed with "database is busy
+        // (snapshot conflict on pages: )" (pinned dispatch C53b at
+        // 33d4af894). The same rename after key reads alone succeeds, as in
+        // daemon_search_singleflight_keys_track_global_feedback.
+        let (_other, other_path, other_db, _) =
+            singleflight_search_fixture("Separate review authority fixture");
+        let (mut other_options, _, _) = singleflight_search_parts(&other_path, "review", 5);
+        other_options.no_global = true;
+        assert!(daemon_search_singleflight_key(&other_options, None, &[]).is_some());
+        assert!(daemon_pack_search_singleflight_key(&other_options, false, None).is_some());
+        other_db
             .execute_raw("ALTER TABLE feedback_quarantine RENAME TO withheld_review_holds")
             .unwrap();
-        assert!(daemon_search_singleflight_key(&options, None, &[]).is_none());
-        assert!(daemon_pack_search_singleflight_key(&options, false, None).is_none());
-        assert!(!previous.snapshot_matches(&options, &connection));
+        assert!(daemon_search_singleflight_key(&other_options, None, &[]).is_none());
+        assert!(daemon_pack_search_singleflight_key(&other_options, false, None).is_none());
     }
 
     #[test]
