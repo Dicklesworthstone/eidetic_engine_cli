@@ -482,6 +482,7 @@ fn pack_community_of_mass(graph: &Graph, pack_ids: &[MemoryId]) -> Option<PackDn
         .map(ToString::to_string)
         .collect::<BTreeSet<_>>();
     let mut communities = detect_louvain_communities(graph)
+        .communities
         .into_iter()
         .map(|mut community| {
             sort_by_ulid_payload_or_lexical(&mut community, String::as_str);

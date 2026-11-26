@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_louvain_declined",
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.82",
+    "epic_letter": "G"
+  },
+  "surfaces": ["graph louvain"],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Every admitted memory link weighs 0, so the graph's total edge weight is zero, modularity is undefined and FrankenNetworkX declines Louvain. Every memory is reported as its own community.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Louvain source memory.' --workspace . --level semantic --kind fact --json",
+      "ee remember 'Louvain target memory.' --workspace . --level semantic --kind fact --json",
+      "ee memory link <source-memory-id> <target-memory-id> --relation supports --weight 0 --workspace . --json"
+    ],
+    "invocation": "ee graph louvain --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_louvain_declined",
+    "severity": "medium",
+    "message_contains": ["Louvain", "declined"],
+    "repair_contains": "ee graph communities",
+    "repair_string": "ee graph communities --workspace . --json",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}

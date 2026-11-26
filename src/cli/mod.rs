@@ -37381,14 +37381,22 @@ where
     {
         match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
             Ok(input) => {
-                let communities = crate::graph::health::louvain_communities_or_singletons(
+                let partition = crate::graph::health::louvain_partition(
                     &input.undirected,
                     args.resolution,
                     args.threshold,
                     args.max_level,
                     args.seed,
                 );
-                let data = graph_communities_data("graph louvain", &input, communities, args.limit);
+                let mut data = graph_communities_data(
+                    "graph louvain",
+                    &input,
+                    partition.communities,
+                    args.limit,
+                );
+                if partition.declined {
+                    mark_graph_louvain_declined(&mut data);
+                }
                 write_graph_surface_data(cli, stdout, data)
             }
             Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
@@ -38642,6 +38650,30 @@ fn graph_communities_data(
                 .collect::<Vec<_>>(),
         }),
     )
+}
+
+#[cfg(feature = "graph")]
+const GRAPH_LOUVAIN_DECLINED_REPAIR: &str = "ee graph communities --workspace . --json";
+
+/// FrankenNetworkX declined the partition, so the singleton communities are
+/// reported as declined, not computed (bd-reality-core-convergence-1azkt.82).
+#[cfg(feature = "graph")]
+fn mark_graph_louvain_declined(data: &mut serde_json::Value) {
+    if let Some(object) = data.as_object_mut() {
+        object.insert("status".to_owned(), serde_json::json!("declined"));
+        object.insert(
+            "degraded".to_owned(),
+            serde_json::Value::Array(aggregate_cli_degraded_json([
+                DegradationAggregationInput::new(
+                    "louvain",
+                    crate::models::degradation::GRAPH_LOUVAIN_DECLINED_CODE,
+                    "medium",
+                    "FrankenNetworkX declined Louvain because the graph's total edge weight leaves modularity undefined, as when every link weighs 0; each memory is reported as its own community. Label propagation does not use weights.",
+                    GRAPH_LOUVAIN_DECLINED_REPAIR,
+                ),
+            ])),
+        );
+    }
 }
 
 #[cfg(feature = "graph")]
@@ -85271,6 +85303,49 @@ mod tests {
             }
             other => Err(format!("expected graph k-core command, got {other:?}")),
         }
+    }
+
+    /// bd-reality-core-convergence-1azkt.82: a declined Louvain response says
+    /// so in `status` and `degraded`, and the envelope lifts the code to its
+    /// top-level `degraded`.
+    #[cfg(feature = "graph")]
+    #[test]
+    fn graph_louvain_decline_is_reported_in_status_and_degraded() -> TestResult {
+        let mut data = serde_json::json!({
+            "command": "graph louvain",
+            "status": "computed",
+            "communityCount": 2,
+        });
+        mark_graph_louvain_declined(&mut data);
+
+        ensure_equal(&data["status"], &serde_json::json!("declined"), "status")?;
+        ensure_equal(&data["communityCount"], &serde_json::json!(2), "data kept")?;
+        let lifted = top_level_degraded_from_data(&data);
+        let entries = lifted
+            .as_array()
+            .ok_or("top-level degraded must be an array")?;
+        ensure_equal(&entries.len(), &1, "one degraded entry")?;
+        ensure_equal(
+            &entries[0]["code"],
+            &serde_json::json!(crate::models::degradation::GRAPH_LOUVAIN_DECLINED_CODE),
+            "code",
+        )?;
+        ensure_equal(
+            &entries[0]["severity"],
+            &serde_json::json!("medium"),
+            "severity",
+        )?;
+        ensure_equal(
+            &entries[0]["repair"],
+            &serde_json::json!(GRAPH_LOUVAIN_DECLINED_REPAIR),
+            "repair",
+        )?;
+        ensure(
+            entries[0]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("Louvain") && message.contains("declined")),
+            "message names the decline",
+        )
     }
 
     #[test]

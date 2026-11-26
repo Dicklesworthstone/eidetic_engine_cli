@@ -1055,7 +1055,7 @@ success artifact or lane grant. All three codes are `response_time`.
 | `graph_snapshot_topology_unavailable` | low | bd-17c65.5.3 (E3) |
 | `graph_snapshot_unusable` | high | bd-17c65.5.3 (E3) |
 
-#### Graph accretion sentinels (12 — response_time variants of graph_unavailable)
+#### Graph accretion sentinels (13 — response_time variants of graph_unavailable)
 | Code | Severity | Bead |
 |------|----------|------|
 | `graph_ppr_snapshot_stale` | medium | bd-bife.6 |
@@ -1069,6 +1069,7 @@ success artifact or lane grant. All three codes are `response_time`.
 | `graph_dominance_no_revision_chain` | info | bd-bife.6 |
 | `graph_skyline_degenerate_communities` | info | bd-bife.6 |
 | `graph_hits_convergence_failure` | warning | bd-bife.6 |
+| `graph_louvain_declined` | medium | bd-reality-core-convergence-1azkt.82 (G) — FrankenNetworkX declined Louvain because the total edge weight leaves modularity undefined (every link weighs 0); `ee graph louvain` reports singleton communities with status `declined` |
 | `graph_scale_gomory_hu_skipped` | low | bd-bife.17 / bd-reality-core-convergence-1azkt.83 — Gomory-Hu proximity tree construction is skipped above `GOMORY_HU_SKIP_THRESHOLD_NODES` in `ee insights` |
 
 #### Graph NUMA pinning (4 — response_time)

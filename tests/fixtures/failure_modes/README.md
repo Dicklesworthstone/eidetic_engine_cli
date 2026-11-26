@@ -287,6 +287,7 @@ in the same commit, keeping the catalog complete by construction.
 | `graph_feature_disabled` | graph, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
 | `insights_section_unavailable` | insights | info | bd-113r0 (retired by bd-2pos6.4) |
 | `graph_algorithm_unavailable` | graph centrality | medium | bd-3usjw.2 |
+| `graph_louvain_declined` | graph louvain | medium | bd-reality-core-convergence-1azkt.82 (G) |
 | `graph_snapshot_missing` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
 | `graph_snapshot_stale` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |
 | `graph_snapshot_unusable` | graph export, graph feature-enrichment | medium | bd-17c65.10.6 (J6) |

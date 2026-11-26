@@ -405,6 +405,8 @@ pub const GRAPH_PPR_SNAPSHOT_STALE_CODE: &str = "graph_ppr_snapshot_stale";
 pub const GRAPH_PPR_EMPTY_SEED_SET_CODE: &str = "graph_ppr_empty_seed_set";
 /// Response degraded code while pack PPR awaits an upstream FrankenNetworkX API.
 pub const GRAPH_PPR_UPSTREAM_UNAVAILABLE_CODE: &str = "graph_ppr_upstream_unavailable";
+/// Degraded code for a Louvain partition FrankenNetworkX declined.
+pub const GRAPH_LOUVAIN_DECLINED_CODE: &str = "graph_louvain_declined";
 /// Response degraded code for Pack DNA without a trust-anchor dominator.
 pub const GRAPH_PACK_DNA_NO_DOMINATOR_CODE: &str = "graph_pack_dna_no_dominator";
 /// Response degraded code for Pack DNA graph explanation timeout.

@@ -334,6 +334,7 @@ fn louvain_from_edges(edges: &BTreeMap<String, DiffEdge>) -> Vec<BTreeSet<String
         let _ = graph.extend_edges_unrecorded([(edge.source.as_str(), edge.target.as_str())]);
     }
     crate::graph::health::detect_louvain_communities(&graph)
+        .communities
         .into_iter()
         .map(|members| members.into_iter().collect::<BTreeSet<String>>())
         .filter(|members| !members.is_empty())

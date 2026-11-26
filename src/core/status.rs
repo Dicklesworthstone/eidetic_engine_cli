@@ -4990,7 +4990,7 @@ fn status_skyline_from_links(
     }
 
     let graph = status_skyline_graph_from_links(links);
-    let communities = crate::graph::health::detect_louvain_communities(&graph);
+    let communities = crate::graph::health::detect_louvain_communities(&graph).communities;
     let community_count = communities.len();
     let onion_layers = crate::graph::decay::compute_onion_layers(&graph);
     let k_truss_ranks = crate::graph::health::compute_k_truss(&graph)

@@ -359,6 +359,7 @@ fn community_summaries(
     metrics_by_memory: &BTreeMap<String, MemoryMetrics>,
 ) -> Vec<KnowledgeSkylineCommunitySummary> {
     let mut communities = detect_louvain_communities(graph)
+        .communities
         .into_iter()
         .enumerate()
         .map(|(community_id, mut members)| {

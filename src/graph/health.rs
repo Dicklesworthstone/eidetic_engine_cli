@@ -7,6 +7,7 @@ use fnx_algorithms::{PythonSum, k_truss, louvain_communities};
 use fnx_classes::Graph;
 use serde::Serialize;
 
+use crate::models::degradation::GRAPH_LOUVAIN_DECLINED_CODE;
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 pub const HEALTH_STRUCTURAL_SCHEMA_V1: &str = "ee.health.structural.v1";
@@ -131,9 +132,17 @@ pub fn compute_k_truss(graph: &Graph) -> KTrussReport {
     }
 }
 
+/// A Louvain partition, and whether FrankenNetworkX declined to compute it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LouvainPartition {
+    pub communities: Vec<Vec<String>>,
+    /// fnx declined the graph, so `communities` holds every node alone.
+    pub declined: bool,
+}
+
 #[must_use]
-pub fn detect_louvain_communities(graph: &Graph) -> Vec<Vec<String>> {
-    louvain_communities_or_singletons(
+pub fn detect_louvain_communities(graph: &Graph) -> LouvainPartition {
+    louvain_partition(
         graph,
         DEFAULT_LOUVAIN_RESOLUTION,
         DEFAULT_LOUVAIN_THRESHOLD,
@@ -145,18 +154,20 @@ pub fn detect_louvain_communities(graph: &Graph) -> Vec<Vec<String>> {
 /// Louvain over the `weight` edge attribute, summing plainly as fnx 0.3.0 did.
 ///
 /// fnx 0.4 returns `None` where networkx would raise. ee's edges carry float
-/// weights or none (read as 1), so that means a zero, non-finite or
-/// overflowing total weight. Modularity is undefined there, so every node
-/// stands alone rather than being grouped arbitrarily.
+/// weights or none (read as int 1), so for ee that means a total weight that
+/// is zero (every link weighs 0, which the schema allows) or non-finite, or
+/// 2^25 or more unweighted edges. Modularity is undefined or inexact there,
+/// so every node stands alone, `declined` is set and one warning names
+/// `graph_louvain_declined` for every caller.
 #[must_use]
-pub fn louvain_communities_or_singletons(
+pub fn louvain_partition(
     graph: &Graph,
     resolution: f64,
     threshold: f64,
     max_level: Option<usize>,
     seed: Option<u64>,
-) -> Vec<Vec<String>> {
-    louvain_communities(
+) -> LouvainPartition {
+    if let Some(communities) = louvain_communities(
         graph,
         resolution,
         LOUVAIN_WEIGHT_ATTR,
@@ -164,14 +175,29 @@ pub fn louvain_communities_or_singletons(
         max_level,
         seed,
         PythonSum::Plain,
-    )
-    .unwrap_or_else(|| {
-        graph
+    ) {
+        return LouvainPartition {
+            communities,
+            declined: false,
+        };
+    }
+    tracing::warn!(
+        target: "ee::graph",
+        algorithm = "louvain",
+        declined = true,
+        degraded_code = GRAPH_LOUVAIN_DECLINED_CODE,
+        node_count = graph.node_count(),
+        edge_count = graph.edge_count(),
+        "FrankenNetworkX declined Louvain: the total edge weight leaves modularity undefined, so every node is its own community"
+    );
+    LouvainPartition {
+        communities: graph
             .nodes_ordered()
             .into_iter()
             .map(|node| vec![node.to_owned()])
-            .collect()
-    })
+            .collect(),
+        declined: true,
+    }
 }
 
 #[must_use]
@@ -198,6 +224,7 @@ pub fn detect_contradiction_clusters_with_threshold(
         density_threshold.clamp(0.0, 1.0)
     };
     let mut clusters = detect_louvain_communities(graph)
+        .communities
         .into_iter()
         .enumerate()
         .filter_map(|(louvain_id, mut community)| {
@@ -384,6 +411,68 @@ mod tests {
                 .iter()
                 .all(|memory| memory.max_k == 5)
         );
+    }
+
+    fn two_triangles_weighted(weight: f64) -> Result<Graph, String> {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        for (left, right) in [
+            ("a", "b"),
+            ("b", "c"),
+            ("a", "c"),
+            ("c", "d"),
+            ("d", "e"),
+            ("e", "f"),
+            ("d", "f"),
+        ] {
+            let attrs = fnx_runtime::AttrMap::from([(
+                LOUVAIN_WEIGHT_ATTR.to_owned(),
+                fnx_runtime::CgseValue::Float(weight),
+            )]);
+            graph
+                .add_edge_with_attrs(left, right, attrs)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(graph)
+    }
+
+    /// bd-reality-core-convergence-1azkt.82, the admitted twin: a weighted
+    /// graph partitions and is not marked declined. An edgeless graph is not a
+    /// decline either, because networkx yields its singletons.
+    #[test]
+    fn louvain_partition_admits_weighted_and_edgeless_graphs() -> Result<(), String> {
+        let partition = detect_louvain_communities(&two_triangles_weighted(1.0)?);
+        assert!(!partition.declined, "{partition:?}");
+        let mut communities = partition.communities;
+        for community in &mut communities {
+            community.sort();
+        }
+        communities.sort();
+        assert_eq!(communities, vec![vec!["a", "b", "c"], vec!["d", "e", "f"]]);
+
+        let mut edgeless = Graph::new(CompatibilityMode::Strict);
+        edgeless.add_node("a");
+        edgeless.add_node("b");
+        let partition = detect_louvain_communities(&edgeless);
+        assert!(!partition.declined, "{partition:?}");
+        assert_eq!(partition.communities, vec![vec!["a"], vec!["b"]]);
+        Ok(())
+    }
+
+    /// The decline twin: when every link weighs 0, modularity divides by a
+    /// zero m**2, so fnx declines and every node stands alone.
+    #[test]
+    fn louvain_partition_reports_a_decline_when_every_link_weighs_zero() -> Result<(), String> {
+        let graph = two_triangles_weighted(0.0)?;
+        let partition = detect_louvain_communities(&graph);
+        assert!(partition.declined, "{partition:?}");
+        let singletons = graph
+            .nodes_ordered()
+            .into_iter()
+            .map(|node| vec![node.to_owned()])
+            .collect::<Vec<_>>();
+        assert_eq!(singletons.len(), 6);
+        assert_eq!(partition.communities, singletons);
+        Ok(())
     }
 
     #[test]
