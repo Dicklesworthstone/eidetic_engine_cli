@@ -29,11 +29,10 @@
 !src/cache/
 !src/cache/**
 
-# The tracked Beads JSONL is a compile-time input for plan_doc_completeness.
-# RCH's default hidden-directory exclusions are broader than this project, so
-# re-include the directory and its tracked source-of-truth file explicitly.
-!.beads/
-!.beads/issues.jsonl
+# rch excludes `.beads/` by default (its issue #109) and has no `!` negation:
+# parse_rchignore reads `!pattern` as a literal. Nothing in this file can
+# re-include the tracker, so a test that reads .beads/issues.jsonl at run time
+# fails on every worker. Options: bd-pinned-bundle-drops-beads-9wg57.
 
 # Diagnostic output files created by verification scripts
 .clippy_out.txt
