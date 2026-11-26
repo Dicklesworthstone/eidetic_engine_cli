@@ -158,6 +158,28 @@ fn hotset_manifest_schema_is_registered_and_exportable() -> TestResult {
     )
 }
 
+/// The fixtures are the schema's cold, warm and abstain examples, so each must
+/// validate against the schema `ee schema export` publishes. Nothing checked
+/// that before, and the shared validator could not have: boundedLabel's
+/// pattern used lookahead, which regex_lite refuses to compile.
+#[test]
+fn hotset_manifest_fixtures_validate_against_the_exported_schema() -> TestResult {
+    let schema_id = ee::models::HOTSET_MANIFEST_SCHEMA_V1;
+    let schema: Value =
+        serde_json::from_str(&ee::output::render_schema_export_json(Some(schema_id)))
+            .map_err(|error| format!("exported {schema_id} schema is not JSON: {error}"))?;
+    for fixture in FIXTURES {
+        let manifest = parse_fixture(fixture)?;
+        ee::testing::validate_json_schema_instance(&manifest, &schema).map_err(|error| {
+            format!(
+                "{} fixture does not satisfy {schema_id}: {error}",
+                fixture.name
+            )
+        })?;
+    }
+    Ok(())
+}
+
 #[test]
 fn hotset_manifest_fixtures_pin_required_cases() -> TestResult {
     for fixture in FIXTURES {
