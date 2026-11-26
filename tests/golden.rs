@@ -2932,11 +2932,25 @@ mod tests {
         assert_golden("agent", "search_unavailable.json", &normalized)
     }
 
+    /// An empty workspace for the gate16 preflight probes (bd-uuaa3). Without
+    /// `--workspace` they resolved to the checkout cargo runs in, so `preflight
+    /// run` wrote `.ee/preflight_runs.json` there and `show`/`close` read
+    /// whatever run store the checkout held. Their assertions are the empty-store
+    /// ones, so a fresh directory states that precondition instead of assuming it.
+    fn gate16_empty_workspace() -> Result<(tempfile::TempDir, String), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().to_string_lossy().into_owned();
+        Ok((tempdir, workspace))
+    }
+
     #[test]
     fn gate16_preflight_run_json_matches_golden() -> TestResult {
+        let (_tempdir, workspace) = gate16_empty_workspace()?;
         let value = run_json_stdout(
             &[
                 "--json",
+                "--workspace",
+                &workspace,
                 "preflight",
                 "run",
                 "deploy production database migration",
@@ -2967,8 +2981,16 @@ mod tests {
 
     #[test]
     fn gate16_preflight_show_json_matches_golden() -> TestResult {
+        let (_tempdir, workspace) = gate16_empty_workspace()?;
         let value = run_json_stdout(
-            &["--json", "preflight", "show", "pf_gate16_contract"],
+            &[
+                "--json",
+                "--workspace",
+                &workspace,
+                "preflight",
+                "show",
+                "pf_gate16_contract",
+            ],
             false,
         )?;
         ensure_equal(
@@ -2990,9 +3012,12 @@ mod tests {
 
     #[test]
     fn gate16_preflight_close_json_matches_golden() -> TestResult {
+        let (_tempdir, workspace) = gate16_empty_workspace()?;
         let value = run_json_stdout(
             &[
                 "--json",
+                "--workspace",
+                &workspace,
                 "preflight",
                 "close",
                 "pf_gate16_contract",
