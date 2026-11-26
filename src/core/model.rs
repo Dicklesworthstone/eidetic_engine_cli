@@ -3853,7 +3853,10 @@ fn resolve_rerank_model_manifest(model_id: &str) -> Result<RerankModelManifest, 
                 RegisteredModel2Vec::BUILTIN_IDS.join("`, `"),
                 manifest.model_id
             ),
-            repair: Some(format!("ee model fetch {DEFAULT_RERANK_MODEL_ALIAS}")),
+            // Every unrecognised id lands here, including embedding requests
+            // (GH#89's blink model). Naming the reranker sent embedding users
+            // to the wrong model; the message above lists every accepted id.
+            repair: Some("ee model fetch --help".to_owned()),
         })
     }
 }
@@ -6336,6 +6339,38 @@ mod tests {
                 "{request:?} must not select a default or differently sourced model"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_model_fetch_repair_does_not_name_the_reranker() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let model_store = temp.path().join("models");
+        for request in [
+            "blink-multilingual-64M",
+            "minishlab/blink-multilingual-64M",
+            "potion-base-2M",
+        ] {
+            let options = ModelFetchOptions {
+                workspace_path: temp.path(),
+                database_path: None,
+                model_id: request,
+                from_file: None,
+                model_store_root: Some(&model_store),
+            };
+            for result in [fetch_model(&options), fetch_rerank_model(&options)] {
+                let error = result.expect_err("an unpinned model id is refused");
+                assert!(matches!(error, DomainError::Usage { .. }));
+                assert!(error.message().contains("unknown model"), "{request}");
+                assert_eq!(
+                    error.repair(),
+                    Some("ee model fetch --help"),
+                    "the repair for {request:?} must not name the reranker"
+                );
+            }
+        }
+        assert!(!temp.path().join(".ee").exists());
+        assert!(!model_store.exists());
         Ok(())
     }
 
