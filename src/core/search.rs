@@ -1137,7 +1137,7 @@ impl SearchOptions {
             .unwrap_or_else(|| default_workspace_database_path(&self.workspace_path))
     }
 
-    fn resolve_index_dir(&self) -> PathBuf {
+    pub(crate) fn resolve_index_dir(&self) -> PathBuf {
         crate::config::workspace::resolve_store_index_dir(
             &self.workspace_path,
             self.database_path.as_deref(),
@@ -1900,6 +1900,34 @@ pub struct SearchPerformanceRun {
     scoring_reference_time: DateTime<Utc>,
 }
 
+impl SearchPerformanceRun {
+    /// Finish one daemon request whose run was shared through single-flight
+    /// (bd-d67os.9).
+    ///
+    /// The shared run was computed without its retrieval audit, so its trace
+    /// ends with the computing request's `search::requestTotal` and holds no
+    /// audit spans. This drops that span, records THIS request's audit and
+    /// closes a request span timed from `request_start`. N coalesced requests
+    /// therefore leave N audit rows, as N uncoalesced ones do, and each trace
+    /// has the spans of an uncoalesced request in the same order.
+    pub(crate) fn finish_coalesced_daemon_request(
+        &mut self,
+        options: &SearchOptions,
+        request_start: Instant,
+    ) {
+        self.performance
+            .timings
+            .retain(|timing| timing.name != "search::requestTotal");
+        finish_search_request(
+            self,
+            options,
+            &options.resolve_database_path(),
+            true,
+            request_start,
+        );
+    }
+}
+
 /// Retrieval-only handoff. It never owns a write connection: the caller may
 /// discard a timed-out result without any delayed pack or audit mutation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2290,32 +2318,6 @@ impl PackSearchHandoff {
                         | "global_index_unavailable"
                 )
             })
-    }
-
-    /// Finish one daemon request whose run was shared through single-flight
-    /// (bd-d67os.9).
-    ///
-    /// The shared run was computed without its retrieval audit, so its trace
-    /// ends with the computing request's `search::requestTotal` and holds no
-    /// audit spans. This drops that span, records THIS request's audit and
-    /// closes a request span timed from `request_start`. N coalesced requests
-    /// therefore leave N audit rows, as N uncoalesced ones do, and each trace
-    /// has the spans of an uncoalesced request in the same order.
-    pub(crate) fn finish_coalesced_daemon_request(
-        &mut self,
-        options: &SearchOptions,
-        request_start: Instant,
-    ) {
-        self.performance
-            .timings
-            .retain(|timing| timing.name != "search::requestTotal");
-        finish_search_request(
-            self,
-            options,
-            &options.resolve_database_path(),
-            true,
-            request_start,
-        );
     }
 
     pub(crate) fn record_audit(&self, options: &SearchOptions, connection: &DbConnection) {
