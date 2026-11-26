@@ -825,9 +825,22 @@ task-episode recovery only; the broader four recovery rows remain open.
 
 #### D. Restore mandated dependency boundaries (`.4`, `.15`, `.18`)
 
-- [ ] Replace pack-path local personalized PageRank with the required
+- [x] Replace pack-path local personalized PageRank with the required
   FrankenNetworkX projection/API or obtain an explicit upstream capability;
   preserve deterministic ordering and cancellation semantics.
+  - 2026-11-26 (`.82`): 86bc5b8e0 replaced the local ACL kernel with
+    `fnx_algorithms::personalized_pagerank`, run under `run_with_budget`. In
+    330b7a9a3 the context rerank, Pack DNA `pprNeighbors` and the
+    suggest-links signal all use it, and `graph_ppr_upstream_unavailable`
+    is retired. fb0cd3525 makes the rerank work on the read-only connection
+    `ee context` opens. Without it, every real pack lost the rerank to a
+    refused cache write. Verified on the pinned lane at fb0cd3525:
+    - lib 520/520;
+    - `ppr_context_pack` green;
+    - integration_a_d 20/20.
+
+    The parity check against networkx.pagerank has not run there: the
+    workers have no networkx (bd-networkx-missing-on-lane-tb5o0).
 - [x] Remove the public custom BM25 production surface once all real callers use
   Frankensearch; retain only legitimate differential test code if still useful.
 - [x] Replace global-store token-overlap/substr ranking with a rebuildable
@@ -845,6 +858,7 @@ task-episode recovery only; the broader four recovery rows remain open.
   ranking, retain non-PPR Pack DNA signals, emit one typed
   `graph_ppr_upstream_unavailable` degradation, and catalog the code. Focused
   runtime verification is still blocked by local source-staging disk pressure.
+  Superseded 2026-11-26: PPR runs through fnx again (first item above).
 - [ ] Pin and expose one coherent dependency/version identity across manifest,
   lock, runtime status, proof capsule, and release artifacts.
   - [x] Align the Frankensearch index-manifest/runtime constant with the
