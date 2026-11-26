@@ -5160,6 +5160,9 @@ enum SearchScoreCalibrationJsonlCacheFingerprint {
 struct SearchScoreCalibrationFeedbackEvents {
     events: Vec<StoredFeedbackEvent>,
     unavailable_reason: Option<String>,
+    /// Observed pending review holds from the same source snapshot as `events`.
+    /// An unreadable quarantine view cannot establish a reusable identity.
+    pending_quarantine_identity: Result<Option<String>, ()>,
 }
 
 /// Complete feedback rows borrowed by one pinned request. The connection and
@@ -5277,10 +5280,14 @@ impl SearchFeedbackSnapshot<'_> {
 }
 
 impl SearchScoreCalibrationFeedbackEvents {
-    fn available(events: Vec<StoredFeedbackEvent>) -> Self {
+    fn available(
+        events: Vec<StoredFeedbackEvent>,
+        pending_quarantine_identity: Result<Option<String>, ()>,
+    ) -> Self {
         Self {
             events,
             unavailable_reason: None,
+            pending_quarantine_identity,
         }
     }
 
@@ -5288,6 +5295,7 @@ impl SearchScoreCalibrationFeedbackEvents {
         Self {
             events: Vec::new(),
             unavailable_reason: Some(reason.to_owned()),
+            pending_quarantine_identity: Err(()),
         }
     }
 }
@@ -5321,7 +5329,7 @@ struct SearchScoreCalibration {
     /// than the cap above could surface in the provenance summary.
     feedback_event_ids_truncated: bool,
     feedback_evidence_hash: String,
-    /// Full authoritative ledger, including neutral and non-calibrating rows.
+    /// Full authoritative ledger plus pending review-hold metadata.
     /// Kept internal; the handoff proves its identity without transporting it.
     feedback_content_hash: Option<String>,
 }
@@ -5400,9 +5408,9 @@ fn search_score_calibration_with_feedback<'a>(
     // Read once and pass this same load into the calibration calculation.
     let jsonl_load =
         load_search_score_calibration_jsonl(&search_score_calibration_jsonl_path(workspace_path));
-    // Read the complete ledger once. The hash and calibration parser consume
-    // that same row vector, so even unpinned standalone callers cannot cache a
-    // newer row load under an older digest. Held request snapshots are borrowed.
+    // Read the complete ledger and pending review holds from one source view.
+    // The hash and calibration parser consume the same event vector; held
+    // request snapshots are borrowed and standalone readers pin both reads.
     let feedback_events = search_score_calibration_feedback_events_with_workspace_id(
         workspace_path,
         Some(resolved_database_path),
@@ -5415,6 +5423,23 @@ fn search_score_calibration_with_feedback<'a>(
             &feedback_events.events,
         )
         .ok()
+        .and_then(|feedback_hash| match &feedback_events.pending_quarantine_identity {
+            // Preserve the identity when this source view observed no holds.
+            // Test-only empty-hold factories remain equivalent to live readers.
+            Ok(None) => Some(feedback_hash),
+            Ok(Some(quarantine_hash)) => {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(b"ee.search.feedback_authority.v1\0");
+                for value in [feedback_hash.as_str(), quarantine_hash.as_str()] {
+                    hasher.update(&(value.len() as u64).to_be_bytes());
+                    hasher.update(value.as_bytes());
+                }
+                Some(format!("blake3:{}", hasher.finalize().to_hex()))
+            }
+            // Valid feedback can calibrate this request, but unreadable hold
+            // authority cannot admit cached or handed-off candidates.
+            Err(()) => None,
+        })
     } else {
         None
     };
@@ -5790,10 +5815,10 @@ impl SearchScoreCalibration {
         format!("blake3:{}", blake3::hash(material.as_bytes()).to_hex())
     }
 
-    /// Identity of the complete feedback ledger and exact calibration consumed
-    /// before floor filtering. It is returned even for an empty candidate set:
-    /// a client cannot infer freshness from only surviving hits. Unavailable
-    /// inputs do not establish equivalence and require canonical fallback.
+    /// Identity of the complete feedback ledger, pending review holds and exact
+    /// calibration consumed before floor filtering. It is returned even for an
+    /// empty candidate set: a client cannot infer freshness from only surviving
+    /// hits. Unavailable inputs require canonical fallback.
     fn input_identity(&self) -> Option<String> {
         if self.unreadable_reason.is_some()
             || self.feedback_event_unavailable_reason.is_some()
@@ -6300,19 +6325,35 @@ fn search_score_calibration_feedback_events_with_workspace_id(
     read_connection: Option<&DbConnection>,
     workspace_id: &str,
 ) -> SearchScoreCalibrationFeedbackEvents {
+    let read = |connection: &DbConnection| match connection.list_feedback_events(workspace_id) {
+        Ok(events) => SearchScoreCalibrationFeedbackEvents::available(
+            events,
+            connection
+                .pending_feedback_quarantine_fingerprint(workspace_id)
+                .map_err(|_| ()),
+        ),
+        Err(_error) => {
+            SearchScoreCalibrationFeedbackEvents::unavailable("feedback_events_read_failed")
+        }
+    };
     if let Some(connection) = read_connection {
-        return match connection.list_feedback_events(workspace_id) {
-            Ok(events) => SearchScoreCalibrationFeedbackEvents::available(events),
-            Err(_error) => {
-                SearchScoreCalibrationFeedbackEvents::unavailable("feedback_events_read_failed")
-            }
-        };
+        // The caller owns this source snapshot. Neither open another reader
+        // nor begin or release the caller's transaction.
+        return read(connection);
     }
 
     let default_database_path = default_workspace_database_path(workspace_path);
     let database_path = database_path.unwrap_or(&default_database_path);
-    if !database_path.exists() {
-        return SearchScoreCalibrationFeedbackEvents::available(Vec::new());
+    match database_path.try_exists() {
+        Ok(false) => {
+            return SearchScoreCalibrationFeedbackEvents::available(Vec::new(), Ok(None));
+        }
+        Ok(true) => {}
+        Err(_error) => {
+            return SearchScoreCalibrationFeedbackEvents::unavailable(
+                "feedback_events_open_failed",
+            );
+        }
     }
     let connection = match DbConnection::open_file_read_only(database_path) {
         Ok(connection) => connection,
@@ -6322,12 +6363,23 @@ fn search_score_calibration_feedback_events_with_workspace_id(
             );
         }
     };
-    match connection.list_feedback_events(workspace_id) {
-        Ok(events) => SearchScoreCalibrationFeedbackEvents::available(events),
+    // Standalone callers must observe the ledger and pending holds together.
+    // The guard also releases this snapshot on early returns.
+    let snapshot = match RevisionReadSnapshot::begin(&connection) {
+        Ok(snapshot) => snapshot,
         Err(_error) => {
-            SearchScoreCalibrationFeedbackEvents::unavailable("feedback_events_read_failed")
+            return SearchScoreCalibrationFeedbackEvents::unavailable(
+                "feedback_events_snapshot_failed",
+            );
         }
+    };
+    let feedback_events = read(&connection);
+    if snapshot.finish().is_err() {
+        return SearchScoreCalibrationFeedbackEvents::unavailable(
+            "feedback_events_snapshot_release_failed",
+        );
     }
+    feedback_events
 }
 
 pub fn recalibrate_search_score_calibration(

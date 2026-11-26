@@ -24886,6 +24886,61 @@ impl DbConnection {
             .collect()
     }
 
+    /// Fingerprint pending review holds for one owning workspace.
+    ///
+    /// `None` means the complete scoped query observed no pending holds.
+    /// Errors must not be treated as observed emptiness. Callers composing
+    /// this identity with other source authority must hold one read snapshot
+    /// across those reads.
+    ///
+    /// Only admission metadata is read; quarantined feedback payloads,
+    /// reasons and source identities never enter this fingerprint.
+    pub(crate) fn pending_feedback_quarantine_fingerprint(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<String>> {
+        const PAGE_SIZE: usize = 256;
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"ee.feedback_quarantine.pending.v1\0");
+        hasher.update(&(workspace_id.len() as u64).to_be_bytes());
+        hasher.update(workspace_id.as_bytes());
+
+        let mut after_id: Option<String> = None;
+        let mut observed_pending = false;
+        loop {
+            let rows = self.query_for(
+                DbOperation::Query,
+                "SELECT id, target_type, target_id FROM feedback_quarantine WHERE workspace_id = ?1 AND status = 'pending' AND (?2 IS NULL OR id > ?2) ORDER BY id ASC LIMIT 256",
+                &[
+                    Value::Text(workspace_id.to_owned()),
+                    after_id.clone().map_or(Value::Null, Value::Text),
+                ],
+            )?;
+            if rows.is_empty() {
+                break;
+            }
+
+            for row in &rows {
+                let id = required_text(row, 0, DbOperation::Query, "id")?;
+                let target_type = required_text(row, 1, DbOperation::Query, "target_type")?;
+                let target_id = required_text(row, 2, DbOperation::Query, "target_id")?;
+                for value in [id, target_type, target_id] {
+                    hasher.update(&(value.len() as u64).to_be_bytes());
+                    hasher.update(value.as_bytes());
+                }
+                after_id = Some(id.to_owned());
+                observed_pending = true;
+            }
+
+            if rows.len() < PAGE_SIZE {
+                break;
+            }
+        }
+
+        Ok(observed_pending.then(|| format!("blake3:{}", hasher.finalize().to_hex())))
+    }
+
     /// Mark a quarantine row released or rejected without deleting evidence.
     pub fn update_feedback_quarantine_status(
         &self,
@@ -63383,6 +63438,123 @@ UPDATE memories
             applied_at: None,
             created_at: created_at.to_owned(),
         }
+    }
+
+    #[test]
+    fn pending_quarantine_fingerprint_tracks_all_pages_without_payloads() -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        const OTHER: &str = "wsp_11234567890123456789012345";
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.insert_workspace(
+            OTHER,
+            &CreateWorkspaceInput {
+                path: "/tmp/quarantine-fingerprint-other".to_owned(),
+                name: None,
+            },
+        )?;
+        let input = |workspace_id: &str| super::CreateFeedbackQuarantineInput {
+            workspace_id: workspace_id.to_owned(),
+            source_id: "test:private-source".to_owned(),
+            target_type: "memory".to_owned(),
+            target_id: "mem_01234567890123456789012345".to_owned(),
+            signal: "harmful".to_owned(),
+            weight: 1.0,
+            source_type: "automated_check".to_owned(),
+            proposed_event_id: None,
+            recorded_at: "2026-11-26T00:00:00Z".to_owned(),
+            reason: "PRIVATE-QUARANTINE-REASON".to_owned(),
+            event_reason: None,
+            evidence_json: Some("{\"private\":\"payload\"}".to_owned()),
+            session_id: None,
+            raw_event_hash: format!("blake3:{}", "a".repeat(64)),
+        };
+        let generation = connection.total_workspace_generation()?;
+        ensure_equal(
+            &connection.pending_feedback_quarantine_fingerprint(WORKSPACE)?,
+            &None,
+            "an observed empty review set has no hold fingerprint",
+        )?;
+        connection.with_transaction(|| {
+            for number in 0..257 {
+                connection.insert_feedback_quarantine(
+                    &format!("fq_{number:026}"),
+                    &input(WORKSPACE),
+                )?;
+            }
+            Ok(())
+        })?;
+        let initial = connection
+            .pending_feedback_quarantine_fingerprint(WORKSPACE)?
+            .ok_or_else(|| TestFailure::new("pending holds need a fingerprint"))?;
+        ensure_equal(
+            &connection.pending_feedback_quarantine_fingerprint(WORKSPACE)?,
+            &Some(initial.clone()),
+            "unchanged complete pages have a stable identity",
+        )?;
+        ensure(
+            !initial.contains("PRIVATE") && !initial.contains("private-source"),
+            "only the digest leaves the metadata reader",
+        )?;
+        connection.execute(
+            "UPDATE feedback_quarantine SET target_id = ?1 WHERE id = ?2",
+            &[
+                Value::Text("mem_11234567890123456789012345".to_owned()),
+                Value::Text(format!("fq_{:026}", 256)),
+            ],
+        )?;
+        let retargeted = connection.pending_feedback_quarantine_fingerprint(WORKSPACE)?;
+        ensure(
+            retargeted.as_ref() != Some(&initial),
+            "a same-count edit on the second page changes admission identity",
+        )?;
+        connection.execute(
+            "UPDATE feedback_quarantine SET reason = ?1, evidence_json = ?2 WHERE id = ?3",
+            &[
+                Value::Text("CHANGED-PRIVATE-REASON".to_owned()),
+                Value::Text("{\"private\":\"replacement\"}".to_owned()),
+                Value::Text(format!("fq_{:026}", 256)),
+            ],
+        )?;
+        ensure_equal(
+            &connection.pending_feedback_quarantine_fingerprint(WORKSPACE)?,
+            &retargeted,
+            "review payload edits do not change which targets are held",
+        )?;
+        connection.insert_feedback_quarantine(&format!("fq_{:026}", 999), &input(OTHER))?;
+        ensure_equal(
+            &connection.pending_feedback_quarantine_fingerprint(WORKSPACE)?,
+            &retargeted,
+            "a foreign workspace cannot change this admission identity",
+        )?;
+        connection.execute(
+            "UPDATE feedback_quarantine SET status = 'rejected' WHERE workspace_id = ?1",
+            &[Value::Text(WORKSPACE.to_owned())],
+        )?;
+        ensure_equal(
+            &connection.pending_feedback_quarantine_fingerprint(WORKSPACE)?,
+            &None,
+            "reviewed rows no longer hold candidates",
+        )?;
+        ensure_equal(
+            &connection.total_workspace_generation()?,
+            &generation,
+            "review metadata does not advance workspace generation",
+        )?;
+        ensure(
+            connection.list_feedback_events(WORKSPACE)?.is_empty(),
+            "pending review is not accepted feedback",
+        )?;
+        connection.execute_raw(
+            "ALTER TABLE feedback_quarantine RENAME TO withheld_review_holds",
+        )?;
+        ensure(
+            connection
+                .pending_feedback_quarantine_fingerprint(WORKSPACE)
+                .is_err(),
+            "an unreadable review set must not look empty",
+        )
     }
 
     #[test]

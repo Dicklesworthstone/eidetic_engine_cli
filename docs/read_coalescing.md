@@ -60,8 +60,9 @@ retrieval (bd-d67os.9). It is off by default.
 - **The key** holds the exact query and every search option, the workspace
   store's generation, the user-global store's generation when the read may use
   it, the published index generation and the merged config. It also binds each
-  store's complete feedback ledger and the calibration bytes used by retrieval.
-  Inserts, same-count edits, application markers, and same-size calibration-file
+  store's complete feedback ledger, pending review-hold metadata, and the
+  calibration bytes used by retrieval. Inserts, same-count edits, application
+  markers, quarantine retargeting or review, and same-size calibration-file
   replacements distinguish requests even when no generation advances. These
   witnesses use the same identity rules as pack handoffs and short pinned
   database snapshots, released before waiting for a leader. A search key adds
@@ -82,7 +83,11 @@ instant, slightly before its own arrival. This difference remains bounded by
 the leader's run time. Explicit `as_of` requests carry their reference time in
 the key. Pack clients also revalidate source and calibration witnesses before
 using a handoff, so a change after the daemon captured its key can still force
-fresh local retrieval.
+fresh local retrieval. Pending quarantine holds participate in that identity:
+a new hold cannot reuse an earlier candidate pool, and removing a hold triggers
+fresh selection instead of retaining a pool that omitted the held memory.
+Only hold IDs, owning workspace, target types and target IDs enter the hash;
+review reasons, source identities and quarantined payloads are never read for it.
 
 ## Agent UX
 
@@ -96,9 +101,9 @@ What an agent can rely on today:
   work inside one invocation, or send both searches through a daemon running
   with `EE_DAEMON_SEARCH_SINGLEFLIGHT=on` (`ee search --use-daemon`).
 - **Changed inputs run independently.** Source/index generation changes and
-  complete feedback/calibration witnesses distinguish post-write requests from
-  earlier in-flight work. The key carries hashes, never raw feedback reasons or
-  calibration rows.
+  complete feedback/calibration and pending-review witnesses distinguish
+  post-write requests from earlier in-flight work. The key carries hashes,
+  never raw feedback reasons, quarantine payloads or calibration rows.
 - **Observe it.** The hidden e2e harness exercises the live coalescer with the
   real binary:
 

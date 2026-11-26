@@ -11263,6 +11263,172 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn daemon_review_holds_invalidate_keys_and_refill_pack_handoffs() {
+        let (_workspace, workspace_path, connection, workspace_id) =
+            singleflight_search_fixture("Release provenance requires verified checksums.");
+        let memory_ids = [
+            "mem_01J00000000000000000000091",
+            "mem_01J00000000000000000000092",
+        ];
+        insert_singleflight_memory(
+            &connection,
+            &workspace_id,
+            memory_ids[1],
+            "Release provenance includes verified checksums and manifests.",
+        );
+        fs::write(
+            workspace_path.join(".ee/config.toml"),
+            "[memory]\ninclude_global = false\n",
+        )
+        .unwrap();
+        for (ordinal, memory_id) in memory_ids.iter().enumerate() {
+            connection
+                .insert_search_index_job(
+                    &format!("sidx_{:026}", ordinal + 401),
+                    &crate::db::CreateSearchIndexJobInput {
+                        workspace_id: workspace_id.clone(),
+                        job_type: crate::db::SearchIndexJobType::SingleDocument,
+                        document_source: Some("memory".to_owned()),
+                        document_id: Some((*memory_id).to_owned()),
+                        documents_total: 1,
+                    },
+                )
+                .unwrap();
+        }
+        let (mut options, _, _, _) = DaemonSearchParams::from_value(&serde_json::json!({
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+            "query": "release",
+            "workspacePath": workspace_path,
+            "sourceMode": "lexical_only",
+            "strictSourceMode": true,
+            "relevanceFloor": 0.0,
+            "limit": 1,
+            "requireCachedLocalEmbedder": false,
+        }))
+        .unwrap()
+        .into_search_parts(&workspace_path.display().to_string())
+        .unwrap();
+        options.no_global = true;
+        let keys = || {
+            (
+                daemon_search_singleflight_key(&options, None, &[])
+                    .expect("search authority")
+                    .key_hash,
+                daemon_pack_search_singleflight_key(&options, false, None)
+                    .expect("pack authority")
+                    .key_hash,
+            )
+        };
+        let retrieve = || {
+            run_daemon_pack_search(&options, None, None, false, true)
+                .0
+                .expect("complete source retrieval")
+        };
+        let baseline_keys = keys();
+        let generation = connection.total_workspace_generation().unwrap();
+        let feedback = connection.feedback_events_fingerprint(&workspace_id).unwrap();
+        let mut previous = retrieve();
+        assert_eq!(previous.report.results.len(), 1);
+        let first_id = previous.report.results[0].doc_id.clone();
+        assert!(previous.snapshot_matches(&options, &connection));
+
+        for (ordinal, status) in ["rejected", "released"].into_iter().enumerate() {
+            let quarantine_id = format!("fq_{:026}", ordinal + 401);
+            connection
+                .insert_feedback_quarantine(
+                    &quarantine_id,
+                    &crate::db::CreateFeedbackQuarantineInput {
+                        workspace_id: workspace_id.clone(),
+                        source_id: "test-review-source".to_owned(),
+                        target_type: "memory".to_owned(),
+                        target_id: first_id.clone(),
+                        signal: "harmful".to_owned(),
+                        weight: 1.0,
+                        source_type: "outcome_observed".to_owned(),
+                        proposed_event_id: None,
+                        recorded_at: "2026-01-01T00:00:00Z".to_owned(),
+                        reason: "pending review fixture".to_owned(),
+                        event_reason: None,
+                        evidence_json: None,
+                        session_id: None,
+                        raw_event_hash: format!("blake3:{}", "a".repeat(64)),
+                    },
+                )
+                .unwrap();
+            let held_keys = keys();
+            assert_ne!(
+                held_keys.0, baseline_keys.0,
+                "pending hold invalidates search"
+            );
+            assert_ne!(
+                held_keys.1, baseline_keys.1,
+                "pending hold invalidates pack"
+            );
+            assert!(!previous.snapshot_matches(&options, &connection));
+            let held = retrieve();
+            assert!(held.snapshot_matches(&options, &connection));
+            assert_eq!(
+                held.report.results.len(),
+                1,
+                "refill beyond the held top hit"
+            );
+            assert_ne!(held.report.results[0].doc_id, first_id);
+            let (canonical, _) =
+                run_daemon_search(&options, None, &[], None, None, false).unwrap();
+            assert_eq!(canonical.report.results.len(), 1);
+            assert_eq!(
+                canonical.report.results[0].doc_id,
+                held.report.results[0].doc_id
+            );
+            assert_eq!(
+                connection.total_workspace_generation().unwrap(),
+                generation
+            );
+            assert_eq!(
+                connection.feedback_events_fingerprint(&workspace_id).unwrap(),
+                feedback,
+                "quarantined feedback never entered the accepted ledger"
+            );
+
+            assert!(
+                connection
+                    .update_feedback_quarantine_status(
+                        &quarantine_id,
+                        status,
+                        Some("test-reviewer"),
+                        None,
+                    )
+                    .unwrap()
+            );
+            let restored_keys = keys();
+            assert_ne!(restored_keys.0, held_keys.0, "review invalidates search");
+            assert_ne!(restored_keys.1, held_keys.1, "review invalidates pack");
+            assert_eq!(restored_keys, baseline_keys, "no pending holds remain");
+            assert!(!held.snapshot_matches(&options, &connection));
+            previous = retrieve();
+            assert!(previous.snapshot_matches(&options, &connection));
+            assert_eq!(previous.report.results.len(), 1);
+            assert_eq!(previous.report.results[0].doc_id, first_id);
+            assert_eq!(
+                connection.total_workspace_generation().unwrap(),
+                generation
+            );
+            assert_eq!(
+                connection.feedback_events_fingerprint(&workspace_id).unwrap(),
+                feedback
+            );
+        }
+
+        connection
+            .execute_raw("ALTER TABLE feedback_quarantine RENAME TO withheld_review_holds")
+            .unwrap();
+        assert!(daemon_search_singleflight_key(&options, None, &[]).is_none());
+        assert!(daemon_pack_search_singleflight_key(&options, false, None).is_none());
+        assert!(!previous.snapshot_matches(&options, &connection));
+    }
+
     #[test]
     fn daemon_search_request_v2_accepts_exact_integral_decimal_limits() {
         let workspace = tempfile::tempdir().expect("tempdir");
