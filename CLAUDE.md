@@ -901,12 +901,13 @@ and five of the six are labelled `— retryable` by rch itself:
 | `[RCH-I002] ... refused (unavailable); failed admission under critical pressure (admission rejected: critical pressure (confidence=high, rule=memory_pressure>=critical_memory_pressure))` | that worker's MEMORY is exhausted; admission is rejected before any work | retrying the pin is useless, but this one is PREDICTABLE — see `pressure_state` below |
 | `[RCH-E410] ... missing source_entrypoint .../benches/._<name>.rs` | the export is on a filesystem that cannot store xattrs, so macOS wrote AppleDouble `._*` sidecars; rch's preflight REQUIRES them remotely and `.rchignore` deliberately EXCLUDES them | retrying is useless on any worker — put the export on APFS; see below |
 
-**A `queue_timeout` on a worker `rch status` shows with free slots is usually
-DISK HEADROOM, and only `rch diagnose` says so.** Measured 2026-11-25: two
-pinned `-j 2` dispatches, to workers showing 1 and 2 free slots with
-`pressure_state` warning, both waited the full ~300 s and came back
-`queue_timeout ... retryable`. Then `rch diagnose -- cargo test --locked -j 2
-...` (add `RCH_WORKER=<id>` to simulate a pin) gave the real reason:
+**A `queue_timeout` on a worker `rch status` shows with free slots can be
+DISK HEADROOM, and only `rch diagnose` says so.** Measured 2026-11-25: a
+pinned `-j 2` dispatch, to a worker `rch status` showed with free slots and
+`pressure_state` warning, waited the full ~300 s and came back
+`queue_timeout ... retryable`, as a `-j 1` pin to another worker had earlier
+that day. Then `rch diagnose -- cargo test --locked -j 2 ...` (add
+`RCH_WORKER=<id>` to simulate a pin) gave the real reason for the first:
 
 ```text
 excluded <worker> build disk headroom requires 70 GiB including active reservations
@@ -916,10 +917,14 @@ excluded <worker> build disk headroom requires 70 GiB including active reservati
 
 The requirement counts OTHER builds' reservations, which neither
 `rch status` nor `pressure_disk_free_gb` shows. That day it ran from 40 to
-100 GiB depending on the worker, so "51 GB free" was not enough. The same
-listing also caught the 4-free-slot box for `os=windows`. `diagnose`
-only simulates selection and costs nothing on the fleet, so run it, or poll
-it, before a dispatch rather than paying 300 s per refusal.
+100 GiB depending on the worker, so "51 GB free" was not enough, and in one
+later listing disk headroom excluded 10 of 19 workers. The same listing
+also caught the 4-free-slot box for `os=windows`. `diagnose` only simulates
+selection and costs nothing on the fleet, so run it, or poll it, before a
+dispatch rather than paying 300 s per refusal. A poller must key on
+`Selected: <id>`: diagnose prints `Result: No worker selected` only when
+nothing qualifies, and prints no `Result:` line on success, so a loop that
+waits for a `Result:` line naming a worker never sees one.
 
 **That sixth one is the one that will eat a whole session, because it is
 deterministic and rch calls it retryable.** Measured 2026-10-25, exit 103,
