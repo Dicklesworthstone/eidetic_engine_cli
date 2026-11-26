@@ -285,14 +285,22 @@ describe("the numbers in the prose", () => {
     expect(cliStruct("RememberArgs")).toMatch(/#\[arg\(long, default_value = "0\.8"\)\]\s*pub confidence: f32,/);
   });
 
-  test("outcome's five harmful reports an hour are OutcomeArgs' defaults, and the sixth is the one held", () => {
+  test("outcome's five harmful reports an hour are the [feedback] defaults, and the sixth is the one held", () => {
     expect(prose("outcome")).toContain("By default, after five harmful reports in an hour from one source, the next is quarantined");
     const outcome = read("src/core/outcome.rs");
     expect(outcome).toContain("pub const DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR: u32 = 5;");
     expect(outcome).toContain("pub const DEFAULT_HARMFUL_BURST_WINDOW_SECONDS: u32 = 3600;");
+    // An omitted flag follows the merged [feedback] value (fe120811d), built in as 5 per 3600 s,
+    // and falls back to the constants above.
     const args = cliStruct("OutcomeArgs");
-    expect(args).toMatch(/default_value_t = DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR\)\]\s*pub harmful_per_source_per_hour: u32,/);
-    expect(args).toMatch(/default_value_t = DEFAULT_HARMFUL_BURST_WINDOW_SECONDS\)\]\s*pub harmful_burst_window_seconds: u32,/);
+    expect(args).toMatch(/pub harmful_per_source_per_hour: Option<u32>,/);
+    expect(args).toMatch(/pub harmful_burst_window_seconds: Option<u32>,/);
+    const merge = read("src/config/merge.rs");
+    expect(merge).toContain("harmful_per_source_per_hour: Some(5),");
+    expect(merge).toContain("harmful_burst_window_seconds: Some(3600),");
+    const limits = rustFn("src/core/config_surface.rs", "fn harmful_feedback_limits_from(");
+    expect(limits).toContain(".unwrap_or(crate::core::outcome::DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR)");
+    expect(limits).toContain(".unwrap_or(crate::core::outcome::DEFAULT_HARMFUL_BURST_WINDOW_SECONDS)");
     // Five already counted pass; the one after them is quarantined.
     expect(rustFn("src/core/outcome.rs", "fn harmful_quarantine_preview(")).toContain("if existing_count < limit {");
   });

@@ -110,8 +110,9 @@ describe("the constants the toy borrows from ee", () => {
     expect(source("src/core/curate.rs")).toMatch(
       /let rule_trust_class = stored\s*\.proposed_trust_class\s*\.clone\(\)\s*\.unwrap_or_else\(\|\| "agent_assertion"\.to_owned\(\)\);/,
     );
-    const cap = body(source("src/core/rule.rs"), "fn portable_import_trust_class<");
-    expect(cap.match(/return TrustClass::AgentValidated\.as_str\(\);/g)).toHaveLength(2);
+    // Since 7b59e12e7 the cap takes and returns the normalized TrustClass rather than its string.
+    const cap = body(source("src/core/rule.rs"), "fn portable_import_trust_class(");
+    expect(cap.match(/return TrustClass::AgentValidated;/g)).toHaveLength(2);
     for (const domain of DOMAINS) {
       for (const item of domain.items) {
         if (item.kind === "anti-pattern") expect(item.trust).toBe("agent_assertion");
