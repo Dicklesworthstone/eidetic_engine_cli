@@ -46,7 +46,8 @@ const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
 // Blocking-worker cancellation is soft: after timeout the
 // closure may continue running. Keep a bounded process-local slot until the
 // blocking closure actually exits so repeated graph timeouts cannot spawn an
-// unbounded orphan tail.
+// unbounded orphan tail. A caller that finds every slot taken waits for one
+// within its own budget and times out only when that budget is spent.
 const MAX_CONCURRENT_GRAPH_BUDGET_WORKERS: usize = 8;
 const UNTRACKED_GRAPH_SNAPSHOT_ID: &str = "untracked";
 const UNTRACKED_GRAPH_PARAMS_HASH: &str = "untracked";
@@ -287,13 +288,29 @@ where
         return Err(error);
     }
 
-    let Some(worker_slot) = GraphBudgetWorkerLimiter::try_acquire(&worker_limiter) else {
-        let error = GraphError::AlgorithmTimeout {
-            algorithm: name.to_owned(),
-            timeout_ms: duration_millis_saturating(budget),
-        };
-        emit_budget_failure_telemetry(name, budget, started, telemetry, &error);
-        return Err(error);
+    // A saturated cap makes this call wait for a slot, and the wait is charged
+    // to its own budget. Refusing at once reported "exceeded timeout budget"
+    // for a run that had spent no time at all, and on a test binary with more
+    // than eight graph tests in flight it failed 4-node fixtures at random.
+    // Waiting spawns nothing, so the orphan cap still holds.
+    let worker_slot = loop {
+        if let Some(slot) = GraphBudgetWorkerLimiter::try_acquire(&worker_limiter) {
+            break slot;
+        }
+        let remaining = budget.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            let error = GraphError::AlgorithmTimeout {
+                algorithm: name.to_owned(),
+                timeout_ms: duration_millis_saturating(budget),
+            };
+            emit_budget_failure_telemetry(name, budget, started, telemetry, &error);
+            return Err(error);
+        }
+        thread::sleep(remaining.min(CANCELLATION_POLL_INTERVAL));
+        if let Err(error) = check_cancelled(cx, name) {
+            emit_budget_failure_telemetry(name, budget, started, telemetry, &error);
+            return Err(error);
+        }
     };
 
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -1825,6 +1842,59 @@ mod tests {
             "timed-out worker did not release its limiter slot after kill; active={}",
             limiter.active_count()
         ))
+    }
+
+    #[test]
+    fn run_with_budget_waits_for_a_busy_worker_slot_within_its_budget() -> TestResult {
+        // The old code refused the second call at once with AlgorithmTimeout,
+        // because the only slot was taken, so an Ok(2) here proves it waited.
+        let limiter = Arc::new(GraphBudgetWorkerLimiter::new(1));
+        let holder_started = Arc::new(AtomicBool::new(false));
+        let holder_started_for_worker = Arc::clone(&holder_started);
+        let holder_limiter = Arc::clone(&limiter);
+        let holder = thread::spawn(move || {
+            run_with_budget_observed_with_limiter(
+                &Cx::for_testing(),
+                "worker_wait_holder",
+                Duration::from_secs(5),
+                test_budget_telemetry(),
+                holder_limiter,
+                move || {
+                    holder_started_for_worker.store(true, Ordering::Release);
+                    thread::sleep(Duration::from_millis(100));
+                    1_u64
+                },
+            )
+        });
+
+        let start_deadline = Instant::now() + Duration::from_secs(1);
+        while !holder_started.load(Ordering::Acquire) && Instant::now() < start_deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            holder_started.load(Ordering::Acquire),
+            "the holder should have taken the only slot"
+        );
+        assert_eq!(limiter.active_count(), 1, "the only slot should be taken");
+
+        let waiter = run_with_budget_observed_with_limiter(
+            &Cx::for_testing(),
+            "worker_wait_waiter",
+            Duration::from_secs(5),
+            test_budget_telemetry(),
+            Arc::clone(&limiter),
+            || 2_u64,
+        );
+        assert!(
+            matches!(waiter, Ok(2)),
+            "a call that finds the cap saturated should wait for the slot, got {waiter:?}"
+        );
+
+        let held = holder
+            .join()
+            .map_err(|_| "worker-wait holder thread panicked".to_owned())?;
+        assert!(matches!(held, Ok(1)), "holder result: {held:?}");
+        Ok(())
     }
 
     #[test]
