@@ -153,7 +153,20 @@ fn eval_and_science_status_return_useful_partial_output_under_degradation() -> T
 
 #[test]
 fn doctor_fix_plan_is_ordered_and_non_destructive() -> TestResult {
-    let output = run_ee(&["doctor", "--fix-plan", "--json"])?;
+    // An empty workspace of its own (bd-uuaa3). Without one, doctor resolved
+    // to the checkout cargo runs in and planned repairs for whatever store
+    // sat there. A pinned export holds no store, so this matches what the
+    // lane already saw. `run_ee` itself keeps cargo's cwd, because
+    // `eval run --science` above reads tests/fixtures/eval relative to it.
+    let workspace = tempfile::tempdir().map_err(|error| format!("workspace tempdir: {error}"))?;
+    let workspace_arg = workspace.path().to_string_lossy().into_owned();
+    let output = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "doctor",
+        "--fix-plan",
+        "--json",
+    ])?;
     ensure(output.status.success(), "doctor --fix-plan should succeed")?;
     assert_stdout_only_machine_data(&output, "doctor --fix-plan")?;
     let json = stdout_json(&output, "doctor --fix-plan")?;
