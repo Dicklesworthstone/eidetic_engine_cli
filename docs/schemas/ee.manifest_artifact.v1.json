@@ -10,7 +10,8 @@
     "path": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^(?!.*[\\\\:])(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/]+(?:/[^/]+)*$",
+      "$comment": "Mirrors is_valid_artifact_path (src/models/claims.rs) except its whitespace-trim rule. Written without lookahead, which RE2-family engines (Go, Rust regex and regex_lite) reject.",
+      "pattern": "^(?:[^/\\\\:.][^/\\\\:]*|\\.[^/\\\\:.][^/\\\\:]*|\\.\\.[^/\\\\:]+)(?:/(?:[^/\\\\:.][^/\\\\:]*|\\.[^/\\\\:.][^/\\\\:]*|\\.\\.[^/\\\\:]+))*$",
       "description": "Portable relative path with normalized slash-separated components; absolute, dot, parent, backslash, colon, and empty components are rejected."
     },
     "artifactType": {

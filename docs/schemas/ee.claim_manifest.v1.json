@@ -55,7 +55,8 @@
         "path": {
           "type": "string",
           "minLength": 1,
-          "pattern": "^(?!.*[\\\\:])(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/]+(?:/[^/]+)*$"
+          "$comment": "Same pattern as ee.manifest_artifact.v1 path; see the $comment there.",
+          "pattern": "^(?:[^/\\\\:.][^/\\\\:]*|\\.[^/\\\\:.][^/\\\\:]*|\\.\\.[^/\\\\:]+)(?:/(?:[^/\\\\:.][^/\\\\:]*|\\.[^/\\\\:.][^/\\\\:]*|\\.\\.[^/\\\\:]+))*$"
         },
         "artifactType": {
           "type": "string",

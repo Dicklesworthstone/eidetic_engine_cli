@@ -648,7 +648,7 @@
       "minLength": 1,
       "maxLength": 160,
       "$comment": "Not an absolute path: no leading / and no drive letter. Written without lookahead, which RE2-family engines (Go, Rust regex and regex_lite) reject; under ECMA-262 it accepts exactly what ^(?!/)(?![A-Za-z]:).+$ did.",
-      "pattern": "^(?:[^/A-Za-z\r\n  ]|[A-Za-z]$|[A-Za-z][^:\r\n  ]).*$"
+      "pattern": "^(?:[^/A-Za-z\r\n\u2028\u2029]|[A-Za-z]$|[A-Za-z][^:\r\n\u2028\u2029]).*$"
     }
   },
   "examples": [

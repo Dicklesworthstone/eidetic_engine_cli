@@ -266,6 +266,115 @@ fn docs_schema_files_are_strict_draft_2020_12_documents() -> TestResult {
     Ok(())
 }
 
+/// Every `pattern` value and `patternProperties` key in a published schema
+/// must compile with regex_lite, the engine behind ee's own validator
+/// (ee::testing::validate_json_schema_instance). Three schemas used lookahead,
+/// which regex_lite, the Rust regex crate and Go's regexp all refuse. One of
+/// them, ee.hotset_manifest.v1, could not be validated at all as a result.
+#[test]
+fn docs_schema_patterns_compile_with_regex_lite() -> TestResult {
+    let schema_dir = repo_root().join("docs").join("schemas");
+    let mut paths = fs::read_dir(&schema_dir)
+        .map_err(|error| format!("read {}: {error}", schema_dir.display()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("list {}: {error}", schema_dir.display()))?;
+    paths.retain(|path| {
+        path.extension()
+            .is_some_and(|extension| extension == "json")
+    });
+    paths.sort();
+    let mut checked = 0_usize;
+    let mut failures = Vec::new();
+    for path in &paths {
+        let schema = read_json(path)?;
+        collect_pattern_failures(
+            &schema,
+            &path.display().to_string(),
+            &mut checked,
+            &mut failures,
+        );
+    }
+    if checked == 0 {
+        return Err(format!(
+            "found no patterns in {} schema files; the walk is broken",
+            paths.len()
+        ));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} of {checked} schema patterns do not compile with regex_lite:\n{}",
+            failures.len(),
+            failures.join("\n")
+        ))
+    }
+}
+
+fn check_schema_pattern(pattern: &str, at: &str, checked: &mut usize, failures: &mut Vec<String>) {
+    *checked += 1;
+    if let Err(error) = regex_lite::Regex::new(pattern) {
+        failures.push(format!("{at}: {pattern:?}: {error}"));
+    }
+}
+
+/// Keywords whose values map arbitrary names to subschemas. The names are not
+/// keywords: a property called `default` or `pattern` is still a schema.
+const SUBSCHEMA_MAP_KEYWORDS: [&str; 5] = [
+    "properties",
+    "$defs",
+    "definitions",
+    "patternProperties",
+    "dependentSchemas",
+];
+
+/// Keywords whose values are instance data, not schema: a `pattern` key
+/// inside an example is a value, not a regex.
+const INSTANCE_DATA_KEYWORDS: [&str; 4] = ["examples", "default", "const", "enum"];
+
+fn collect_pattern_failures(
+    value: &Value,
+    location: &str,
+    checked: &mut usize,
+    failures: &mut Vec<String>,
+) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let keyword = key.as_str();
+                let child_location = format!("{location}/{key}");
+                match child {
+                    Value::Object(subschemas) if SUBSCHEMA_MAP_KEYWORDS.contains(&keyword) => {
+                        for (name, subschema) in subschemas {
+                            if keyword == "patternProperties" {
+                                check_schema_pattern(name, &child_location, checked, failures);
+                            }
+                            collect_pattern_failures(
+                                subschema,
+                                &format!("{child_location}/{name}"),
+                                checked,
+                                failures,
+                            );
+                        }
+                    }
+                    _ if INSTANCE_DATA_KEYWORDS.contains(&keyword) => {}
+                    Value::String(pattern) if keyword == "pattern" => {
+                        check_schema_pattern(pattern, &child_location, checked, failures);
+                    }
+                    _ => collect_pattern_failures(child, &child_location, checked, failures),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_pattern_failures(item, &format!("{location}/{index}"), checked, failures);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[test]
 fn typed_memory_fields_schema_publishes_the_authoritative_utf8_byte_limit() -> TestResult {
     let schema = schema_doc(ee::models::memory::TYPED_MEMORY_FIELDS_SCHEMA_V2)?;
