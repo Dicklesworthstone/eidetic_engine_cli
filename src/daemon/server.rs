@@ -10438,7 +10438,10 @@ mod tests {
                     .key_hash,
             );
             if let Some(previous_keys) = &previous_keys {
-                assert_ne!(keys.0, previous_keys.0, "search uses the stored workspace ID");
+                assert_ne!(
+                    keys.0, previous_keys.0,
+                    "search uses the stored workspace ID"
+                );
                 assert_ne!(keys.1, previous_keys.1, "pack uses the stored workspace ID");
             }
             previous_keys = Some(keys);
@@ -10863,10 +10866,7 @@ mod tests {
             .expect("append fingerprint");
         assert!(
             connection
-                .apply_feedback_event_at(
-                    "fb_01J00000000000000000000091",
-                    "2026-11-26T12:00:00Z",
-                )
+                .apply_feedback_event_at("fb_01J00000000000000000000091", "2026-11-26T12:00:00Z",)
                 .expect("apply feedback")
         );
         for update in [
@@ -10881,7 +10881,10 @@ mod tests {
             }
             let changed = keys();
             assert_ne!(changed.0, previous.0, "every row edit invalidates search");
-            assert_ne!(changed.1, previous.1, "every row edit invalidates pack retrieval");
+            assert_ne!(
+                changed.1, previous.1,
+                "every row edit invalidates pack retrieval"
+            );
             assert_eq!(keys(), changed, "unchanged feedback still coalesces");
             assert_eq!(
                 connection
@@ -10899,8 +10902,14 @@ mod tests {
         assert_eq!(first.len(), second.len());
         fs::write(&path, &first).expect("initial calibration");
         let first_key = keys();
-        assert_ne!(first_key.0, previous.0, "calibration creation invalidates search");
-        assert_ne!(first_key.1, previous.1, "calibration creation invalidates pack");
+        assert_ne!(
+            first_key.0, previous.0,
+            "calibration creation invalidates search"
+        );
+        assert_ne!(
+            first_key.1, previous.1,
+            "calibration creation invalidates pack"
+        );
         let modified = fs::metadata(&path).unwrap().modified().unwrap();
         fs::write(&path, second).expect("same-size replacement");
         fs::OpenOptions::new()

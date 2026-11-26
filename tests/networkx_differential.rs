@@ -166,10 +166,7 @@ print(json.dumps({
 /// Runs a NetworkX `script` under python3 with `payload` on stdin and parses
 /// its stdout.
 #[cfg(feature = "differential-networkx")]
-fn run_networkx<T: DeserializeOwned>(
-    script: &str,
-    payload: &serde_json::Value,
-) -> TestResult<T> {
+fn run_networkx<T: DeserializeOwned>(script: &str, payload: &serde_json::Value) -> TestResult<T> {
     let mut child = Command::new("python3")
         .arg("-c")
         .arg(script)

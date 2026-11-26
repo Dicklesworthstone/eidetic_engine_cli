@@ -102,6 +102,7 @@ use crate::models::{
     MemoryScope, MemoryScopeStats, MemorySentinelResultStatus, PACK_SCHEMA_V2, PackId,
     ProvenanceUri, RedactionLevel, RuleId, TrustClass, UnitScore, posture_for_trust_class,
 };
+use crate::pack::PackScoreBreakdown;
 use crate::pack::{
     ConflictKind, ConflictRecommendedAction, ConsensusConflictReport, ContextPackProfile,
     ContextRequest, ContextRequestInput, ContextResponse, ContextResponseDegradation,
@@ -116,7 +117,6 @@ use crate::pack::{
     budget_classifier::{AdaptiveBudgetDecision, AdaptiveBudgetInput, classify_adaptive_budget},
     estimate_tokens_default, pack_item_provenance_json, redact_pack_provenance_text,
 };
-use crate::pack::PackScoreBreakdown;
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::search::RuleIndexProjection;
 use crate::search::query::QueryExclusions;
