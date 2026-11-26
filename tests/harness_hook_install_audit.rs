@@ -2007,3 +2007,236 @@ fn install_audit_deduplicates_pre_015_legacy_unmanaged_ee_hooks_across_targets()
     }
     Ok(())
 }
+
+/// The GH #41 cycle through the built binary rather than the library:
+/// legacy duplicates, then `ee hook status` reports them, then `ee hook
+/// claude-code --install` migrates them, then status is clean, then a repeat
+/// install writes nothing, then `--undo` restores the exact pre-install
+/// bytes. HOME, XDG and the settings file are isolated, and each step
+/// appends an ee.test_event.v1 line to a log kept under CARGO_TARGET_TMPDIR.
+#[cfg(unix)]
+#[test]
+fn hook_cli_cycle_migrates_legacy_duplicates_and_undo_restores_the_bytes() -> TestResult {
+    use std::fs::OpenOptions;
+
+    let binary = env!("CARGO_BIN_EXE_ee");
+    let temp = TempDir::new().map_err(|error| error.to_string())?;
+    let root = temp.path();
+    let home = root.join("home");
+    let settings = home.join(".claude").join("settings.json");
+    fs::create_dir_all(settings.parent().ok_or("settings path has no parent")?)
+        .map_err(|error| error.to_string())?;
+    let settings_arg = settings.to_str().ok_or("settings path is not UTF-8")?;
+
+    let log_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("harness_hook_cli_cycle");
+    fs::create_dir_all(&log_dir).map_err(|error| error.to_string())?;
+    let log_path = log_dir.join(format!("{}.jsonl", std::process::id()));
+    let log = |phase: &str, payload: Value| -> TestResult {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|error| format!("open {}: {error}", log_path.display()))?;
+        let entry = json!({
+            "schema": "ee.test_event.v1",
+            "suite": "harness_hook_install_audit",
+            "test": "hook_cli_cycle_migrates_legacy_duplicates_and_undo_restores_the_bytes",
+            "phase": phase,
+            "payload": payload,
+        });
+        writeln!(file, "{entry}").map_err(|error| format!("write {}: {error}", log_path.display()))
+    };
+    let ee = |args: &[&str]| -> Result<Value, String> {
+        successful(
+            isolated_command(binary, root)
+                .env("HOME", &home)
+                .args(args)
+                .output()
+                .map_err(|error| error.to_string())?,
+        )
+    };
+    let status_args: &[&str] = &[
+        "hook",
+        "status",
+        "--harness",
+        "claude-code",
+        "--settings-path",
+        settings_arg,
+        "--ee-binary",
+        binary,
+        "--json",
+    ];
+    let install_args: &[&str] = &[
+        "hook",
+        "claude-code",
+        "--install",
+        "--settings-path",
+        settings_arg,
+        "--ee-binary",
+        binary,
+        "--json",
+    ];
+    let undo_args: &[&str] = &[
+        "hook",
+        "claude-code",
+        "--undo",
+        "--settings-path",
+        settings_arg,
+        "--ee-binary",
+        binary,
+        "--json",
+    ];
+
+    // Two pre-0.15.0 PreToolUse hooks without eeManaged, one beside a user
+    // hook in the same group, and one legacy Stop hook. Two events are absent.
+    let legacy_ee = "/opt/ee-0.14.4/bin/ee";
+    let legacy_pre_edit = legacy_pre_015_hook_command("PreToolUse", legacy_ee);
+    let legacy_capture = legacy_pre_015_hook_command("Stop", legacy_ee);
+    let user_command = "echo user-pre-edit-check";
+    let matcher = "Edit|Write|MultiEdit|NotebookEdit";
+    let legacy_document = json!({
+        "userSettings": {"theme": "user-choice"},
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": matcher,
+                    "hooks": [
+                        {"type": "command", "command": legacy_pre_edit.clone(), "timeout": 10},
+                        {"type": "command", "command": user_command, "timeout": 5}
+                    ]
+                },
+                {
+                    "matcher": matcher,
+                    "hooks": [{"type": "command", "command": legacy_pre_edit, "timeout": 10}]
+                }
+            ],
+            "Stop": [
+                {"hooks": [{"type": "command", "command": legacy_capture, "timeout": 10}]}
+            ]
+        }
+    });
+    let pre_install_bytes =
+        serde_json::to_vec_pretty(&legacy_document).map_err(|error| error.to_string())?;
+    let pre_install_sha256 = sha256_hex(&pre_install_bytes);
+    fs::write(&settings, &pre_install_bytes).map_err(|error| error.to_string())?;
+    log(
+        "arrange",
+        json!({"settings": settings_arg, "home": home.display().to_string(), "sha256": pre_install_sha256}),
+    )?;
+
+    // 1. status reports the PreToolUse duplicate, with the repair, and writes nothing.
+    let before = ee(status_args)?;
+    let audit = &before["data"]["installAudit"];
+    assert_eq!(audit["duplicateEventCount"], 1, "{before:#}");
+    assert_eq!(audit["duplicateHookCount"], 1, "{before:#}");
+    let duplicate = audit["findings"]
+        .as_array()
+        .ok_or("status findings must be an array")?
+        .iter()
+        .find(|finding| finding["code"] == "duplicate_hook")
+        .ok_or_else(|| format!("status must report duplicate_hook: {before:#}"))?;
+    assert_eq!(duplicate["event"], "PreToolUse");
+    assert_eq!(
+        duplicate["hookCounts"],
+        json!({
+            "managedCount": 0,
+            "legacyUnmanagedCount": 2,
+            "eeHookCount": 2,
+            "duplicateCount": 1
+        })
+    );
+    let degraded = before["degraded"]
+        .as_array()
+        .ok_or("status degraded must be an array")?;
+    let degraded_duplicate = degraded
+        .iter()
+        .find(|entry| entry["code"] == "duplicate_hook")
+        .ok_or_else(|| format!("degraded[] must carry duplicate_hook: {before:#}"))?;
+    assert_eq!(
+        degraded_duplicate["repairCommand"],
+        "ee hook claude-code --install --workspace . --json"
+    );
+    assert_eq!(
+        sha256_hex(&fs::read(&settings).map_err(|error| error.to_string())?),
+        pre_install_sha256,
+        "status must not write the settings file"
+    );
+    log(
+        "status_before",
+        json!({"duplicateEventCount": audit["duplicateEventCount"], "duplicateHookCount": audit["duplicateHookCount"], "findingCodes": audit["findings"].as_array().map(|findings| findings.iter().map(|finding| finding["code"].clone()).collect::<Vec<_>>())}),
+    )?;
+
+    // 2. install migrates the legacy hooks and keeps the user's hook and settings.
+    let installed = ee(install_args)?;
+    let installed_audit = &installed["data"]["harnessInstall"]["installAudit"];
+    assert_eq!(installed_audit["status"], "fresh", "{installed:#}");
+    assert_eq!(installed_audit["duplicateHookCount"], 0, "{installed:#}");
+    let installed_bytes = fs::read(&settings).map_err(|error| error.to_string())?;
+    let installed_text = String::from_utf8_lossy(&installed_bytes);
+    assert_eq!(
+        installed_text.matches(user_command).count(),
+        1,
+        "the user's hook must survive exactly once: {installed_text}"
+    );
+    assert!(
+        !installed_text.contains(legacy_ee),
+        "no legacy hook may survive the migration: {installed_text}"
+    );
+    let installed_document: Value =
+        serde_json::from_slice(&installed_bytes).map_err(|error| error.to_string())?;
+    assert_eq!(installed_document["userSettings"]["theme"], "user-choice");
+    log(
+        "install",
+        json!({"status": installed_audit["status"], "writtenPaths": installed["data"]["harnessInstall"]["writtenPaths"]}),
+    )?;
+
+    // 3. status is clean afterwards.
+    let after = ee(status_args)?;
+    let after_audit = &after["data"]["installAudit"];
+    assert_eq!(after_audit["status"], "fresh", "{after:#}");
+    assert_eq!(after_audit["duplicateEventCount"], 0, "{after:#}");
+    assert_eq!(after_audit["duplicateHookCount"], 0, "{after:#}");
+    assert!(
+        after["degraded"]
+            .as_array()
+            .ok_or("status degraded must be an array")?
+            .iter()
+            .all(|entry| entry["code"] != "duplicate_hook"),
+        "{after:#}"
+    );
+    log(
+        "status_after",
+        json!({"status": after_audit["status"], "duplicateHookCount": after_audit["duplicateHookCount"]}),
+    )?;
+
+    // 4. a repeat install writes nothing and leaves the bytes alone.
+    let repeated = ee(install_args)?;
+    assert_eq!(
+        repeated["data"]["harnessInstall"]["writtenPaths"],
+        json!([]),
+        "{repeated:#}"
+    );
+    assert_eq!(
+        fs::read(&settings).map_err(|error| error.to_string())?,
+        installed_bytes
+    );
+    log(
+        "reinstall",
+        json!({"writtenPaths": repeated["data"]["harnessInstall"]["writtenPaths"]}),
+    )?;
+
+    // 5. undo restores the exact pre-install bytes.
+    let undone = ee(undo_args)?;
+    let restored_sha256 = sha256_hex(&fs::read(&settings).map_err(|error| error.to_string())?);
+    log(
+        "undo",
+        json!({"sha256": restored_sha256, "matchesPreInstall": restored_sha256 == pre_install_sha256}),
+    )?;
+    assert_eq!(
+        restored_sha256,
+        pre_install_sha256,
+        "undo must restore the pre-install bytes: {undone:#}\nlog: {}",
+        log_path.display()
+    );
+    Ok(())
+}
