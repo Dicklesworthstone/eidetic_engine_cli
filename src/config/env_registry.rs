@@ -99,6 +99,8 @@ pub enum EnvVar {
     DaemonEnableEcho,
     /// `EE_DAEMON_MAX_INFLIGHT`
     DaemonMaxInflight,
+    /// `EE_DAEMON_SEARCH_SINGLEFLIGHT`
+    DaemonSearchSingleflight,
     /// `EE_DAEMON_SEARCH_TIMEOUT_MS`
     DaemonSearchTimeoutMs,
     /// `EE_DAEMON_WARM`
@@ -359,6 +361,7 @@ impl EnvVar {
             Self::CurationDerivedPreviewLimit,
             Self::DaemonEnableEcho,
             Self::DaemonMaxInflight,
+            Self::DaemonSearchSingleflight,
             Self::DaemonSearchTimeoutMs,
             Self::DaemonWarm,
             Self::DatabasePath,
@@ -501,6 +504,7 @@ impl EnvVar {
             Self::CurationDerivedPreviewLimit => "EE_CURATION_DERIVED_PREVIEW_LIMIT",
             Self::DaemonEnableEcho => "EE_DAEMON_ENABLE_ECHO",
             Self::DaemonMaxInflight => "EE_DAEMON_MAX_INFLIGHT",
+            Self::DaemonSearchSingleflight => "EE_DAEMON_SEARCH_SINGLEFLIGHT",
             Self::DaemonSearchTimeoutMs => "EE_DAEMON_SEARCH_TIMEOUT_MS",
             Self::DaemonWarm => "EE_DAEMON_WARM",
             Self::DatabasePath => "EE_DATABASE_PATH",
@@ -683,6 +687,9 @@ impl EnvVar {
             Self::DaemonEnableEcho => "Enable the diagnostic `ee.daemon.echo` round-trip method.",
             Self::DaemonMaxInflight => {
                 "Override the cap on in-flight `ee daemon` worker threads; saturated accepts emit `daemon_overloaded`."
+            }
+            Self::DaemonSearchSingleflight => {
+                "Set to `on` to let `ee daemon` run one search for identical concurrent search requests."
             }
             Self::DaemonSearchTimeoutMs => {
                 "Override the bounded deadline `ee search --use-daemon` gives the daemon before falling back to in-process search."
@@ -1043,6 +1050,7 @@ impl EnvVar {
             Self::McpMaxRequestBytes => Some("16777216"),
             Self::DaemonEnableEcho => Some("false"),
             Self::DaemonMaxInflight => Some("32"),
+            Self::DaemonSearchSingleflight => Some("false"),
             Self::DaemonSearchTimeoutMs => Some("5000"),
             Self::DaemonWarm => Some("on"),
             Self::DisableAdaptive => Some("false"),
@@ -1086,7 +1094,8 @@ impl EnvVar {
             | Self::Workspace
             | Self::WorkspaceRegistry => "paths",
             Self::DaemonEnableEcho | Self::DiagForceCapabilityGap => "diagnostics",
-            Self::DaemonSearchTimeoutMs
+            Self::DaemonSearchSingleflight
+            | Self::DaemonSearchTimeoutMs
             | Self::DaemonWarm
             | Self::NearbyStoreScanBudgetMs
             | Self::ExplanationBudgetMs => "performance",

@@ -40,10 +40,42 @@ at the same instant — do **not** share a group and each runs its own
 computation. This is intentional for v1: it needs no shared state, no liveness
 protocol, and cannot serve a stale cross-process result.
 
-The currently wired surface is graph feature enrichment
-(`graph_feature_enrichment`). The single-flight posture for every configured
+Two surfaces are wired: graph feature enrichment (`graph_feature_enrichment`)
+and daemon search (`search`, below). The single-flight posture for every
 surface is reported, redaction-safe, under `ee status --json` and
 `ee doctor --json` at `data.singleFlight` (and folded into `ee swarm brief`).
+Those commands report their own process. The daemon's counts are in its
+`ee.daemon.telemetry` response.
+
+## Daemon search (opt-in)
+
+`ee daemon` serves each connection on its own worker, so agents running
+`ee search --use-daemon` at the same moment reach the same process. With
+`EE_DAEMON_SEARCH_SINGLEFLIGHT=on` in the daemon's environment, identical
+concurrent `ee.daemon.search` requests run one search (bd-d67os.9). It is off
+by default.
+
+- **The key** holds the exact query and every search option, the kind and
+  typed field filters, the workspace store's generation, the user-global
+  store's generation when the search may read it, the published index
+  generation and the merged config. A request whose store is missing or whose
+  generation cannot be read runs on its own.
+- **Audit.** The shared search runs without its retrieval audit, and every
+  request then records its own. N coalesced requests leave N
+  `search.executed` rows, as N uncoalesced ones do.
+- **Not coalesced:** `ee.daemon.pack_search`, context packs and the swarm
+  brief. Each needs the same review of what it writes before it can share a
+  result.
+
+Two things a follower can see that an uncoalesced request would not, both
+bounded by the leader's run time:
+
+- **Feedback edits.** Score calibration reads the feedback ledger, and no
+  generation covers that ledger. A feedback event written while an identical
+  search is running does not key the next request apart from it.
+- **Reference time.** A request without `as_of` evaluates validity windows at
+  the moment its search starts. A follower gets the leader's moment, which is
+  slightly before its own arrival.
 
 ## Agent UX
 
@@ -54,7 +86,8 @@ What an agent can rely on today:
   one computation and all callers get a byte-identical result.
 - **Separate commands are independent.** Running `ee search '<q>'` in two shells
   does not coalesce across the two processes. If you want the savings, batch the
-  work inside one invocation rather than spawning N identical processes.
+  work inside one invocation, or send both searches through a daemon running
+  with `EE_DAEMON_SEARCH_SINGLEFLIGHT=on` (`ee search --use-daemon`).
 - **Writes are safe.** A coalesced read can never return data from before a
   write you just made in the same workspace: the generation in the key changes,
   so post-write reads re-run.

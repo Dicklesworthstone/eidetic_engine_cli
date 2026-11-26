@@ -70,8 +70,8 @@ use crate::core::context::{
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, PERFORMANCE_FALLBACK_REDACTED_MESSAGE,
     SearchAdvisoryDeliveryReservation, SearchAdvisorySession, SearchAdvisorySettlement,
-    SearchDedupMode, SearchOptions, SearchPerformanceTrace, SearchReport, SearchSourceMode,
-    TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
+    SearchDedupMode, SearchOptions, SearchPerformanceRun, SearchPerformanceTrace, SearchReport,
+    SearchSourceMode, TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
     run_pack_search_with_runtime_and_cached_local_embedder, run_search_for_daemon_with_runtime,
     run_search_unaudited_with_runtime,
 };
@@ -79,7 +79,10 @@ use crate::db::DatabaseConfig;
 use crate::db::read_pool::{
     PoolConfig, ProcessReadPoolResidency, registered_process_read_pool, retain_process_read_pools,
 };
-use crate::models::{MemoryScope, QueryFilters, RedactionLevel};
+use crate::models::{
+    MemoryScope, QueryFilters, RedactionLevel, SingleFlightKey, SingleFlightKeyInput,
+    SingleFlightSurface,
+};
 use crate::output::{ContextJsonRenderOptions, render_context_response_json_with_options};
 use crate::pack::{ContextPackProfile, DEFAULT_COORDINATION_STALE_AFTER_MS, PackResourceProfile};
 use crate::search::SpeedMode;
@@ -4896,12 +4899,13 @@ fn dispatch_search_with_runtime(
     } else {
         None
     };
-    let search_run = match run_search_for_daemon_with_runtime(
+    let (search_run, singleflight_degraded_codes) = match run_daemon_search(
         &options,
         kind.as_deref(),
         &field_filters,
         request_runtime,
         loaded,
+        crate::core::singleflight::daemon_search_singleflight_enabled(),
     ) {
         Ok(run) => run,
         Err(error) => {
@@ -4965,6 +4969,9 @@ fn dispatch_search_with_runtime(
     for code in response_degraded_codes {
         response = response.with_degraded(code);
     }
+    for code in singleflight_degraded_codes {
+        response = response.with_degraded(code);
+    }
     if !daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
         return DaemonResponse::err(
             request.request_id.clone(),
@@ -4975,6 +4982,150 @@ fn dispatch_search_with_runtime(
         );
     }
     pending_delivery.finish(response, defer_advisory_until_socket_write)
+}
+
+/// Run the canonical search for one daemon request, and return it with any
+/// single-flight degraded codes.
+///
+/// With `coalesce` (`EE_DAEMON_SEARCH_SINGLEFLIGHT`) on, identical concurrent
+/// requests share one search (bd-d67os.9). The shared search runs without its
+/// retrieval audit and every request then records its own, so coalescing
+/// changes how often the search runs and nothing that a request returns or
+/// leaves behind. A request whose key cannot be built runs on its own.
+fn run_daemon_search(
+    options: &SearchOptions,
+    kind: Option<&str>,
+    field_filters: &[TypedMemoryFieldFilter],
+    request_runtime: Option<&asupersync::runtime::Runtime>,
+    loaded: Option<crate::core::index::CachedLocalEmbedder>,
+    coalesce: bool,
+) -> Result<(SearchPerformanceRun, Vec<&'static str>), String> {
+    let key = if coalesce {
+        daemon_search_singleflight_key(options, kind, field_filters)
+    } else {
+        None
+    };
+    let Some(key) = key else {
+        return run_search_for_daemon_with_runtime(
+            options,
+            kind,
+            field_filters,
+            request_runtime,
+            loaded,
+            true,
+        )
+        .map(|run| (run, Vec::new()))
+        .map_err(|error| error.to_string());
+    };
+    let request_start = Instant::now();
+    let shared = crate::core::singleflight::run_daemon_search(&key, || {
+        run_search_for_daemon_with_runtime(
+            options,
+            kind,
+            field_filters,
+            request_runtime,
+            loaded,
+            false,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .map_err(|error| match error {
+        // The search's own error, worded as an uncoalesced request words it.
+        crate::core::singleflight::SingleFlightError::LeaderFailed { message, .. } => message,
+        other => other.to_string(),
+    })?;
+    let mut run = shared.value;
+    run.finish_coalesced_daemon_request(options, request_start);
+    Ok((run, shared.degraded_codes))
+}
+
+/// How long building a key waits for its generation-read connection. Each
+/// holder runs one small query, so a burst of identical requests passes
+/// through it quickly.
+const DAEMON_SEARCH_KEY_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// The single-flight key for one daemon search, or `None` when something the
+/// key needs cannot be read, in which case the request runs on its own.
+///
+/// Two requests may share a search only when it would have answered both the
+/// same, so the key carries everything the search reads:
+/// - the request: every `SearchOptions` field, the kind and the typed field
+///   filters. They enter through the derived `Debug`, which picks up a field
+///   added to `SearchOptions` later without anyone remembering to add it
+///   here. The key is process-local and never stored, so that format need
+///   not be stable across versions;
+/// - the stores: the workspace store's generation, the user-global store's
+///   when this search may read it, and the published index generation. A
+///   write or rebuild that lands before a request arrives therefore keys it
+///   apart from a search that started earlier;
+/// - the merged config, which no generation covers.
+fn daemon_search_singleflight_key(
+    options: &SearchOptions,
+    kind: Option<&str>,
+    field_filters: &[TypedMemoryFieldFilter],
+) -> Option<SingleFlightKey> {
+    let workspace_generation = daemon_search_store_generation(&options.resolve_database_path())?;
+    let global_generation = if options.no_global {
+        None
+    } else {
+        daemon_search_global_generation()?
+    };
+    let index_generation =
+        crate::core::index::published_index_generation(&options.resolve_index_dir());
+    let config = crate::core::config_surface::merged_workspace_config(&options.workspace_path)
+        .ok()?
+        .values;
+
+    let request = format!("{options:?} kind={kind:?} filters={field_filters:?}");
+    let global_generation = format!("{global_generation:?}");
+    let config = format!("{config:?}");
+    let option_pairs = [
+        ("request", request.as_str()),
+        ("global_generation", global_generation.as_str()),
+        ("merged_config", config.as_str()),
+    ];
+    let workspace_identity = options.workspace_path.to_string_lossy();
+    let mut input = SingleFlightKeyInput::new(
+        SingleFlightSurface::Search,
+        &workspace_identity,
+        workspace_generation,
+        DAEMON_SEARCH_RESPONSE_SCHEMA_V4,
+    );
+    input.index_generation = index_generation;
+    input.query_text = Some(&options.query);
+    input.source_mode = Some(options.source_mode.as_str());
+    input.option_pairs = &option_pairs;
+    Some(SingleFlightKey::from_input(&input))
+}
+
+/// The user-global store's generation: `Some(None)` when there is no global
+/// store for the search to read, `None` when one exists but cannot be read.
+fn daemon_search_global_generation() -> Option<Option<u64>> {
+    let Ok(paths) = crate::core::global_store::default_global_store_paths_from_env() else {
+        return Some(None);
+    };
+    if !paths.database_path.exists() {
+        return Some(None);
+    }
+    daemon_search_store_generation(&paths.database_path).map(Some)
+}
+
+/// A store's total generation, or `None` when the store is missing or cannot
+/// be read.
+///
+/// It reads through a pool of its own. The search pins its snapshot on
+/// another pool for as long as it runs, and waiting on that pool would hold
+/// every follower back until its leader had finished.
+fn daemon_search_store_generation(database_path: &Path) -> Option<u64> {
+    if !database_path.exists() {
+        return None;
+    }
+    let pool = registered_process_read_pool(
+        DatabaseConfig::file(database_path.to_path_buf()),
+        PoolConfig::default_single().with_acquire_timeout(DAEMON_SEARCH_KEY_ACQUIRE_TIMEOUT),
+    );
+    let connection = pool.acquire().ok()?;
+    connection.total_workspace_generation().ok()
 }
 
 fn daemon_search_advisory_workspace_id(options: &SearchOptions) -> String {
@@ -10410,6 +10561,188 @@ mod tests {
         let pack_resp =
             dispatch_pack_search_with_runtime(&pack_req, &shutdown, &pools, Some(&runtime), None);
         assert!(pack_resp.error.is_none(), "{pack_resp:?}");
+    }
+
+    /// A migrated workspace store holding one memory, for the single-flight
+    /// tests (bd-d67os.9).
+    fn singleflight_search_fixture(
+        content: &str,
+    ) -> (tempfile::TempDir, PathBuf, crate::db::DbConnection, String) {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let workspace_path = fs::canonicalize(workspace.path()).expect("canonical workspace");
+        let ee_dir = workspace_path.join(".ee");
+        fs::create_dir_all(&ee_dir).expect("create .ee");
+        let connection = crate::db::DbConnection::open_file(ee_dir.join("ee.db")).expect("open db");
+        connection.migrate().expect("migrate db");
+        let workspace_id = crate::core::workspace::stable_workspace_id(&workspace_path);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("singleflight".to_owned()),
+                },
+            )
+            .expect("insert workspace");
+        insert_singleflight_memory(
+            &connection,
+            &workspace_id,
+            "mem_01J00000000000000000000091",
+            content,
+        );
+        (workspace, workspace_path, connection, workspace_id)
+    }
+
+    fn insert_singleflight_memory(
+        connection: &crate::db::DbConnection,
+        workspace_id: &str,
+        memory_id: &str,
+        content: &str,
+    ) {
+        connection
+            .insert_memory(
+                memory_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: content.to_owned(),
+                    workflow_id: None,
+                    tags: vec![],
+                    confidence: 0.9,
+                    importance: 0.8,
+                    utility: 0.7,
+                    provenance_uri: None,
+                    trust_class: "agent_validated".to_owned(),
+                    trust_subclass: None,
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("insert memory");
+    }
+
+    fn singleflight_search_parts(
+        workspace_path: &Path,
+        query: &str,
+        limit: u32,
+    ) -> (SearchOptions, Option<String>, Vec<TypedMemoryFieldFilter>) {
+        let (options, kind, filters, _) = DaemonSearchParams::from_value(&serde_json::json!({
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+            "query": query,
+            "workspacePath": workspace_path,
+            "sourceMode": "lexical_only",
+            "speed": "instant",
+            "limit": limit,
+        }))
+        .expect("search params")
+        .into_search_parts(&workspace_path.display().to_string())
+        .expect("search parts");
+        (options, kind, filters)
+    }
+
+    /// bd-d67os.9: a search may be shared only by requests it would have
+    /// answered the same. The key moves with the exact query (not just its
+    /// lowercased shape), with any option and with a write to the store. A
+    /// workspace with no store to read a generation from gets no key, so its
+    /// request runs on its own.
+    #[test]
+    fn daemon_search_singleflight_key_moves_with_the_request_and_with_a_write() {
+        let (_workspace, workspace_path, connection, workspace_id) =
+            singleflight_search_fixture("Singleflight key fixture memory");
+        let key = |query: &str, limit: u32| {
+            let (options, kind, filters) = singleflight_search_parts(&workspace_path, query, limit);
+            daemon_search_singleflight_key(&options, kind.as_deref(), &filters)
+                .expect("an initialized store yields a key")
+                .key_hash
+        };
+        let base = key("Singleflight key", 5);
+        assert_eq!(key("Singleflight key", 5), base, "identical requests share");
+        assert_ne!(key("singleflight key", 5), base, "the exact query");
+        assert_ne!(key("Singleflight key", 6), base, "every option");
+        insert_singleflight_memory(
+            &connection,
+            &workspace_id,
+            "mem_01J00000000000000000000092",
+            "A memory written after the first key",
+        );
+        assert_ne!(key("Singleflight key", 5), base, "a write to the store");
+
+        let bare = tempfile::tempdir().expect("bare workspace");
+        let bare_path = fs::canonicalize(bare.path()).expect("canonical bare workspace");
+        let (options, kind, filters) = singleflight_search_parts(&bare_path, "Singleflight key", 5);
+        assert!(
+            daemon_search_singleflight_key(&options, kind.as_deref(), &filters).is_none(),
+            "no store, no key"
+        );
+    }
+
+    /// bd-d67os.9: requests that share a search get what an uncoalesced
+    /// request gets, and each records its own retrieval audit, as that many
+    /// uncoalesced requests would. Whether the requests below overlap depends
+    /// on scheduling; neither property does.
+    #[test]
+    fn coalesced_daemon_searches_return_the_uncoalesced_result_and_audit_each_request() {
+        let (_workspace, workspace_path, connection, _workspace_id) =
+            singleflight_search_fixture("Daemon singleflight coalescing parity memory");
+        let (options, kind, filters) =
+            singleflight_search_parts(&workspace_path, "singleflight coalescing parity", 5);
+        let executed = || {
+            connection
+                .list_audit_by_action(crate::db::audit_actions::SEARCH_EXECUTED, None)
+                .expect("audit rows")
+                .len()
+        };
+        let before = executed();
+        let (baseline, codes) =
+            run_daemon_search(&options, kind.as_deref(), &filters, None, None, false)
+                .expect("uncoalesced search");
+        assert!(codes.is_empty(), "{codes:?}");
+        assert!(
+            !baseline.report.results.is_empty(),
+            "the fixture memory must be found"
+        );
+        assert_eq!(
+            executed(),
+            before + 1,
+            "one audit for the uncoalesced search"
+        );
+        let expected = serde_json::to_value(&baseline.report.results).expect("encode results");
+
+        const REQUESTS: usize = 4;
+        let barrier = std::sync::Barrier::new(REQUESTS);
+        let runs: Vec<_> = thread::scope(|scope| {
+            let handles: Vec<_> = (0..REQUESTS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        run_daemon_search(&options, kind.as_deref(), &filters, None, None, true)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("search thread"))
+                .collect()
+        });
+        for run in runs {
+            let (run, _codes) = run.expect("coalesced search");
+            assert_eq!(
+                serde_json::to_value(&run.report.results).expect("encode results"),
+                expected
+            );
+            let request_totals = run
+                .performance
+                .timings()
+                .filter(|(name, _)| *name == "search::requestTotal")
+                .count();
+            assert_eq!(request_totals, 1, "each request closes one request span");
+        }
+        assert_eq!(
+            executed(),
+            before + 1 + REQUESTS,
+            "every coalesced request records its own audit"
+        );
     }
 
     #[test]

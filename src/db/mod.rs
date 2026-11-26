@@ -13167,6 +13167,26 @@ impl DbConnection {
             .map(|row| required_u64(row, 0, DbOperation::Query, "workspace_generation"))
             .transpose()
     }
+
+    /// The sum of every workspace's generation in this store.
+    ///
+    /// The generation triggers only ever increment, so this moves on every
+    /// source write to any workspace in the store without having to resolve
+    /// which workspace id a store bound. The daemon keys coalesced searches on
+    /// it (bd-d67os.9), so a write always starts a fresh search. It can fall
+    /// only when a workspace row is deleted, which cascades its generation row
+    /// away.
+    pub fn total_workspace_generation(&self) -> Result<u64> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT generation FROM workspace_generations",
+            &[],
+        )?;
+        rows.iter().try_fold(0_u64, |total, row| {
+            required_u64(row, 0, DbOperation::Query, "workspace_generation")
+                .map(|generation| total.saturating_add(generation))
+        })
+    }
 }
 
 fn stored_workspace_from_row(row: &Row) -> Result<StoredWorkspace> {

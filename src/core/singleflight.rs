@@ -50,6 +50,16 @@ static GRAPH_FEATURE_ENRICHMENT_GROUP: OnceLock<
     SingleFlightGroup<crate::graph::GraphFeatureEnrichmentReport>,
 > = OnceLock::new();
 
+/// How long a daemon search follower waits for the leader before running the
+/// search itself. It matches the release search deadline, so a follower gives
+/// up only once the leader's own request could no longer succeed. It is a
+/// fixed value rather than that deadline, whose debug-build value (300 s)
+/// would make the reported posture differ by build profile.
+const DAEMON_SEARCH_FOLLOWER_TIMEOUT: Duration = Duration::from_secs(60);
+
+static DAEMON_SEARCH_GROUP: OnceLock<SingleFlightGroup<crate::core::search::SearchPerformanceRun>> =
+    OnceLock::new();
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SingleFlightRole {
     Leader,
@@ -559,27 +569,71 @@ impl SingleFlightCounters {
 
 #[must_use]
 pub fn singleflight_posture_report() -> SingleFlightPostureReport {
-    let graph_feature_enrichment = GRAPH_FEATURE_ENRICHMENT_GROUP.get().map_or_else(
+    SingleFlightPostureReport::from_surfaces(vec![
+        surface_posture(
+            GRAPH_FEATURE_ENRICHMENT_GROUP.get(),
+            SingleFlightSurface::GraphFeatureEnrichment,
+            true,
+            GRAPH_FEATURE_ENRICHMENT_FOLLOWER_TIMEOUT,
+        ),
+        surface_posture(
+            DAEMON_SEARCH_GROUP.get(),
+            SingleFlightSurface::Search,
+            daemon_search_singleflight_enabled(),
+            DAEMON_SEARCH_FOLLOWER_TIMEOUT,
+        ),
+    ])
+}
+
+/// A surface's posture, with zeroed counters until its group first runs.
+fn surface_posture<T: Clone>(
+    group: Option<&SingleFlightGroup<T>>,
+    surface: SingleFlightSurface,
+    configured: bool,
+    follower_timeout: Duration,
+) -> SingleFlightSurfacePosture {
+    group.map_or_else(
         || {
             SingleFlightSurfacePosture::new(
-                SingleFlightSurface::GraphFeatureEnrichment,
-                true,
+                surface,
+                configured,
                 0,
                 SingleFlightSurfaceCounters::default(),
-                duration_ms(GRAPH_FEATURE_ENRICHMENT_FOLLOWER_TIMEOUT),
+                duration_ms(follower_timeout),
                 None,
             )
         },
-        |group| {
-            group.posture(
-                SingleFlightSurface::GraphFeatureEnrichment,
-                true,
-                GRAPH_FEATURE_ENRICHMENT_FOLLOWER_TIMEOUT,
-            )
-        },
-    );
+        |group| group.posture(surface, configured, follower_timeout),
+    )
+}
 
-    SingleFlightPostureReport::from_surfaces(vec![graph_feature_enrichment])
+/// Whether this process coalesces identical concurrent `ee.daemon.search`
+/// requests (`EE_DAEMON_SEARCH_SINGLEFLIGHT`, off by default; bd-d67os.9).
+#[must_use]
+pub fn daemon_search_singleflight_enabled() -> bool {
+    crate::config::env_registry::read(crate::config::EnvVar::DaemonSearchSingleflight)
+        .and_then(|value| crate::config::parse_env_bool_flag(&value))
+        .unwrap_or(false)
+}
+
+/// Run one daemon search through the process's search group.
+///
+/// `key` must already carry everything the search reads (see
+/// `daemon_search_singleflight_key` in the daemon server), so a follower is
+/// handed only a result its own request would have computed. `search` runs
+/// without the retrieval audit; the caller records one per request.
+pub(crate) fn run_daemon_search<F>(
+    key: &SingleFlightKey,
+    search: F,
+) -> Result<SingleFlightRun<crate::core::search::SearchPerformanceRun>, SingleFlightError>
+where
+    F: FnOnce() -> Result<crate::core::search::SearchPerformanceRun, String>,
+{
+    DAEMON_SEARCH_GROUP.get_or_init(SingleFlightGroup::new).run(
+        key,
+        DAEMON_SEARCH_FOLLOWER_TIMEOUT,
+        search,
+    )
 }
 
 pub fn run_graph_feature_enrichment<F>(

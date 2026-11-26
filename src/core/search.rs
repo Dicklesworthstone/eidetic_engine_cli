@@ -2292,6 +2292,32 @@ impl PackSearchHandoff {
             })
     }
 
+    /// Finish one daemon request whose run was shared through single-flight
+    /// (bd-d67os.9).
+    ///
+    /// The shared run was computed without its retrieval audit, so its trace
+    /// ends with the computing request's `search::requestTotal` and holds no
+    /// audit spans. This drops that span, records THIS request's audit and
+    /// closes a request span timed from `request_start`. N coalesced requests
+    /// therefore leave N audit rows, as N uncoalesced ones do, and each trace
+    /// has the spans of an uncoalesced request in the same order.
+    pub(crate) fn finish_coalesced_daemon_request(
+        &mut self,
+        options: &SearchOptions,
+        request_start: Instant,
+    ) {
+        self.performance
+            .timings
+            .retain(|timing| timing.name != "search::requestTotal");
+        finish_search_request(
+            self,
+            options,
+            &options.resolve_database_path(),
+            true,
+            request_start,
+        );
+    }
+
     pub(crate) fn record_audit(&self, options: &SearchOptions, connection: &DbConnection) {
         if let Some(facts) = &self.audit_facts {
             facts.record(
@@ -8916,15 +8942,19 @@ pub fn run_search_with_performance_and_filters(
     kind_filter: Option<&str>,
     typed_field_filters: &[TypedMemoryFieldFilter],
 ) -> Result<SearchPerformanceRun, SearchError> {
-    run_search_for_daemon_with_runtime(options, kind_filter, typed_field_filters, None, None)
+    run_search_for_daemon_with_runtime(options, kind_filter, typed_field_filters, None, None, true)
 }
 
+/// `record_retrieval_audit` is false only for a run the daemon shares through
+/// single-flight, where each request records its own audit afterwards
+/// ([`SearchPerformanceRun::finish_coalesced_daemon_request`]).
 pub(crate) fn run_search_for_daemon_with_runtime(
     options: &SearchOptions,
     kind_filter: Option<&str>,
     typed_field_filters: &[TypedMemoryFieldFilter],
     runtime: Option<&asupersync::runtime::Runtime>,
     loaded: Option<crate::core::index::CachedLocalEmbedder>,
+    record_retrieval_audit: bool,
 ) -> Result<SearchPerformanceRun, SearchError> {
     let request_timeout = search_request_timeout();
     let reconcile_timeout = search_index_auto_reconcile_timeout();
@@ -8941,7 +8971,7 @@ pub(crate) fn run_search_for_daemon_with_runtime(
                     request_timeout,
                     embedder,
                     false,
-                    true,
+                    record_retrieval_audit,
                     false,
                 )
                 .await
@@ -8957,7 +8987,7 @@ pub(crate) fn run_search_for_daemon_with_runtime(
                 request_timeout,
                 embedder,
                 false,
-                true,
+                record_retrieval_audit,
                 false,
             )
             .await
@@ -9231,34 +9261,13 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
         // excluded because it hands these same facts to the context writer, which
         // records them against its own write connection (context.rs:2975);
         // recording here too would double-count every packed hit.
-        //
-        // This runs AFTER `finish_search_snapshot` has released the read pin: the
-        // audit write takes the flock write gate, and taking it while still holding
-        // the read snapshot would serialize a read surface behind writers.
-        if record_retrieval_audit
-            && !retrieval_only
-            && let Some(facts) = &run.audit_facts
-        {
-            let audit_open_start = Instant::now();
-            let connection = DbConnection::open_file(&database_path);
-            run.performance
-                .record_elapsed("search::auditConnectionOpen", audit_open_start);
-            if let Ok(connection) = connection {
-                facts.record(
-                    options,
-                    &connection,
-                    &run.report.results,
-                    run.report.status,
-                    &mut SearchAuditIdSource::Ambient,
-                    &mut run.performance,
-                );
-            }
-        }
-        // The historical search::total is the inner retrieval span. Keep it
-        // compatible, and expose the full request including post-snapshot
-        // audit I/O so a warm daemon cannot hide setup behind that inner total.
-        run.performance
-            .record_elapsed("search::requestTotal", total_start);
+        finish_search_request(
+            &mut run,
+            options,
+            &database_path,
+            record_retrieval_audit && !retrieval_only,
+            total_start,
+        );
         return Ok(run);
     }
 
@@ -9300,6 +9309,43 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
     run.performance
         .record_elapsed("search::requestTotal", total_start);
     Ok(run)
+}
+
+/// Record one request's retrieval audit, when it records one, and close its
+/// `search::requestTotal` span.
+///
+/// This runs AFTER `finish_search_snapshot` has released the read pin: the
+/// audit write takes the flock write gate, and taking it while still holding
+/// the read snapshot would serialize a read surface behind writers.
+///
+/// The historical `search::total` is the inner retrieval span. Keep it
+/// compatible, and expose the full request including post-snapshot audit I/O
+/// so a warm daemon cannot hide setup behind that inner total.
+fn finish_search_request(
+    run: &mut SearchPerformanceRun,
+    options: &SearchOptions,
+    database_path: &Path,
+    record_retrieval_audit: bool,
+    request_start: Instant,
+) {
+    if record_retrieval_audit && let Some(facts) = &run.audit_facts {
+        let audit_open_start = Instant::now();
+        let connection = DbConnection::open_file(database_path);
+        run.performance
+            .record_elapsed("search::auditConnectionOpen", audit_open_start);
+        if let Ok(connection) = connection {
+            facts.record(
+                options,
+                &connection,
+                &run.report.results,
+                run.report.status,
+                &mut SearchAuditIdSource::Ambient,
+                &mut run.performance,
+            );
+        }
+    }
+    run.performance
+        .record_elapsed("search::requestTotal", request_start);
 }
 
 fn finish_search_snapshot<T>(
