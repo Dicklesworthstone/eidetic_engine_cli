@@ -879,10 +879,20 @@ fn context_without_database_uses_honest_error_envelope_and_e2e_log() -> TestResu
 
 #[test]
 fn successful_capabilities_output_has_no_fake_success_markers() -> TestResult {
+    // Without --workspace, capabilities probes storage, search, cass and the
+    // index at the bare cwd (default_workspace_path), which here is the crate
+    // root, and so reads the checkout's own store. The flag reaches the same
+    // gather_with_workspace, just with a store of the test's own.
+    let workspace = initialized_workspace("capabilities-success-workspace")?;
     let result = run_ee_logged(
         "capabilities-success",
-        None,
-        vec!["--json".to_owned(), "capabilities".to_owned()],
+        Some(&workspace),
+        vec![
+            "--workspace".to_owned(),
+            workspace.display().to_string(),
+            "--json".to_owned(),
+            "capabilities".to_owned(),
+        ],
     )?;
 
     ensure_equal(&result.exit_code, &0, "capabilities exit code")?;
