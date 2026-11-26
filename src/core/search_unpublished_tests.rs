@@ -1673,6 +1673,107 @@ fn strict_semantic_search_publishes_a_small_delta_without_reembedding_a_larger_c
     });
 }
 
+/// bd-q1e4y: the one red of the test above ranked fixture memory 1 first,
+/// meaning the delta was not scored. The pre-read reconciliation only logs a
+/// failure and promises "truthful stale-index reporting" instead. This pins
+/// that promise for an existing generation with one pending delta whose
+/// publication fails. The search must either refuse, or return results that
+/// say the generation is stale. Serving the older generation as current is
+/// the fail-open case.
+#[cfg(unix)]
+#[test]
+fn strict_semantic_search_reports_a_stale_generation_when_delta_publication_is_cancelled() {
+    with_test_search_timeouts(Duration::from_secs(300), || {
+        let fixture = Fixture::new();
+        fixture.memory(
+            1,
+            "The archivedcobalt upgrade requires an immutable rollback plan.",
+        );
+        for number in 2..=128_u128 {
+            fixture.memory(number, &format!("Earlier deployment note {number}."));
+        }
+        let embedder = Arc::new(FirstPublicationEmbedder::new(false));
+        let _selection = crate::core::index::install_test_workspace_embedder(
+            &fixture.workspace,
+            EmbedderStack::from_parts(embedder.clone(), None),
+        );
+        let rebuilt = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+            workspace_path: fixture.root.clone(),
+            database_path: Some(fixture.root.join(".ee/ee.db")),
+            index_dir: Some(fixture.root.join(".ee/index")),
+            dry_run: false,
+        })
+        .unwrap();
+        assert_eq!(
+            rebuilt.status,
+            crate::core::index::IndexRebuildStatus::Success
+        );
+        let remembered = fixture.remember_deferred(BODY);
+        let mut options = fixture.options();
+        options.query = BODY.to_owned();
+        options.source_mode = SearchSourceMode::SemanticOnly;
+        options.strict_source_mode = true;
+
+        // Reconciliation runs before the query is embedded, so the first
+        // embedding after this point is the delta's publication.
+        embedder.cancel_next.store(true, Ordering::Relaxed);
+        let outcome = run_search_with_performance(&options);
+        assert!(
+            !embedder.cancel_next.load(Ordering::Relaxed),
+            "nothing was embedded after the cancel was armed"
+        );
+        let interrupted = fixture
+            .db
+            .list_search_index_jobs(&fixture.workspace, None)
+            .unwrap();
+        assert_eq!(interrupted.len(), 1);
+        assert!(
+            !matches!(interrupted[0].status.as_str(), "running" | "completed"),
+            "the cancel must interrupt the delta's publication, or this test observes \
+             nothing; job status {:?}",
+            interrupted[0].status
+        );
+        if let Ok(run) = &outcome {
+            let codes = run
+                .report
+                .degraded
+                .iter()
+                .map(|entry| entry.code.as_str())
+                .collect::<Vec<_>>();
+            let stale_reported = run
+                .report
+                .index_freshness
+                .as_ref()
+                .is_some_and(|freshness| freshness.stale)
+                || codes.contains(&"search_index_stale");
+            assert!(
+                stale_reported,
+                "an unpublished delta was served as current: top hit {:?}, index_freshness \
+                 {:?}, degraded {codes:?}, source mode {:?}, fallback {}",
+                run.report.results.first().map(|hit| hit.doc_id.as_str()),
+                run.report.index_freshness,
+                run.report.source_mode_applied,
+                run.report.source_mode_fallback
+            );
+        }
+
+        // The interrupted job is still there, so the next search publishes it.
+        let retried = run_search_with_performance(&options).unwrap();
+        assert_eq!(
+            retried.report.results[0].doc_id,
+            remembered.memory_id.to_string()
+        );
+        assert!(!retried.report.source_mode_fallback);
+        assert!(retried.report.index_freshness.is_none());
+        let completed = fixture
+            .db
+            .list_search_index_jobs(&fixture.workspace, None)
+            .unwrap();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].status, "completed");
+    });
+}
+
 #[test]
 fn first_publication_without_durable_jobs_keeps_the_source_only_fallback() {
     let fixture = Fixture::new();
