@@ -30,10 +30,15 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     }
 }
 
+/// Runs from a dir workspace discovery cannot climb out of (bd-uuaa3), for
+/// the reason given on `run_ee` in tests/e2e_plan_recipe.rs: `recipe_catalog`
+/// reads the store it finds, and the assertions describe the built-in catalog.
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     let iso_root =
         std::env::temp_dir().join(format!("ee-plan-recipe-cat-iso-{}", std::process::id()));
+    let cwd = crate::isolated_ee::outside_workspace_tempdir()?;
     crate::isolated_ee::isolated_ee_command(&iso_root)?
+        .current_dir(cwd.path())
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
