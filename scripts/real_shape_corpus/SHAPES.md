@@ -28,9 +28,25 @@ Measure an `ee` binary against it (report mode, see `probe.py --help`):
 
     python3 scripts/real_shape_corpus/probe.py --ee target/debug/ee [--target-records 5000]
 
-The probe serves the corpus through `scripts/real_shape_corpus/cass_fixture.py`,
+By default the probe serves the corpus through `scripts/real_shape_corpus/cass_fixture.py`,
 a `cass` emulator for the `sessions`/`view`/`index`/`health` robot commands. Its
 log lines are prefixed `stub`; a gate that must run real `cass` cannot mistake it.
+
+To measure the real connector, point the probe at a verified CASS 0.8.0
+executable and supply its SHA-256. The executable must be named `cass` and
+its absolute path must satisfy EE's import policy. For the Linux amd64
+executable extracted from the published `cass-linux-amd64.tar.gz`:
+
+    python3 scripts/real_shape_corpus/probe.py --ee /path/to/ee \
+        --real-cass /path/to/cass \
+        --cass-sha256 97ad59c2abb5442a0bccf883d43695c1424f455c5c882b7b72bb3231cc3c2e98 \
+        --target-records 4000 --enforce --out /tmp/ee-corpus-report
+
+The probe indexes a copy of the generated Claude and Codex transcripts in
+a private home and checks that CASS discovers each expected source. EE
+imports from that same index. The summary records `cass_mode`, executable
+identity and the indexer's observations. Message counts come from CASS.
+Grading retains the original JSONL line coordinates for both connectors.
 
 ## Layout
 

@@ -1355,37 +1355,49 @@ struct BackupCassSessionRecord {
 }
 
 impl BackupCassSessionRecord {
+    fn restored_source_hashes(session: &StoredSession) -> Option<(String, Option<String>)> {
+        // Only side-path recovery replaces the native locator and removes the
+        // source path. Ordinary connector metadata is opaque, even if it uses
+        // the same schema name as an EE recovery record.
+        if session.source_path.is_some()
+            || session.cass_session_id != portable_cass_session_id(&session.id)
+        {
+            return None;
+        }
+        let metadata: JsonValue = serde_json::from_str(session.metadata_json.as_deref()?).ok()?;
+        if metadata["schema"].as_str() != Some(CASS_SESSION_RESTORE_METADATA_SCHEMA_V1)
+            || metadata["sourceLocatorPolicy"].as_str() != Some("omitted_host_local")
+        {
+            return None;
+        }
+        let locator = metadata["sourceLocatorHash"].as_str()?;
+        if !crate::db::is_canonical_blake3_hash(locator) {
+            return None;
+        }
+        let source_metadata = match metadata.get("sourceMetadataHash") {
+            None | Some(JsonValue::Null) => None,
+            Some(value) => {
+                let hash = value.as_str()?;
+                if !crate::db::is_canonical_blake3_hash(hash) {
+                    return None;
+                }
+                Some(hash.to_owned())
+            }
+        };
+        Some((locator.to_owned(), source_metadata))
+    }
+
     fn from_stored(session: &StoredSession) -> Self {
-        let restored_metadata = session
-            .metadata_json
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<JsonValue>(raw).ok())
-            .filter(|metadata| {
-                metadata.get("schema").and_then(JsonValue::as_str)
-                    == Some(CASS_SESSION_RESTORE_METADATA_SCHEMA_V1)
+        let (source_locator_hash, source_metadata_hash) =
+            Self::restored_source_hashes(session).unwrap_or_else(|| {
+                (
+                    hash_bytes(session.cass_session_id.as_bytes()),
+                    session
+                        .metadata_json
+                        .as_deref()
+                        .map(|s| hash_bytes(s.as_bytes())),
+                )
             });
-        let source_locator_hash = restored_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("sourceLocatorHash"))
-            .and_then(JsonValue::as_str)
-            .map_or_else(
-                || hash_bytes(session.cass_session_id.as_bytes()),
-                str::to_owned,
-            );
-        let source_metadata_hash = restored_metadata.as_ref().map_or_else(
-            || {
-                session
-                    .metadata_json
-                    .as_deref()
-                    .map(|metadata| hash_bytes(metadata.as_bytes()))
-            },
-            |metadata| {
-                metadata
-                    .get("sourceMetadataHash")
-                    .and_then(JsonValue::as_str)
-                    .map(str::to_owned)
-            },
-        );
         Self {
             id: session.id.clone(),
             workspace_id: session.workspace_id.clone(),
@@ -15113,6 +15125,64 @@ mod tests {
             record,
             "portable CASS session remains stable across a second backup",
         )
+    }
+
+    #[test]
+    fn cass_backup_hashes_native_or_malformed_locator_metadata() -> TestResult {
+        let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(3)).to_string();
+        let mut record = backup_cass_session_fixture(
+            &SessionId::from_uuid(Uuid::from_u128(4)).to_string(),
+            &workspace_id,
+        );
+        record.source_metadata_hash = Some(hash_bytes(b"original session metadata"));
+        let portable = record.clone().into_restored(workspace_id);
+        ensure_equal(
+            BackupCassSessionRecord::from_stored(&portable),
+            record,
+            "a genuine portable session preserves both digests",
+        )?;
+        let original: JsonValue = serde_json::from_str(
+            portable.metadata_json.as_deref().ok_or("recovery metadata")?,
+        )
+        .map_err(|e| e.to_string())?;
+        let local_id = portable.cass_session_id.as_str();
+        for (locator, source_path, field, value) in [
+            (
+                "native-cass-locator",
+                None,
+                "sourceLocatorPolicy",
+                "omitted_host_local",
+            ),
+            (
+                local_id,
+                Some("/private/source"),
+                "sourceLocatorPolicy",
+                "omitted_host_local",
+            ),
+            (local_id, None, "sourceLocatorPolicy", "other"),
+            (local_id, None, "sourceLocatorHash", "/private/canary"),
+            (local_id, None, "sourceMetadataHash", "blake3:private-canary"),
+        ] {
+            let mut row = portable.clone();
+            row.cass_session_id = locator.to_owned();
+            row.source_path = source_path.map(str::to_owned);
+            let mut metadata = original.clone();
+            metadata[field] = json!(value);
+            let raw = metadata.to_string();
+            row.metadata_json = Some(raw.clone());
+            let exported = BackupCassSessionRecord::from_stored(&row);
+            ensure_equal(
+                exported.source_locator_hash,
+                hash_bytes(locator.as_bytes()),
+                "native locator commitment",
+            )?;
+            ensure_equal(
+                exported.source_metadata_hash,
+                Some(hash_bytes(raw.as_bytes())),
+                "opaque metadata commitment",
+            )?;
+        }
+        Ok(())
     }
 
     /// bd-reality-core-convergence-1azkt.13, plan section C negative matrix:

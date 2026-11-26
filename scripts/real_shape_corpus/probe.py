@@ -8,6 +8,7 @@ harness errors (corpus shape precheck, cass provisioning, import crash,
 malformed JSON).
 
     probe.py --ee target/debug/ee [--target-records N] [--out DIR] [--queries all|evaluation]
+    probe.py --ee /path/to/ee --real-cass /path/to/cass --cass-sha256 HEX --enforce --out /tmp/ee-report
     probe.py --self-test [--ee target/debug/ee]
 
 Writes ``ee.real_corpus_probe.v2`` JSON to stdout (and DIR/summary.json), plus
@@ -42,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import hashlib
 import json
 import os
 import re
@@ -405,6 +407,73 @@ def install_cass_fixture(root):
     return target
 
 
+def provision_real_cass(binary, expected_digest, corpus, root, workspace, env, manifest):
+    """Index a private copy and read the session inventory from that same CASS."""
+    binary = os.path.abspath(binary)
+    if (os.path.basename(binary) != "cass" or not os.path.isfile(binary)
+            or not os.access(binary, os.X_OK)):
+        raise Harness(f"--real-cass requires an executable named cass: {binary!r}",
+                      code=CASS_UNAVAILABLE)
+    assert_no_symlink_component(binary, "real cass binary")
+    env["EE_CASS_BINARY"] = binary
+    env["CASS_DATA_DIR"] = os.path.join(root, "cass-data")
+    env["CASS_IGNORE_SOURCES_CONFIG"] = "1"
+    try:
+        digest = hashlib.sha256()
+        with open(binary, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != expected_digest:
+            raise Harness("real CASS executable does not match --cass-sha256", code=CASS_UNAVAILABLE)
+        index = subprocess.run(
+            [os.path.join(HERE, "index_with_real_cass.sh"), "--cass", binary,
+             "--corpus", corpus, "--data-dir", root],
+            cwd=workspace, env=env, capture_output=True, text=True, timeout=7200)
+        if index.returncode:
+            raise Harness(f"real CASS index failed ({index.returncode}): {index.stderr[-1500:]}",
+                          code=CASS_UNAVAILABLE)
+        receipt = json.loads(index.stdout)
+        if (not isinstance(receipt, dict) or receipt.get("schema") != "ee.real_shape_cass.real_index.v1"
+                or receipt.get("data_dir") != root or receipt.get("corpus") != corpus
+                or receipt.get("conversations") != len(manifest["sessions"])
+                or receipt.get("indexer") != "real"):
+            raise Harness("real CASS index receipt does not match the generated corpus")
+        listing = subprocess.run(
+            [binary, "sessions", "--workspace", workspace, "--json",
+             "--limit", str(len(manifest["sessions"]) + 1), "--data-dir", env["CASS_DATA_DIR"]],
+            cwd=workspace, env=env, capture_output=True, text=True, timeout=900)
+        if listing.returncode:
+            raise Harness(f"real CASS session listing failed ({listing.returncode}): "
+                          f"{listing.stderr[-1500:]}", code=CASS_UNAVAILABLE)
+        counts = indexed_session_counts(json.loads(listing.stdout), root, manifest)
+        receipt["binary_sha256"] = digest.hexdigest()
+        return receipt, counts
+    except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+        raise Harness(f"real CASS provisioning failed: {error}", code=CASS_UNAVAILABLE) from error
+
+
+def indexed_session_counts(listing, root, manifest):
+    # JSONL contains metadata and tool records. The number of messages CASS
+    # discovers can differ from the number of physical lines used to grade spans.
+    expected = {os.path.join(root, row["path"]): row["path"] for row in manifest["sessions"]}
+    counts = {}
+    sessions = listing.get("sessions") if isinstance(listing, dict) else None
+    if not isinstance(sessions, list):
+        identity_error("real CASS did not return a session inventory")
+    for row in sessions:
+        if not isinstance(row, dict):
+            identity_error("invalid real CASS session row")
+        path = row.get("path", row.get("source_path"))
+        count = row.get("message_count")
+        if (not isinstance(path, str) or path not in expected or expected[path] in counts
+                or type(count) is not int or count <= 0):
+            identity_error("unknown, duplicate or invalid real CASS session")
+        counts[expected[path]] = count
+    if len(counts) != len(expected):
+        identity_error("real CASS did not index every generated session")
+    return counts
+
+
 def walk(value):
     yield value
     if isinstance(value, dict):
@@ -452,13 +521,15 @@ def inspection_rows(payload, table, count):
     return [row["values"] for row in rows]
 
 
-def join_imported_sessions(manifest, corpus, imported, inspected, workspace_id):
+def join_imported_sessions(manifest, corpus, imported, inspected, workspace_id, indexed_counts=None):
     """Join exact persisted source identities, never response/discovery order.
 
     The import report deliberately redacts sourcePath. Read-only db inspection
     supplies the stored cass_session_id and source_path; both must name the same
     generated file. The report's session ID set is then cross-checked.
     """
+    counts = (indexed_counts if indexed_counts is not None else
+              {s["path"]: s["message_count"] for s in manifest["sessions"]})
     expected = {}
     for source in manifest["sessions"]:
         path = os.path.join(os.path.realpath(corpus), source["path"])
@@ -477,7 +548,7 @@ def join_imported_sessions(manifest, corpus, imported, inspected, workspace_id):
                 or row.get("source_path") != source_path
                 or row.get("workspace_id") != workspace_id
                 or type(row.get("message_count")) is not int
-                or row["message_count"] != source["message_count"]):
+                or row["message_count"] != counts[source["path"]]):
             identity_error("missing, duplicate or conflicting persisted CASS session identity")
         path_by_session[sid] = source["path"]
         mapped_paths.add(source_path)
@@ -485,7 +556,6 @@ def join_imported_sessions(manifest, corpus, imported, inspected, workspace_id):
     if not isinstance(sessions_out, list) or len(sessions_out) != len(expected):
         identity_error("import response does not cover every corpus session")
     seen = set()
-    counts = {s["path"]: s["message_count"] for s in manifest["sessions"]}
     for row in sessions_out:
         if not isinstance(row, dict):
             identity_error("import session result is not an object")
@@ -759,6 +829,9 @@ def evaluate_enforced_metrics(metrics, total_records, query_count, enforce_laten
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ee")
+    parser.add_argument("--real-cass", metavar="PATH",
+                        help="index and measure with the pinned cass executable in a private home")
+    parser.add_argument("--cass-sha256", metavar="HEX", help="trusted SHA-256 of the real cass executable")
     parser.add_argument("--target-records", type=int, default=0)
     parser.add_argument("--seed", type=int, default=43)
     parser.add_argument("--out")
@@ -784,7 +857,13 @@ def main():
                              "fail-closed guard must then fire (exit 2), never publish 0.0")
     args = parser.parse_args()
 
+    if bool(args.real_cass) != bool(args.cass_sha256):
+        parser.error("--real-cass and --cass-sha256 must be supplied together")
+    if args.cass_sha256 and not re.fullmatch("[a-fA-F0-9]{64}", args.cass_sha256):
+        parser.error("--cass-sha256 must be a 64-digit hexadecimal SHA-256")
     if args.self_test:
+        if args.real_cass:
+            parser.error("--real-cass requires a probe run with --ee")
         return self_test(os.path.abspath(args.ee) if args.ee else None, keep=args.keep)
     if not args.ee:
         parser.error("--ee is required unless --self-test is given")
@@ -798,8 +877,8 @@ def main():
     corpus = os.path.join(root, "corpus")
     os.makedirs(workspace)
     summary = {"schema": "ee.real_corpus_probe.v2", "mode": mode, "ee": ee,
-               "cass": "stub:scripts/real_shape_corpus/cass_fixture.py",
-               "cass_mode": "emulator",
+               "cass": os.path.abspath(args.real_cass) if args.real_cass else "stub:scripts/real_shape_corpus/cass_fixture.py",
+               "cass_mode": "real" if args.real_cass else "emulator",
                # Recorded so a failed run is inspectable: with --out or --keep the
                # root survives, and the workspace under it is the store whose
                # readiness surfaces can then be queried by hand.
@@ -831,16 +910,26 @@ def main():
         event("corpus", sessions=len(manifest["sessions"]), records=manifest["total_records"])
 
         env = {k: v for k, v in os.environ.items() if not k.startswith("EE_")}
+        if args.real_cass:
+            # Isolate connector source roots, database overrides and discovery
+            # configuration owned by the caller. Pass the same env to ee.
+            env = {"PATH": os.environ.get("PATH", os.defpath)}
         env.update({
             "HOME": os.path.join(root, "home"), "XDG_CONFIG_HOME": os.path.join(root, "xdg", "config"),
             "XDG_DATA_HOME": os.path.join(root, "xdg", "data"), "XDG_CACHE_HOME": os.path.join(root, "xdg", "cache"),
             "XDG_STATE_HOME": os.path.join(root, "xdg", "state"),
-            "EE_CASS_BINARY": install_cass_fixture(root),
-            "CASS_FIXTURE_ROOT": corpus, "CASS_FIXTURE_LOG": os.path.join(out, "cass-fixture.log"),
             "NO_COLOR": "1",
         })
         for key in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
             os.makedirs(env[key], exist_ok=True)
+        indexed_root, indexed_counts = corpus, None
+        if args.real_cass:
+            indexed_root = root
+            summary["real_index"], indexed_counts = provision_real_cass(
+                args.real_cass, args.cass_sha256.lower(), corpus, root, workspace, env, manifest)
+        else:
+            env.update({"EE_CASS_BINARY": install_cass_fixture(root),
+                        "CASS_FIXTURE_ROOT": corpus, "CASS_FIXTURE_LOG": os.path.join(out, "cass-fixture.log")})
         model_cache = os.environ.get("EE_PROBE_MODEL_DIR")
         download = os.environ.get("EE_PROBE_EMBED_DOWNLOAD")
         embedding = model_env(model_cache, download)
@@ -893,7 +982,7 @@ def main():
                     or not isinstance(stored_workspace.get("id"), str)):
                 identity_error("stored workspace identity does not match the isolated corpus workspace")
             path_by_session = join_imported_sessions(
-                manifest, corpus, payload, inspected["sessions"], stored_workspace["id"])
+                manifest, indexed_root, payload, inspected["sessions"], stored_workspace["id"], indexed_counts)
             summary["grading"]["session_sources"] = path_by_session
             spans = surface_or_unavailable(payload, "spans_imported", "spansImported",
                                            surface="imported-span count")
@@ -1235,6 +1324,30 @@ def exact_record_self_test(scratch, arm, healthy_metrics):
             arm(name, error.code == IDENTITY_ERROR)
         else:
             arm(name, False)
+
+    sample_path = manifest["sessions"][0]["path"]
+    indexed_counts = {path: max(1, count - 1) for path, count in counts.items()}
+    listing = {"sessions": [{"path": os.path.join(corpus, path), "message_count": count}
+                            for path, count in indexed_counts.items()]}
+    arm("real CASS message counts are independent of JSONL record positions",
+        indexed_session_counts(listing, corpus, manifest) == indexed_counts)
+    indexed_rows = [dict(row, message_count=indexed_counts[session_paths[row["id"]]]) for row in rows]
+    indexed_import = copy.deepcopy(imported)
+    for row in indexed_import["data"]["sessions"]:
+        row["messageCount"] = indexed_counts[session_paths[row["sessionId"]]]
+    arm("real CASS source paths still identify the exact generated records after import",
+        join_imported_sessions(manifest, corpus, indexed_import, inspection(indexed_rows),
+                               workspace_id, indexed_counts) == session_paths)
+    refuses("changed message count between real CASS discovery and EE import is rejected",
+            lambda: join_imported_sessions(manifest, corpus, imported, inspection(indexed_rows),
+                                           workspace_id, indexed_counts))
+    for problem, entries in (("incomplete", listing["sessions"][1:]),
+                           ("duplicate", [*listing["sessions"][1:], listing["sessions"][1]]),
+                           ("foreign source", [*listing["sessions"][1:],
+                                               {"path": os.path.join("/other", sample_path),
+                                                "message_count": 1}])):
+        refuses(f"{problem} real CASS index is rejected",
+                lambda: indexed_session_counts({"sessions": entries}, corpus, manifest))
 
     for name, mutate in (
             ("duplicate imported ID", lambda p: p["data"]["sessions"].__setitem__(0, p["data"]["sessions"][1])),
