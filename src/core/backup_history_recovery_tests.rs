@@ -558,7 +558,24 @@ mod rule_redaction_recovery {
                         .get(&original.id)
                         .ok_or("source relationship lost")?;
                     let rule_tags = tags.get(&original.id).ok_or("rule tags lost")?;
-                    assert_eq!(rule_sources, &vec![memory_id.clone()]);
+                    // Standard redaction rewrites memory identifiers
+                    // (redact_identifier), so the import mints a stable
+                    // redacted id and the backup maps rule sources to it
+                    // (backup_memory_id_mapping). Each generation re-mints,
+                    // so the source must name the memory restored here.
+                    let context = format!("redaction {redaction:?} generation {generation}");
+                    assert_eq!(rule_sources.len(), 1, "{context}");
+                    if redaction == RedactionLevel::None {
+                        assert_eq!(rule_sources, &vec![memory_id.clone()], "{context}");
+                    } else {
+                        assert_ne!(rule_sources[0], memory_id, "{context}");
+                        assert!(
+                            db.get_memory(&rule_sources[0])
+                                .map_err(|e| e.to_string())?
+                                .is_some(),
+                            "{context}: rule source must name a restored memory"
+                        );
+                    }
                     assert_eq!(rule_tags, &vec!["release".to_owned()]);
                     let projection = RuleIndexProjection::new(
                         actual,
