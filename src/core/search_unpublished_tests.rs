@@ -2693,6 +2693,114 @@ fn source_fallback_borrows_the_callers_snapshot_across_concurrent_writes() {
 }
 
 #[test]
+fn calibration_review_authority_borrows_snapshots_without_losing_feedback() {
+    let fixture = Fixture::new();
+    let memory = fixture.memory(242, BODY);
+    for ordinal in 0..MIN_SEARCH_SCORE_CALIBRATION_SAMPLES {
+        fixture
+            .db
+            .insert_feedback_event(
+                &format!("fb_{:026}", ordinal + 600),
+                &crate::db::CreateFeedbackEventInput {
+                    workspace_id: fixture.workspace.clone(),
+                    target_type: "memory".to_owned(),
+                    target_id: memory.clone(),
+                    signal: "helpful".to_owned(),
+                    weight: 1.0,
+                    source_type: "outcome_observed".to_owned(),
+                    source_id: None,
+                    reason: None,
+                    evidence_json: Some(
+                        r#"{"score":0.8,"groundTruthRelevance":0.6}"#.to_owned(),
+                    ),
+                    session_id: None,
+                },
+            )
+            .unwrap();
+    }
+    let database = fixture.root.join(".ee/ee.db");
+    let reference_time = Utc::now() + chrono::Duration::hours(1);
+    let load = |connection: Option<&DbConnection>| {
+        search_score_calibration_for_workspace_cached(
+            &fixture.root,
+            Some(&database),
+            connection,
+            reference_time,
+        )
+    };
+    let reader = fixture.reader();
+    reader.begin_read_snapshot().unwrap();
+    let before = load(Some(&reader));
+    assert!(search_calibration_is_eligible_for_coverage(&before));
+    assert_eq!(
+        before.feedback_event_sample_count,
+        MIN_SEARCH_SCORE_CALIBRATION_SAMPLES
+    );
+    let before_identity = before.input_identity().expect("complete initial authority");
+    assert_eq!(load(None).input_identity().unwrap(), before_identity);
+    fixture
+        .db
+        .insert_feedback_quarantine(
+            "fq_00000000000000000000000600",
+            &crate::db::CreateFeedbackQuarantineInput {
+                workspace_id: fixture.workspace.clone(),
+                source_id: "test-review-source".to_owned(),
+                target_type: "memory".to_owned(),
+                target_id: memory,
+                signal: "harmful".to_owned(),
+                weight: 1.0,
+                source_type: "outcome_observed".to_owned(),
+                proposed_event_id: None,
+                recorded_at: "2026-01-01T00:00:00Z".to_owned(),
+                reason: "review snapshot fixture".to_owned(),
+                event_reason: None,
+                evidence_json: None,
+                session_id: None,
+                raw_event_hash: format!("blake3:{}", "a".repeat(64)),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        load(Some(&reader)).input_identity().unwrap(),
+        before_identity,
+        "borrowed source view remains pinned before the hold"
+    );
+    let fresh = load(None);
+    assert_ne!(fresh.input_identity().unwrap(), before_identity);
+    assert_eq!(
+        fresh.data_json(),
+        before.data_json(),
+        "holds do not become calibration samples"
+    );
+    assert!(
+        reader.begin_read_snapshot().is_err(),
+        "caller still owns its snapshot"
+    );
+    reader.rollback_read_snapshot().unwrap();
+    assert_eq!(load(Some(&reader)).input_identity(), fresh.input_identity());
+
+    fixture
+        .db
+        .execute_raw("ALTER TABLE feedback_quarantine RENAME TO withheld_review_holds")
+        .unwrap();
+    for connection in [Some(&reader), None] {
+        let unavailable = load(connection);
+        assert!(
+            unavailable.input_identity().is_none(),
+            "unknown holds forbid reuse"
+        );
+        assert!(search_calibration_is_eligible_for_coverage(&unavailable));
+        assert_eq!(
+            unavailable.data_json(),
+            before.data_json(),
+            "unreadable hold metadata must not discard valid accepted feedback"
+        );
+    }
+    reader.begin_read_snapshot().unwrap();
+    reader.rollback_read_snapshot().unwrap();
+}
+
+#[test]
 fn orphaned_index_bytes_are_not_reclassified_as_unpublished_sources() {
     let fixture = Fixture::new();
     fixture.memory(250, BODY);
