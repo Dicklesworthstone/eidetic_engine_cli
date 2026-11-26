@@ -16848,6 +16848,9 @@ mod tests {
             | ("rch", ["agents", "status", ..] | ["config", "show", ..])
             | ("rch", ["workers", "probe", ..] | ["diagnose", "--dry-run", ..])
             | ("am", ["agents", "list", ..]) => true,
+            // Too permissive: the argv is a read, but the script's actionable
+            // mode runs a bare `br ready`, which imports a newer issues.jsonl
+            // into beads.db (bd-cjc4r). Nothing at this level can see that.
             ("bash", [script, "actionable", "--json"]) => {
                 *script == ACTIONABLE_QUEUE_SCRIPT_RELATIVE_PATH
             }

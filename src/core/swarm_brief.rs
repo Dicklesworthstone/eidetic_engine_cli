@@ -113,9 +113,9 @@ const BEADS_READY_COMMAND: &str =
     "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale";
 // Every bucket read carries the same three flags as ready (bd-c9om2). Without
 // --no-auto-import, br imports a newer issues.jsonl into beads.db before
-// answering. The first bare read then writes the tracker DB, and every bucket
-// after it reads a different state from ready, while the freshness probe
-// still reports the stale one it saw.
+// answering. The first bare read would write the tracker DB, so it and every
+// bucket after it would read a newer state than ready did, while the
+// freshness probe still reported the stale one it saw.
 const BEADS_BLOCKED_ARGS: [&str; 5] = [
     "blocked",
     "--json",
