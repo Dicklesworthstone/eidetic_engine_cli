@@ -12522,7 +12522,10 @@ fn apply_personalized_pagerank_rerank(
     };
     let elapsed_ms = u64::try_from(ppr_start.elapsed().as_millis()).unwrap_or(u64::MAX);
     let result = cache_run.result;
-    if !cache_run.cache_hit {
+    // `ee context` is a read-only command (src/core/effect.rs), and on a
+    // read-only connection the witness write can only fail. The result cache
+    // keeps to the same rule (graph::algorithms::persistent_cache_is_writable).
+    if !cache_run.cache_hit && connection.mode() == crate::db::DatabaseOpenMode::ReadWrite {
         match crate::graph::ppr::emit_personalized_pagerank_witness(
             &crate::graph::ppr::PersonalizedPageRankWitnessSpec {
                 conn: connection,

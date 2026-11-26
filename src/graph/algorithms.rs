@@ -432,7 +432,11 @@ where
     }) {
         Ok(run) => run,
         Err(error) => {
-            insert_graph_algorithm_degraded_audit(spec, name, &error)?;
+            // On a read-only connection the audit write would fail and its
+            // storage error would replace the algorithm's own.
+            if persistent_cache_is_writable(spec) {
+                insert_graph_algorithm_degraded_audit(spec, name, &error)?;
+            }
             return Err(error);
         }
     };
@@ -847,9 +851,27 @@ fn store_cached_algorithm_result_with_memory<R>(
 where
     R: Clone + Send + Serialize + Sync + 'static,
 {
-    store_cached_algorithm_result(spec, params_hash, result, compute_elapsed_ms)?;
+    if persistent_cache_is_writable(spec) {
+        store_cached_algorithm_result(spec, params_hash, result, compute_elapsed_ms)?;
+    }
     store_in_memory_algorithm_result(cache_key, result, spec.ttl_seconds);
     Ok(())
+}
+
+/// Whether a cache run may write to the store: the result row and its
+/// result-cached audit, the eviction audit for a stale row, and the degraded
+/// audit for a failed run.
+///
+/// The context pack reads through a read-only connection, because `ee context`
+/// is a read-only command (src/core/effect.rs). A read-only run still loads
+/// persisted rows and fills the in-memory tier. Before this check, the row
+/// write failed with "database open mode ReadOnly is invalid", and the error
+/// threw away a result that had already been computed. So every production pack
+/// skipped its personalized PageRank rerank as
+/// `context_graph_snapshot_unavailable`, which
+/// `context_pack_with_ppr_emits_score_breakdown_and_matches_golden` caught.
+fn persistent_cache_is_writable(spec: &AlgorithmResultCacheSpec<'_>) -> bool {
+    spec.conn.mode() == crate::db::DatabaseOpenMode::ReadWrite
 }
 
 fn load_in_memory_algorithm_result<R>(cache_key: &str) -> Option<R>
@@ -949,11 +971,14 @@ where
                 reason: CacheEvictReason::TtlExpired,
                 count: 1,
             });
-            insert_graph_algorithm_result_evicted_audit(
-                spec,
-                &row.params_hash,
-                ResultEvictedReason::TtlExpired,
-            )?;
+            // The audit is a write; a read-only run still treats the row as a miss.
+            if persistent_cache_is_writable(spec) {
+                insert_graph_algorithm_result_evicted_audit(
+                    spec,
+                    &row.params_hash,
+                    ResultEvictedReason::TtlExpired,
+                )?;
+            }
             *stale_persistent_eviction_emitted = true;
         }
         return Ok(None);
@@ -2152,6 +2177,94 @@ mod tests {
         );
 
         connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn run_with_result_cache_on_a_read_only_connection_returns_the_result_and_writes_nothing()
+    -> TestResult {
+        // `ee context` packs through a read-only connection. The row write used
+        // to fail there and discard the computed result.
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = dir.path().join("ee.db");
+        let workspace_id = "wsp_7223456789abcdef0123456789";
+        let snapshot_id = "gsnap_7223456789abcdef012345678";
+        let writer = DbConnection::open_file(&path).map_err(|error| error.to_string())?;
+        writer.migrate().map_err(|error| error.to_string())?;
+        writer
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: "/workspace/algorithm-result-cache-read-only".to_owned(),
+                    name: Some("algorithm-result-cache-read-only".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        writer
+            .insert_graph_snapshot(
+                snapshot_id,
+                &CreateGraphSnapshotInput {
+                    workspace_id: workspace_id.to_owned(),
+                    snapshot_version: 1,
+                    schema_version: "ee.graph.snapshot.v1".to_owned(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 2,
+                    edge_count: 1,
+                    metrics_json: r#"{"nodes":[],"edges":[]}"#.to_owned(),
+                    content_hash: "blake3:algorithm-result-cache-read-only".to_owned(),
+                    source_generation: 0,
+                    expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        writer.close().map_err(|error| error.to_string())?;
+
+        let reader = DbConnection::open_file_read_only(&path).map_err(|error| error.to_string())?;
+        let params = serde_json::json!({"damping": 0.85});
+        let spec = AlgorithmResultCacheSpec {
+            conn: &reader,
+            workspace_id,
+            snapshot_id,
+            snapshot_content_hash: "blake3:algorithm-result-cache-read-only",
+            algorithm: "pagerank",
+            params: &params,
+            ttl_seconds: 300,
+        };
+        let compute_count = AtomicUsize::new(0);
+
+        let first = graph_result(run_with_result_cache(&spec, || {
+            compute_count.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"scores":[["mem_a",0.75]]}))
+        }))?;
+        let second = graph_result(run_with_result_cache(&spec, || {
+            compute_count.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"scores":[["mem_a",0.25]]}))
+        }))?;
+
+        assert!(!first.cache_hit);
+        assert_eq!(first.result, serde_json::json!({"scores":[["mem_a",0.75]]}));
+        // The in-memory tier still serves the repeat.
+        assert!(second.cache_hit);
+        assert_eq!(second.result, first.result);
+        assert_eq!(compute_count.load(Ordering::SeqCst), 1);
+
+        let rows = reader
+            .list_graph_algorithm_results(workspace_id, snapshot_id, Some("pagerank"))
+            .map_err(|error| error.to_string())?;
+        assert!(
+            rows.is_empty(),
+            "a read-only run must not persist a row: {rows:?}"
+        );
+        let audit_target =
+            graph_algorithm_result_audit_target_id(snapshot_id, "pagerank", &first.params_hash);
+        let audits = reader
+            .list_audit_by_target(WITNESS_TARGET_TYPE, &audit_target, None)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            audits.is_empty(),
+            "a read-only run must not audit a row: {audits:?}"
+        );
+
+        reader.close().map_err(|error| error.to_string())
     }
 
     #[test]

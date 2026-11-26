@@ -167,7 +167,11 @@
 1	NSF-DB-PACK-LEDGER-DEGRADATION-ARRAY
 2	NSF-DB-PACK-LEDGER-DEGRADATION-SORT
 1	NSF-DB-PACK-LEDGER-DEGRADATION-MESSAGE-SORT
-1	NSF-GRAPH-PPR-NO-NEIGHBORS
+# PPR-NO-NEIGHBORS 1 -> 0 (2026-11-26): its site is GONE. 86bc5b8e0 replaced
+# the local ACL push in src/graph/ppr.rs with fnx 0.4.1's personalized
+# PageRank, and `edges.sort_unstable_by_key` with it; nothing in ppr.rs builds
+# a per-node edge list any more. Retired to zero rather than removed, as above.
+0	NSF-GRAPH-PPR-NO-NEIGHBORS
 1	NSF-GRAPH-PACK-DNA-NO-PPR-SEEDS
 # bd-amhns 2026-10-11: one peer refactor (543601123 + efcce6a12) produced SIX
 # symptoms across both halves of this gate -- 3 newly unclassified sites and 3

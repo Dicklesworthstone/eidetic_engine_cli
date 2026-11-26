@@ -197,27 +197,28 @@ fn assert_pack_item_before(
     Ok(())
 }
 
-fn assert_context_ppr_witness(workspace_path: &Path, db_path: &Path) -> TestResult {
+/// `ee context` is a read-only command, so the rerank must leave the store as it
+/// found it. Until the result cache skipped its row on a read-only connection,
+/// that row write failed and took the whole rerank down with it: the old
+/// "exactly one witness" assertion here was never reached.
+fn assert_context_ppr_wrote_nothing(workspace_path: &Path, db_path: &Path) -> TestResult {
     let connection = DbConnection::open_file(db_path).map_err(|error| error.to_string())?;
     let workspace_id = stable_workspace_id(workspace_path);
     let snapshot = connection
         .get_latest_graph_snapshot(&workspace_id, GraphSnapshotType::MemoryLinks)
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "expected memory_links graph snapshot for PPR witness".to_owned())?;
+        .ok_or_else(|| "expected memory_links graph snapshot for the PPR rerank".to_owned())?;
     let witnesses = connection
         .list_graph_algorithm_witnesses(&workspace_id, &snapshot.id, Some("personalized_pagerank"))
         .map_err(|error| error.to_string())?;
-    if witnesses.len() != 1 {
+    let cached = connection
+        .list_graph_algorithm_results(&workspace_id, &snapshot.id, Some("personalized_pagerank"))
+        .map_err(|error| error.to_string())?;
+    if !witnesses.is_empty() || !cached.is_empty() {
         return Err(format!(
-            "context PPR rerank should emit exactly one personalized_pagerank witness, got {}",
-            witnesses.len()
-        ));
-    }
-    let params: Value = serde_json::from_str(&witnesses[0].params_json)
-        .map_err(|error| format!("PPR witness params must be JSON: {error}"))?;
-    if params["seedCount"].as_u64().unwrap_or(0) == 0 {
-        return Err(format!(
-            "PPR witness params must record a non-empty seed set: {params}"
+            "a read-only context pack wrote {} personalized_pagerank witness(es) and {} cache row(s)",
+            witnesses.len(),
+            cached.len()
         ));
     }
     connection.close().map_err(|error| error.to_string())
@@ -322,8 +323,8 @@ fn context_pack_with_ppr_emits_score_breakdown_and_matches_golden() -> TestResul
     enable_ppr_feature(workspace_path)?;
     insert_support_link(workspace_path, &db_path, &seed_id, &neighbor_id)?;
 
-    // Weight 1 runs first: the zero-weight run never reaches the rerank, so
-    // it cannot leave a witness or cache row behind for the count below.
+    // Weight 1 runs first, so the no-write check below covers the run that
+    // reaches the rerank; the zero-weight run never does.
     let mut requested_options = context_options(workspace_path, &db_path, Some(1.0));
     requested_options.output_options = requested_options.output_options.with_pack_dna(true);
     let requested = run_context_pack(&requested_options)
@@ -340,7 +341,7 @@ fn context_pack_with_ppr_emits_score_breakdown_and_matches_golden() -> TestResul
         &seed_id,
         "ppr_weight=1 should visibly promote the graph-linked neighbor",
     )?;
-    assert_context_ppr_witness(workspace_path, &db_path)?;
+    assert_context_ppr_wrote_nothing(workspace_path, &db_path)?;
     if retired_ppr_code_count(&requested) != 0 {
         return Err(format!(
             "{RETIRED_PPR_UPSTREAM_CODE} is retired and must not be emitted: {:?}",
