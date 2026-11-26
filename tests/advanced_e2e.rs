@@ -2109,19 +2109,21 @@ fn preflight_run_show_close_persists_guard_tripwire_lifecycle() -> TestResult {
         run_id.starts_with("pf_"),
         format!("preflight run_id should use pf_ prefix: {run_id}"),
     )?;
-    let expected_tripwire_provenance =
-        format!("preflight://{run_id}/tripwire-source/preflight_guard:builtin:rm_rf_root");
-    ensure(
-        rm_root_tripwire["provenance"]
-            .as_array()
-            .is_some_and(|provenance| {
-                provenance.iter().any(|entry| {
-                    entry
-                        .as_str()
-                        .is_some_and(|value| value == expected_tripwire_provenance.as_str())
-                })
-            }),
-        "guard-backed run must expose dynamic tripwire provenance URI",
+    // build_generated_tripwire records three provenance facts, the format
+    // generate_tripwires_filters_orders_and_stabilizes_ids pins. An advisory
+    // guard match scores 0.75 (guard_rule_tripwire_source). This test used to
+    // expect a `preflight://{run_id}/tripwire-source/...` URI, which no
+    // version of the product has emitted: 281fcaacc added it with the test,
+    // unexecuted.
+    let expected_tripwire_provenance = serde_json::json!([
+        "source_kind=dependency_contract",
+        "source_id=preflight_guard:builtin:rm_rf_root",
+        "source_score=0.750"
+    ]);
+    ensure_equal(
+        &rm_root_tripwire["provenance"],
+        &expected_tripwire_provenance,
+        "guard-backed run tripwire provenance facts",
     )?;
 
     let store_path = Path::new(&workspace)
@@ -2198,20 +2200,13 @@ fn preflight_run_show_close_persists_guard_tripwire_lifecycle() -> TestResult {
         &expected_sources,
         "preflight show reads persisted tripwire provenance",
     )?;
-    ensure(
-        tripwire_by_source(
+    ensure_equal(
+        &tripwire_by_source(
             &show_json["data"]["tripwires"],
             "preflight_guard:builtin:rm_rf_root",
-        )?["provenance"]
-            .as_array()
-            .is_some_and(|provenance| {
-                provenance.iter().any(|entry| {
-                    entry
-                        .as_str()
-                        .is_some_and(|value| value == expected_tripwire_provenance.as_str())
-                })
-            }),
-        "preflight show reads persisted dynamic tripwire provenance URI",
+        )?["provenance"],
+        &expected_tripwire_provenance,
+        "preflight show reads persisted tripwire provenance facts",
     )?;
 
     let close = run_ee(&[
