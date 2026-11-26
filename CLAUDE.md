@@ -924,7 +924,7 @@ selection and costs nothing on the fleet, so run it, or poll it, before a
 dispatch rather than paying 300 s per refusal. A poller must key on
 `Selected: <id>`: diagnose prints `Result: No worker selected` only when
 nothing qualifies, and prints no `Result:` line on success, so a loop that
-waits for a `Result:` line naming a worker never sees one.
+reads a missing `Result:` line as "nothing free yet" never sees a success.
 
 **That sixth one is the one that will eat a whole session, because it is
 deterministic and rch calls it retryable.** Measured 2026-10-25, exit 103,
