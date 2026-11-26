@@ -120,9 +120,9 @@ fn graph_surfaces_preserve_pre_epic_json_shape_additively() -> TestResult {
 /// Three surfaces borrow a snapshot written by `tests/json_contract_snapshots.rs`
 /// rather than captured from the command they are compared against. That is two
 /// producers, and a borrowed fixture can legitimately declare a field the live
-/// command never emits -- `$.data.degraded[embed_model_unavailable]` is exactly
-/// that: a literal at json_contract_snapshots.rs:1209, emitted live only when
-/// EE_EMBED_MODEL_PATH points at a missing path, which this fixture never sets.
+/// command never emits. `$.data.degraded[embed_model_unavailable]` was exactly
+/// that: emitted live only when no embedding model resolves, a posture the
+/// snapshot's producer pins and this fixture did not until `run_ee` matched it.
 ///
 /// Without this note the failure reads as a REMOVAL, and three panes spent a
 /// cycle hunting for the commit that stopped emitting a code nothing had
@@ -370,8 +370,25 @@ fn graph_payload_for_baseline_rejects_bare_health_payload() {
     assert!(error.contains("ee.response.v2"));
 }
 
+/// Every spawn runs with no embedding model resolvable: download off, an
+/// absent model directory and no explicit model path. That is the posture the
+/// borrowed baselines were recorded under, since json_contract_snapshots'
+/// `run_ee_at` sets the same three on every command. Without them `ee`
+/// resolves the default model. Live status then omits
+/// `embed_model_unavailable` from `degradationsApplied` and `degraded[]`, and
+/// this gate reports it as a removal on any host where the model resolves.
 fn run_ee(args: &[String]) -> Result<Output, String> {
-    crate::common_spawn::serialized_real_ee(args)
+    crate::common_spawn::serialized_real_ee_with(|command| {
+        command
+            .args(args)
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .env(
+                "EE_EMBED_MODEL_DIR",
+                std::env::temp_dir().join("ee-graph-additive-only-model-absent"),
+            )
+            .env_remove("EE_EMBED_MODEL_PATH");
+    })
+    .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
 /// Compact JSON for a failure message, cut at 400 characters so one large
