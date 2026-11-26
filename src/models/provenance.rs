@@ -6,7 +6,7 @@
 //! and must be both round-trippable through JSON and stable across
 //! tool versions.
 //!
-//! Thirty-three schemes are recognised in v1:
+//! Thirty-five schemes are recognised in v1:
 //!
 //! | Scheme            | Body shape                                          |
 //! |-------------------|-----------------------------------------------------|
@@ -15,6 +15,8 @@
 //! | `ee-mem://`       | A full [`MemoryId`] string (`mem_<26-char>`)        |
 //! | `https://` `http://` | Any RFC-3986 absolute URL with an authority    |
 //! | `agent-mail://`   | `<thread-id>` plus optional `/<message-id>`         |
+//! | `ee://`           | A native ee entity with no variant of its own, e.g. `rule/<rule-id>` |
+//! | `jsonl-import://` | Source agent (or `unknown`) of an `ee import jsonl` record |
 //! | `manual://`       | Opaque human/agent note source                      |
 //! | `bench-run://`    | Opaque benchmark-run identifier                     |
 //! | `git-sha://`      | Opaque commit/revision identifier                   |
@@ -48,7 +50,18 @@ use std::str::FromStr;
 
 use super::id::{MemoryId, ParseIdError};
 
-const ACCEPTED_PROVENANCE_SCHEMES: &str = "cass-session, file, ee-mem, http, https, agent-mail, manual, bench-run, git-sha, flamegraph, ee-reflect, journal, sec-filing, earnings-call, analyst-note, case, pacer, westlaw, ga4, mixpanel, campaign, interview, linear, notion, cve, mitre, incident, pubmed, guideline, emr, crm, salesforce, gong";
+/// Schemes that `from_str` dispatches to a variant of their own. Every other
+/// accepted scheme is in `REGISTERED_EXTERNAL_SCHEMES`. The unknown-scheme
+/// error lists both, read from these lists rather than from a copied string,
+/// which had fallen behind by `ee` and `jsonl-import`.
+const NATIVE_PROVENANCE_SCHEMES: &[&str] = &[
+    "cass-session",
+    "file",
+    "ee-mem",
+    "http",
+    "https",
+    "agent-mail",
+];
 
 const REGISTERED_EXTERNAL_SCHEMES: &[&str] = &[
     // Native ee entity references without a dedicated variant, such as a
@@ -558,7 +571,13 @@ impl fmt::Display for ProvenanceUriError {
             ),
             Self::UnknownScheme { input, scheme } => write!(
                 formatter,
-                "unknown provenance scheme `{scheme}` in `{input}`; expected one of {ACCEPTED_PROVENANCE_SCHEMES}"
+                "unknown provenance scheme `{scheme}` in `{input}`; expected one of {}",
+                NATIVE_PROVENANCE_SCHEMES
+                    .iter()
+                    .chain(REGISTERED_EXTERNAL_SCHEMES)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Self::EmptyBody { input, scheme } => write!(
                 formatter,
@@ -1007,6 +1026,29 @@ mod tests {
         match err {
             ProvenanceUriError::UnknownScheme { scheme, .. } => assert_eq!(scheme, "gopher"),
             other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    /// The unknown-scheme error names only schemes `from_str` dispatches, and
+    /// it includes the two the copied list it replaced had dropped.
+    #[test]
+    fn unknown_scheme_error_lists_only_dispatched_schemes() {
+        let message = must_fail("gopher://example.com/path").to_string();
+        let listed: Vec<&str> = match message.rsplit_once("expected one of ") {
+            Some((_, list)) => list.split(", ").collect(),
+            None => panic!("message names no accepted schemes: {message}"),
+        };
+        for scheme in ["ee", "jsonl-import", "cass-session", "journal"] {
+            assert!(listed.contains(&scheme), "`{scheme}` missing: {message}");
+        }
+        for scheme in listed {
+            assert!(
+                !matches!(
+                    ProvenanceUri::from_str(&format!("{scheme}://")),
+                    Err(ProvenanceUriError::UnknownScheme { .. })
+                ),
+                "`{scheme}` is listed as accepted but from_str does not dispatch it"
+            );
         }
     }
 

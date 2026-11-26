@@ -62,9 +62,10 @@ fuzz_target!(|data: &[u8]| {
         // (4) The scheme accessor names the scheme the URI renders with. With
         // (2), which reparses `rendered`, that makes it a scheme the parser
         // accepts. Comparing against the parser's own output, not a copied
-        // list, keeps this from drifting: a hard-coded list of 11 schemes
-        // reported every registered external scheme (`journal`,
-        // `jsonl-import`, `sec-filing`, ...) as a crash.
+        // list, keeps this from drifting: the hard-coded list of 11 schemes
+        // this replaced omitted 24 of the 29 registered external schemes
+        // (`journal`, `jsonl-import`, `sec-filing`, ...), so any input using
+        // one of them would have been reported as a crash.
         let scheme = uri.scheme();
         assert!(
             !scheme.is_empty()
