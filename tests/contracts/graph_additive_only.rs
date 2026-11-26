@@ -374,6 +374,16 @@ fn run_ee(args: &[String]) -> Result<Output, String> {
     crate::common_spawn::serialized_real_ee(args)
 }
 
+/// Compact JSON for a failure message, cut at 400 characters so one large
+/// array cannot bury the rest of the message.
+fn bounded_json(value: &Value) -> String {
+    let rendered = value.to_string();
+    match rendered.char_indices().nth(400) {
+        Some((cut, _)) => format!("{}...", &rendered[..cut]),
+        None => rendered,
+    }
+}
+
 fn assert_additive_shape(
     surface: &str,
     path: &str,
@@ -404,10 +414,14 @@ fn assert_additive_shape(
         }
         (Value::Array(expected_items), Value::Array(actual_items)) => {
             if actual_items.len() < expected_items.len() {
+                // Both arrays, so the failure names the entry that went
+                // missing; the count alone could not (lane, 23525cf36).
                 return Err(format!(
-                    "{surface} removed populated array entries at {path}: expected at least {}, got {}",
+                    "{surface} removed populated array entries at {path}: expected at least {}, got {}; expected {}, got {}",
                     expected_items.len(),
-                    actual_items.len()
+                    actual_items.len(),
+                    bounded_json(expected),
+                    bounded_json(actual)
                 ));
             }
             for (index, expected_item) in expected_items.iter().enumerate() {
