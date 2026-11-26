@@ -79,9 +79,14 @@ fn no_smoke_fixture_addresses_a_store_it_never_initialised() -> TestResult {
     )
 }
 
+/// Runs from a dir no workspace discovery can escape. Most callers name their
+/// workspace, but the bare ones (`status`, `procedure export`, `agent-docs`,
+/// `mcp`) used to inherit cargo's cwd and read the checkout's own `.ee/`
+/// store (bd-uuaa3). None of them asserts anything about a store's contents.
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
+    let temp = crate::isolated_ee::outside_workspace_tempdir()?;
     crate::isolated_ee::isolated_ee_command(temp.path())?
+        .current_dir(temp.path())
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))

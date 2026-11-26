@@ -88,6 +88,46 @@ pub fn isolated_ee_command(root: &Path) -> Result<Command, String> {
     Ok(command)
 }
 
+/// A temp dir to use as the cwd of a spawn that names no workspace
+/// (bd-uuaa3).
+///
+/// With no `--workspace` and no `EE_WORKSPACE`, `ee` walks up from its cwd to
+/// the first ancestor holding a `.ee/` directory (`find_workspace_via_walk_up`
+/// in src/cli/mod.rs). A spawn that inherits cargo's cwd reads the checkout's
+/// own store that way, and rch roots temp dirs under the checkout, so a cwd
+/// from `tempfile::tempdir()` reaches the same store. This one is made under
+/// `/tmp` where that exists. If any ancestor still holds a `.ee/`, it returns
+/// an error naming that ancestor, so the stray store cannot quietly become
+/// the test's input.
+pub fn outside_workspace_tempdir() -> Result<tempfile::TempDir, String> {
+    let system_tmp = Path::new("/tmp");
+    let parent = if system_tmp.is_dir() {
+        system_tmp.to_path_buf()
+    } else {
+        std::env::temp_dir()
+    };
+    let dir = tempfile::Builder::new()
+        .prefix("ee-no-workspace-")
+        .tempdir_in(&parent)
+        .map_err(|error| format!("create a temp dir under {}: {error}", parent.display()))?;
+    // The physical path is the one `ee` walks: /tmp is a symlink on macOS.
+    let physical = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
+    if let Some(store_root) = physical
+        .ancestors()
+        .find(|ancestor| ancestor.join(".ee").is_dir())
+    {
+        return Err(format!(
+            "{} is under {}, whose .ee/ workspace discovery would find",
+            physical.display(),
+            store_root.display()
+        ));
+    }
+    Ok(dir)
+}
+
 /// The model fixture root named by `EE_EMBED_MODEL_FIXTURE_DIR`, for a test
 /// that lays the model out itself. Calling this is how a test says it needs
 /// the real model.
