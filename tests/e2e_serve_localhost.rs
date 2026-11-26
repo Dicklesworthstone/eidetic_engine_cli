@@ -140,6 +140,10 @@ fn serve_foreground_cli_keeps_accepting_after_first_request() -> TestResult {
     );
     let token = "01234567890123456789012345678901";
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    // Serve's endpoints read the literal process cwd as their workspace
+    // (serve_current_workspace_path, status::default_workspace_path), with no
+    // walk-up. Inherited from cargo, /v1/status reported on the checkout
+    // (bd-uuaa3); from this tempdir it reports on an empty workspace.
     let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
         .args([
             "serve",
@@ -150,6 +154,7 @@ fn serve_foreground_cli_keeps_accepting_after_first_request() -> TestResult {
             "0",
             "--json",
         ])
+        .current_dir(temp.path())
         .env("HOME", temp.path().join("home"))
         .env("XDG_DATA_HOME", temp.path().join("xdg-data"))
         .env("XDG_CONFIG_HOME", temp.path().join("xdg-config"))
