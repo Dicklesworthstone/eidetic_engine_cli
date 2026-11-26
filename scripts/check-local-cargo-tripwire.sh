@@ -325,19 +325,25 @@ probe_processes() {
     lock_holder_pids=$(package_cache_lock_pids)
     local tmux_panes
     tmux_panes=$(tmux_panes_output)
-    # `ps` on macOS prints PID with leading spaces; normalize.
-    printf '%s\n' "$rust_process_lines" | while IFS= read -r line; do
-        local pid
-        local ppid
-        local elapsed
-        local executable_name
-        local cmd
-        # `read` assigns the untouched remainder to its final variable, so
-        # one shell parse recovers the four fixed ps columns and full command
-        # without five awk/sed subprocesses for every candidate process.
-        read -r pid ppid elapsed executable_name cmd <<EOF
-$line
-EOF
+    local pid
+    local ppid
+    local elapsed
+    local executable_name
+    local cmd
+    # `read` assigns the untouched remainder to its final variable, so one
+    # shell parse recovers the four fixed ps columns and the full command
+    # without five awk/sed subprocesses for every candidate process; its
+    # default IFS also drops the leading spaces macOS `ps` puts before a PID.
+    #
+    # It reads the pipe itself. Handing each line to `read` through a heredoc
+    # HUNG the probe, and every pinned dispatch with it, on 2026-11-26: a
+    # sample of the stuck shell showed `read`'s redirection blocked in
+    # `heredoc_write` -> `write`. bash 5.3 writes a small heredoc into a pipe
+    # before anything reads it. A macOS pipe starts at 16 KiB and grows only
+    # while the system's pipe memory allows, so on a loaded machine a line
+    # past 16 KiB (an agent's `zsh -c` command that mentions cargo) never
+    # fits. The same parse on an idle machine does not hang.
+    printf '%s\n' "$rust_process_lines" | while read -r pid ppid elapsed executable_name cmd; do
         [ -n "$pid" ] || continue
         [ -n "$executable_name" ] || continue
         [ -n "$cmd" ] || continue
@@ -1636,7 +1642,37 @@ EOF
             exit 1
         fi
     fi
-    printf 'self-test PASSED: 30 classifier cases, JSON repair action, stable-wrapper/ssh exclusion, executable-boundary process/tmux fixture, and worktree fixtures produced expected outcomes\n'
+    # A ps line past 16 KiB once hung the probe, which handed each line to
+    # `read` through a heredoc (2026-11-26; see probe_processes). A ~20 KiB
+    # cargo command line must classify like a short one. Whether the old parse
+    # hangs depends on the machine's pipe memory, so this arm pins the
+    # classification; it cannot promise to reproduce the hang.
+    local long_ps_fixture long_args long_body long_rows
+    local saved_ps_fixture="$PS_FIXTURE"
+    local saved_package_cache_pids_fixture="$PACKAGE_CACHE_PIDS_FIXTURE"
+    local saved_tmux_panes_text_fixture="$TMUX_PANES_TEXT_FIXTURE"
+    local saved_process_stat_text_fixture="$PROCESS_STAT_TEXT_FIXTURE"
+    long_ps_fixture=$(mktemp "${TMPDIR:-/tmp}/tripwire_long_ps.XXXXXX") || exit 1
+    long_args=$(printf ' --features long-command-line-%04d' $(seq 1 600))
+    printf ' 200 1 00:01:00 cargo cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml%s\n' \
+        "$long_args" >"$long_ps_fixture"
+    PS_FIXTURE="$long_ps_fixture"
+    PACKAGE_CACHE_PIDS_FIXTURE="0"
+    PROCESS_STAT_TEXT_FIXTURE="200 R+"
+    TMUX_PANES_TEXT_FIXTURE=$(printf '%%1\t1\tfixture:0.0\t/\tfixture')
+    long_body=$(probe_processes)
+    PS_FIXTURE="$saved_ps_fixture"
+    PACKAGE_CACHE_PIDS_FIXTURE="$saved_package_cache_pids_fixture"
+    TMUX_PANES_TEXT_FIXTURE="$saved_tmux_panes_text_fixture"
+    PROCESS_STAT_TEXT_FIXTURE="$saved_process_stat_text_fixture"
+    rm -f "$long_ps_fixture"
+    long_rows=$(printf '%s\n' "$long_body" | awk -F '\t' '$1 == "200" && $10 == "local_cargo_disallowed"' | grep -c . || true)
+    if [ "$long_rows" != 1 ]; then
+        printf 'self-test FAILED: a 20 KiB cargo command line must classify as local_cargo_disallowed; got %s\n' \
+            "$(printf '%s' "$long_body" | cut -c1-300)" >&2
+        exit 1
+    fi
+    printf 'self-test PASSED: 30 classifier cases, JSON repair action, stable-wrapper/ssh exclusion, executable-boundary process/tmux fixture, a 20 KiB command line, and worktree fixtures produced expected outcomes\n'
     exit 0
 }
 
