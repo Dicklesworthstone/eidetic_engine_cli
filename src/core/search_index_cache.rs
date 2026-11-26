@@ -17,11 +17,16 @@ use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use serde::Serialize;
+
+use crate::core::singleflight::SingleFlightGroup;
+use crate::models::{SingleFlightKey, SingleFlightKeyInput, SingleFlightSurface};
 use crate::search::{TwoTierConfig, TwoTierIndex};
 
 const CAPACITY: usize = 8;
+const OPEN_FOLLOWER_TIMEOUT: Duration = Duration::from_millis(250);
 const VECTOR_FILES: [&str; 3] = ["vector.fast.idx", "vector.idx", "vector.quality.idx"];
 
 static CACHE: OnceLock<VectorIndexCache> = OnceLock::new();
@@ -29,6 +34,7 @@ static CACHE: OnceLock<VectorIndexCache> = OnceLock::new();
 #[derive(Default)]
 struct VectorIndexCache {
     entries: Mutex<Vec<CacheEntry>>,
+    opens: SingleFlightGroup<Option<Arc<TwoTierIndex>>>,
 }
 
 struct CacheEntry {
@@ -44,15 +50,16 @@ struct CacheKey {
     configuration: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct GenerationIdentity {
+    generation: u64,
     directory_identity: (u64, u64),
     metadata_hash: [u8; 32],
     manifest_hash: Option<[u8; 32]>,
     vectors: [Option<ArtifactIdentity>; 3],
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct ArtifactIdentity {
     device: u64,
     inode: u64,
@@ -92,6 +99,19 @@ impl VectorIndexCache {
         index_dir: &Path,
         config: TwoTierConfig,
     ) -> Result<Arc<TwoTierIndex>, frankensearch::SearchError> {
+        self.open_with(index_dir, config, OPEN_FOLLOWER_TIMEOUT, TwoTierIndex::open)
+    }
+
+    fn open_with<F>(
+        &self,
+        index_dir: &Path,
+        config: TwoTierConfig,
+        follower_timeout: Duration,
+        mut open_index: F,
+    ) -> Result<Arc<TwoTierIndex>, frankensearch::SearchError>
+    where
+        F: FnMut(&Path, TwoTierConfig) -> Result<TwoTierIndex, frankensearch::SearchError>,
+    {
         let key = match cache_key(index_dir, &config) {
             Ok(key) => key,
             Err(reason) => {
@@ -105,7 +125,7 @@ impl VectorIndexCache {
                     });
                 }
                 trace(index_dir, "bypass", reason);
-                return TwoTierIndex::open(index_dir, config).map(Arc::new);
+                return open_index(index_dir, config).map(Arc::new);
             }
         };
         if let Ok(mut entries) = self.entries.lock() {
@@ -121,13 +141,92 @@ impl VectorIndexCache {
             }
         } else {
             trace(index_dir, "bypass", "cache_unavailable");
-            return TwoTierIndex::open(index_dir, config).map(Arc::new);
+            return open_index(index_dir, config).map(Arc::new);
         }
 
-        // Opening outside the cache mutex does not serialize unrelated
-        // workspaces. A racing miss joins the already admitted allocation
-        // below, so its first search still shares the lazy quantized tier.
-        let index = Arc::new(TwoTierIndex::open(index_dir, config.clone())?);
+        let Some(open_key) = index_open_key(&key) else {
+            return self.open_and_admit(index_dir, config, key, &mut open_index);
+        };
+        let mut own_result = None;
+        let shared = self.opens.run(&open_key, follower_timeout, || {
+            let result =
+                self.open_and_admit(index_dir, config.clone(), key.clone(), &mut open_index);
+            // Only admitted readers may be shared. In particular, a transient
+            // optional-tier failure must leave every follower free to retry.
+            let reader = result
+                .as_ref()
+                .ok()
+                .filter(|index| self.is_admitted(&key, index))
+                .map(Arc::clone);
+            let failed = result.is_err();
+            own_result = Some(result);
+            if failed {
+                Err("vector index open failed".to_owned())
+            } else {
+                Ok(reader)
+            }
+        });
+        // The opener owns the original typed error, including when a follower
+        // times out and opens independently or the coalescer becomes poisoned.
+        if let Some(result) = own_result {
+            return result;
+        }
+        if let Ok(run) = shared
+            && let Some(index) = run.value
+            && cache_key(index_dir, &config).as_ref() == Ok(&key)
+        {
+            trace(index_dir, "hit", "coalesced_open");
+            return Ok(index);
+        }
+        self.open_and_admit(index_dir, config, key, &mut open_index)
+    }
+
+    fn is_admitted(&self, key: &CacheKey, index: &Arc<TwoTierIndex>) -> bool {
+        self.entries.lock().is_ok_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.key == *key && Arc::ptr_eq(&entry.index, index))
+        })
+    }
+
+    fn open_and_admit<F>(
+        &self,
+        index_dir: &Path,
+        config: TwoTierConfig,
+        key: CacheKey,
+        open_index: &mut F,
+    ) -> Result<Arc<TwoTierIndex>, frankensearch::SearchError>
+    where
+        F: FnMut(&Path, TwoTierConfig) -> Result<TwoTierIndex, frankensearch::SearchError>,
+    {
+        // A follower can reach this fallback after explicitly rejecting an
+        // old shared reader. Never let the delayed cache-hit check below
+        // resurrect that reader under its original, now-stale identity.
+        let current_key = cache_key(index_dir, &config);
+        if current_key.as_ref() != Ok(&key) {
+            if let Ok(mut entries) = self.entries.lock() {
+                entries.retain(|entry| {
+                    entry.key.directory != key.directory
+                        || current_key
+                            .as_ref()
+                            .is_ok_and(|current| entry.key.source == current.source)
+                });
+            }
+            trace(index_dir, "bypass", "generation_changed_before_open");
+            return open_index(index_dir, config).map(Arc::new);
+        }
+        // Another leader may have finished between our initial cache miss
+        // and joining its flight. Recheck before doing any filesystem open.
+        if let Ok(mut entries) = self.entries.lock()
+            && let Some(entry) = entries.iter_mut().find(|entry| entry.key == key)
+        {
+            entry.last_used = Instant::now();
+            trace(index_dir, "hit", "concurrent_admission");
+            return Ok(Arc::clone(&entry.index));
+        }
+        // Neither the global cache mutex nor another workspace's flight is
+        // held across filesystem work.
+        let index = Arc::new(open_index(index_dir, config.clone())?);
         if key.source.vectors[2].is_some() && !index.has_quality_index() {
             // Upstream deliberately degrades a failed optional quality open
             // to fast-only. A transient lock/IO failure must be retried next
@@ -164,6 +263,32 @@ impl VectorIndexCache {
         trace(index_dir, "miss", "immutable_generation");
         Ok(index)
     }
+}
+
+fn index_open_key(key: &CacheKey) -> Option<SingleFlightKey> {
+    // Preserve non-UTF-8 path identity and every inode/configuration field.
+    // Only hashes enter the coalescer's diagnostic key.
+    let directory = blake3::hash(key.directory.as_os_str().as_encoded_bytes())
+        .to_hex()
+        .to_string();
+    let source = blake3::hash(&serde_json::to_vec(&key.source).ok()?)
+        .to_hex()
+        .to_string();
+    let configuration = blake3::hash(&key.configuration).to_hex().to_string();
+    let options = [
+        ("generation_identity", source.as_str()),
+        ("configuration", configuration.as_str()),
+    ];
+    let mut input = SingleFlightKeyInput::new(
+        SingleFlightSurface::Search,
+        &directory,
+        0,
+        crate::core::index::INDEX_METADATA_SCHEMA_V2,
+    );
+    input.index_generation = Some(key.source.generation);
+    input.source_mode = Some("immutable_vector_reader");
+    input.option_pairs = &options;
+    Some(SingleFlightKey::from_input(&input))
 }
 
 fn trace(index_dir: &Path, decision: &'static str, reason: &'static str) {
@@ -215,13 +340,13 @@ fn cache_key(index_dir: &Path, config: &TwoTierConfig) -> Result<CacheKey, &'sta
         serde_json::from_slice(&metadata).map_err(|_| "metadata_unverified")?;
     if parsed.get("schema").and_then(serde_json::Value::as_str)
         != Some(crate::core::index::INDEX_METADATA_SCHEMA_V2)
-        || parsed
-            .get("generation")
-            .and_then(serde_json::Value::as_u64)
-            .is_none()
     {
         return Err("metadata_unverified");
     }
+    let generation = parsed
+        .get("generation")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("metadata_unverified")?;
     let manifest_hash = read_metadata(&index_dir.join("manifest.json"))?
         .map(|bytes| *blake3::hash(&bytes).as_bytes());
     let vectors = [
@@ -235,6 +360,7 @@ fn cache_key(index_dir: &Path, config: &TwoTierConfig) -> Result<CacheKey, &'sta
     Ok(CacheKey {
         directory,
         source: GenerationIdentity {
+            generation,
             directory_identity,
             metadata_hash: *blake3::hash(&metadata).as_bytes(),
             manifest_hash,
@@ -293,6 +419,354 @@ mod tests {
                 "generation": 1,
             }))?,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn delayed_open_never_resurrects_a_replaced_cached_generation() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let live = root.path().join("index");
+        fixture(&live, "previous")?;
+        let cache = VectorIndexCache::default();
+        let config = TwoTierConfig::default();
+        let original = cache.open(&live, config.clone())?;
+        let original_key = cache_key(&live, &config)?;
+        let staged = root.path().join("staged");
+        fixture(&staged, "replacement")?;
+        fs::rename(
+            live.join(VECTOR_FILES[0]),
+            root.path().join("displaced.idx"),
+        )?;
+        fs::rename(staged.join(VECTOR_FILES[0]), live.join(VECTOR_FILES[0]))?;
+
+        let mut opens = 0;
+        let replacement =
+            cache.open_and_admit(&live, config, original_key, &mut |path, config| {
+                opens += 1;
+                TwoTierIndex::open(path, config)
+            })?;
+        assert_eq!(
+            opens, 1,
+            "a rejected identity must not hit its old cache entry"
+        );
+        assert!(!Arc::ptr_eq(&original, &replacement));
+        assert_eq!(
+            replacement.search_fast(&[1.0, 0.0, 0.0, 0.0], 1)?[0].doc_id,
+            "replacement"
+        );
+        assert!(cache.entries.lock().map_err(|_| "cache lock")?.is_empty());
+        Ok(())
+    }
+
+    fn wait_for_open_follower(cache: &VectorIndexCache) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let posture =
+                cache
+                    .opens
+                    .posture(SingleFlightSurface::Search, true, Duration::from_secs(30));
+            if posture.follower_join_count > 0 {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "follower did not join the held open"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn concurrent_misses_open_once_before_sharing_the_reader() -> TestResult {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+
+        let root = tempfile::tempdir()?;
+        fixture(root.path(), "first")?;
+        let cache = VectorIndexCache::default();
+        let opens = AtomicUsize::new(0);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let cache_ref = &cache;
+        let opens_ref = &opens;
+        let path = root.path();
+        std::thread::scope(|scope| -> TestResult {
+            let leader = scope.spawn(move || {
+                cache_ref.open_with(
+                    path,
+                    TwoTierConfig::default(),
+                    Duration::from_secs(30),
+                    |path, config| {
+                        opens_ref.fetch_add(1, Ordering::SeqCst);
+                        entered_tx.send(()).expect("announce leader open");
+                        release_rx
+                            .recv_timeout(Duration::from_secs(10))
+                            .expect("release leader open");
+                        TwoTierIndex::open(path, config)
+                    },
+                )
+            });
+            entered_rx.recv_timeout(Duration::from_secs(5))?;
+            let follower = scope.spawn(move || {
+                cache_ref.open_with(
+                    path,
+                    TwoTierConfig::default(),
+                    Duration::from_secs(30),
+                    |path, config| {
+                        opens_ref.fetch_add(1, Ordering::SeqCst);
+                        TwoTierIndex::open(path, config)
+                    },
+                )
+            });
+            wait_for_open_follower(&cache);
+            release_tx.send(())?;
+            let first = leader.join().expect("leader panicked")?;
+            let second = follower.join().expect("follower panicked")?;
+            assert_eq!(
+                opens.load(Ordering::SeqCst),
+                1,
+                "concurrent admission alone is not coalescing"
+            );
+            assert!(Arc::ptr_eq(&first, &second));
+            assert_eq!(
+                first.search_fast(&[1.0, 0.0, 0.0, 0.0], 1)?,
+                second.search_fast(&[1.0, 0.0, 0.0, 0.0], 1)?
+            );
+            assert_eq!(cache.opens.active_len()?, 0);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn follower_timeout_opens_independently_then_joins_admitted_reader() -> TestResult {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+
+        let root = tempfile::tempdir()?;
+        fixture(root.path(), "first")?;
+        let cache = VectorIndexCache::default();
+        let opens = AtomicUsize::new(0);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let cache_ref = &cache;
+        let opens_ref = &opens;
+        let path = root.path();
+        std::thread::scope(|scope| -> TestResult {
+            let leader = scope.spawn(move || {
+                cache_ref.open_with(
+                    path,
+                    TwoTierConfig::default(),
+                    Duration::from_secs(30),
+                    |path, config| {
+                        opens_ref.fetch_add(1, Ordering::SeqCst);
+                        entered_tx.send(()).expect("announce leader open");
+                        release_rx
+                            .recv_timeout(Duration::from_secs(10))
+                            .expect("release leader open");
+                        TwoTierIndex::open(path, config)
+                    },
+                )
+            });
+            entered_rx.recv_timeout(Duration::from_secs(5))?;
+            let fallback = cache.open_with(
+                path,
+                TwoTierConfig::default(),
+                Duration::ZERO,
+                |path, config| {
+                    opens.fetch_add(1, Ordering::SeqCst);
+                    TwoTierIndex::open(path, config)
+                },
+            )?;
+            release_tx.send(())?;
+            let first = leader.join().expect("leader panicked")?;
+            assert_eq!(opens.load(Ordering::SeqCst), 2);
+            assert!(Arc::ptr_eq(&first, &fallback));
+            let posture = cache
+                .opens
+                .posture(SingleFlightSurface::Search, true, Duration::ZERO);
+            assert_eq!(posture.follower_timeout_count, 1);
+            assert_eq!(cache.opens.active_len()?, 0);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn failed_leader_preserves_its_error_and_followers_retry() -> TestResult {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+
+        let root = tempfile::tempdir()?;
+        fixture(root.path(), "first")?;
+        let cache = VectorIndexCache::default();
+        let opens = AtomicUsize::new(0);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let cache_ref = &cache;
+        let opens_ref = &opens;
+        let path = root.path();
+        std::thread::scope(|scope| -> TestResult {
+            let leader = scope.spawn(move || {
+                cache_ref.open_with(
+                    path,
+                    TwoTierConfig::default(),
+                    Duration::from_secs(30),
+                    |_path, _config| {
+                        opens_ref.fetch_add(1, Ordering::SeqCst);
+                        entered_tx.send(()).expect("announce leader open");
+                        release_rx
+                            .recv_timeout(Duration::from_secs(10))
+                            .expect("release leader open");
+                        Err(frankensearch::SearchError::Cancelled {
+                            phase: "reader.open.fixture".to_owned(),
+                            reason: "original typed failure".to_owned(),
+                        })
+                    },
+                )
+            });
+            entered_rx.recv_timeout(Duration::from_secs(5))?;
+            let follower = scope.spawn(move || {
+                cache_ref.open_with(
+                    path,
+                    TwoTierConfig::default(),
+                    Duration::from_secs(30),
+                    |path, config| {
+                        opens_ref.fetch_add(1, Ordering::SeqCst);
+                        TwoTierIndex::open(path, config)
+                    },
+                )
+            });
+            wait_for_open_follower(&cache);
+            release_tx.send(())?;
+            assert!(matches!(
+                leader.join().expect("leader panicked"),
+                Err(frankensearch::SearchError::Cancelled { phase, reason })
+                    if phase == "reader.open.fixture" && reason == "original typed failure"
+            ));
+            let recovered = follower.join().expect("follower panicked")?;
+            assert_eq!(opens.load(Ordering::SeqCst), 2);
+            assert_eq!(
+                recovered.search_fast(&[1.0, 0.0, 0.0, 0.0], 1)?[0].doc_id,
+                "first"
+            );
+            assert_eq!(cache.opens.active_len()?, 0);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn incomplete_quality_open_is_not_shared_with_waiting_followers() -> TestResult {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+
+        let root = tempfile::tempdir()?;
+        fixture(root.path(), "first")?;
+        let quality = root.path().join(VECTOR_FILES[2]);
+        let mut builder = VectorIndex::create(&quality, "cache-test", 4)?;
+        builder.write_record("first", &[1.0, 0.0, 0.0, 0.0])?;
+        builder.finish()?;
+        let mut writer = Some(VectorIndex::open(&quality)?);
+        assert!(
+            !root.path().join("vector.quality.idx.wal").exists(),
+            "opening the quality writer must not bypass immutable-cache admission"
+        );
+        let cache = VectorIndexCache::default();
+        let opens = AtomicUsize::new(0);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let cache_ref = &cache;
+        let opens_ref = &opens;
+        let path = root.path();
+        std::thread::scope(|scope| -> TestResult {
+            let leader = scope.spawn(move || {
+                cache_ref.open_with(
+                    path,
+                    TwoTierConfig::default(),
+                    Duration::from_secs(30),
+                    |path, config| {
+                        opens_ref.fetch_add(1, Ordering::SeqCst);
+                        let index = TwoTierIndex::open(path, config)?;
+                        assert!(!index.has_quality_index());
+                        drop(writer.take());
+                        entered_tx.send(()).expect("announce incomplete open");
+                        release_rx
+                            .recv_timeout(Duration::from_secs(10))
+                            .expect("release incomplete open");
+                        Ok(index)
+                    },
+                )
+            });
+            entered_rx.recv_timeout(Duration::from_secs(5))?;
+            let follower = scope.spawn(move || {
+                cache_ref.open_with(
+                    path,
+                    TwoTierConfig::default(),
+                    Duration::from_secs(30),
+                    |path, config| {
+                        opens_ref.fetch_add(1, Ordering::SeqCst);
+                        TwoTierIndex::open(path, config)
+                    },
+                )
+            });
+            wait_for_open_follower(&cache);
+            release_tx.send(())?;
+            let incomplete = leader.join().expect("leader panicked")?;
+            let recovered = follower.join().expect("follower panicked")?;
+            assert!(!incomplete.has_quality_index());
+            assert!(recovered.has_quality_index());
+            assert!(!Arc::ptr_eq(&incomplete, &recovered));
+            assert_eq!(opens.load(Ordering::SeqCst), 2);
+            assert_eq!(cache.entries.lock().map_err(|_| "cache lock")?.len(), 1);
+            assert_eq!(cache.opens.active_len()?, 0);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn open_keys_cover_exact_paths_artifacts_and_configuration() -> TestResult {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = tempfile::tempdir()?;
+        fixture(root.path(), "first")?;
+        let key = cache_key(root.path(), &TwoTierConfig::default())?;
+        let original = index_open_key(&key).ok_or("missing open key")?;
+        assert_eq!(
+            original,
+            index_open_key(&key).ok_or("missing repeated key")?
+        );
+        assert_eq!(original.index_generation, Some(1));
+
+        let mut changed = key.clone();
+        changed.source.directory_identity.1 += 1;
+        assert_ne!(Some(original.clone()), index_open_key(&changed));
+        changed = key.clone();
+        changed.source.generation += 1;
+        assert_ne!(Some(original.clone()), index_open_key(&changed));
+        changed = key.clone();
+        changed.source.metadata_hash[0] ^= 1;
+        assert_ne!(Some(original.clone()), index_open_key(&changed));
+        changed = key.clone();
+        changed.source.manifest_hash = Some([1; 32]);
+        assert_ne!(Some(original.clone()), index_open_key(&changed));
+        changed = key.clone();
+        changed.source.vectors[0]
+            .as_mut()
+            .ok_or("missing vector identity")?
+            .inode += 1;
+        assert_ne!(Some(original.clone()), index_open_key(&changed));
+        changed = key.clone();
+        changed.configuration.push(0);
+        assert_ne!(Some(original), index_open_key(&changed));
+
+        let mut first_path = key.clone();
+        let mut second_path = key;
+        first_path.directory = PathBuf::from(OsString::from_vec(b"index-\xff".to_vec()));
+        second_path.directory = PathBuf::from(OsString::from_vec(b"index-\xfe".to_vec()));
+        assert_eq!(
+            first_path.directory.to_string_lossy(),
+            second_path.directory.to_string_lossy()
+        );
+        assert_ne!(index_open_key(&first_path), index_open_key(&second_path));
         Ok(())
     }
 
