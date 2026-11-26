@@ -395,6 +395,41 @@ fn bounded_generation_inventory_charges_sparse_files_by_logical_size() {
 
 #[cfg(feature = "lexical-bm25")]
 #[test]
+fn current_generation_skips_delta_source_admission() {
+    let fixture = Fixture::new(1);
+    fixture.seed_index();
+    let cx = asupersync::Cx::for_testing();
+
+    // Make an accidental source count observable independently of timing.
+    // The published and authoritative watermarks still match.
+    fixture
+        .db
+        .execute_raw("ALTER TABLE artifacts RENAME TO unavailable_artifacts")
+        .expect("withhold one source from the admission scan");
+    assert!(
+        source_snapshot::live_source_rows_fit(
+            &cx,
+            &fixture.db,
+            &fixture.workspace_id,
+            super::MAX_INTERACTIVE_SOURCE_DOCUMENTS,
+        )
+        .is_err()
+    );
+    assert_eq!(
+        super::bounded_generation_gap(
+            &cx,
+            &fixture.db,
+            &fixture.workspace_id,
+            &fixture.index_dir,
+            8,
+        )
+        .expect("a current index does not require source admission"),
+        None
+    );
+}
+
+#[cfg(feature = "lexical-bm25")]
+#[test]
 fn bounded_delta_keeps_its_captured_generation_and_unclaimed_jobs_pending() {
     let fixture = Fixture::new(128);
     fixture.seed_index();
