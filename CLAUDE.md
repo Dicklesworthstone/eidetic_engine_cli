@@ -894,12 +894,32 @@ and five of the six are labelled `— retryable` by rch itself:
 
 | refusal | meaning | action |
 |---|---|---|
-| `(selection error: queue_timeout)` | transient: nothing free right now | retry is appropriate |
+| `(selection error: queue_timeout)` | transient: nothing free right now, but often DISK, not slots: see below the table | retry is appropriate, once `rch diagnose` shows a worker it would select |
 | `(no_free_slots)` naming a core estimate | ARITHMETIC: the request cannot fit that worker | retrying is useless; change `-j` or drop the pin |
 | `(unavailable); '<w>' is draining/unreachable` | that worker is GONE; its circuit is open | retrying the pin is useless; pin elsewhere |
 | `RCH_SYNC_LIVE_CHECKOUT_REFUSED ... (status Some(73))` | that worker's `/data/projects/<project>` is a live git checkout, so syncing your tree over it is refused | permanent for that box; pin elsewhere |
 | `[RCH-I002] ... refused (unavailable); failed admission under critical pressure (admission rejected: critical pressure (confidence=high, rule=memory_pressure>=critical_memory_pressure))` | that worker's MEMORY is exhausted; admission is rejected before any work | retrying the pin is useless, but this one is PREDICTABLE — see `pressure_state` below |
 | `[RCH-E410] ... missing source_entrypoint .../benches/._<name>.rs` | the export is on a filesystem that cannot store xattrs, so macOS wrote AppleDouble `._*` sidecars; rch's preflight REQUIRES them remotely and `.rchignore` deliberately EXCLUDES them | retrying is useless on any worker — put the export on APFS; see below |
+
+**A `queue_timeout` on a worker `rch status` shows with free slots is usually
+DISK HEADROOM, and only `rch diagnose` says so.** Measured 2026-11-25: two
+pinned `-j 2` dispatches, to workers showing 1 and 2 free slots with
+`pressure_state` warning, both waited the full ~300 s and came back
+`queue_timeout ... retryable`. Then `rch diagnose -- cargo test --locked -j 2
+...` (add `RCH_WORKER=<id>` to simulate a pin) gave the real reason:
+
+```text
+excluded <worker> build disk headroom requires 70 GiB including active reservations
+  and the reserve floor; worker reported 51 GiB free; request fits after
+  competing disk reservations retire [disk_headroom_reserved]
+```
+
+The requirement counts OTHER builds' reservations, which neither
+`rch status` nor `pressure_disk_free_gb` shows. That day it ran from 40 to
+100 GiB depending on the worker, so "51 GB free" was not enough. The same
+listing also caught the 4-free-slot box for `os=windows`. `diagnose`
+only simulates selection and costs nothing on the fleet, so run it, or poll
+it, before a dispatch rather than paying 300 s per refusal.
 
 **That sixth one is the one that will eat a whole session, because it is
 deterministic and rch calls it retryable.** Measured 2026-10-25, exit 103,
