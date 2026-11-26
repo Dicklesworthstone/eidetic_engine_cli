@@ -247,6 +247,23 @@ fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
     Ok(output)
 }
 
+/// [`run_ee`] from `cwd`, for commands checked without `--workspace`.
+///
+/// Those commands resolve their workspace from the cwd. Inheriting cargo's cwd
+/// pointed them at the checkout (bd-uuaa3), and the directory each test hashed
+/// was one the command never addressed, so "workspace unchanged" held whatever
+/// the command did. Run from the hashed dir, the hash covers the workspace the
+/// command resolves.
+fn run_ee_in(cwd: &Path, args: &[&str]) -> Result<std::process::Output, String> {
+    let iso_root =
+        std::env::temp_dir().join(format!("ee-effect-contracts-iso-{}", std::process::id()));
+    crate::isolated_ee::isolated_ee_command(&iso_root)?
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .map_err(|e| format!("Failed to run ee: {e}"))
+}
+
 /// Slice the body of `extract_command_path` out of the CLI source.
 ///
 /// Split out so the extractor below and the shape gate that guards it read the
@@ -780,11 +797,11 @@ fn check_command_does_not_mutate_workspace() -> TestResult {
 
 #[test]
 fn capabilities_command_does_not_mutate_workspace() -> TestResult {
-    let temp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+    let temp = crate::isolated_ee::outside_workspace_tempdir()?;
     let workspace = temp.path();
 
     let before = hash_directory(workspace);
-    let output = run_ee(&["capabilities", "--json"])?;
+    let output = run_ee_in(workspace, &["capabilities", "--json"])?;
     let after = hash_directory(workspace);
 
     ensure(output.status.success(), true, "capabilities succeeds")?;
@@ -793,11 +810,11 @@ fn capabilities_command_does_not_mutate_workspace() -> TestResult {
 
 #[test]
 fn version_command_does_not_mutate_workspace() -> TestResult {
-    let temp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+    let temp = crate::isolated_ee::outside_workspace_tempdir()?;
     let workspace = temp.path();
 
     let before = hash_directory(workspace);
-    let output = run_ee(&["version", "--json"])?;
+    let output = run_ee_in(workspace, &["version", "--json"])?;
     let after = hash_directory(workspace);
 
     ensure(output.status.success(), true, "version succeeds")?;
@@ -806,11 +823,11 @@ fn version_command_does_not_mutate_workspace() -> TestResult {
 
 #[test]
 fn health_command_does_not_mutate_workspace() -> TestResult {
-    let temp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+    let temp = crate::isolated_ee::outside_workspace_tempdir()?;
     let workspace = temp.path();
 
     let before = hash_directory(workspace);
-    let output = run_ee(&["health", "--json"])?;
+    let output = run_ee_in(workspace, &["health", "--json"])?;
     let after = hash_directory(workspace);
 
     ensure(
@@ -823,11 +840,11 @@ fn health_command_does_not_mutate_workspace() -> TestResult {
 
 #[test]
 fn introspect_command_does_not_mutate_workspace() -> TestResult {
-    let temp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+    let temp = crate::isolated_ee::outside_workspace_tempdir()?;
     let workspace = temp.path();
 
     let before = hash_directory(workspace);
-    let output = run_ee(&["introspect", "--json"])?;
+    let output = run_ee_in(workspace, &["introspect", "--json"])?;
     let after = hash_directory(workspace);
 
     ensure(output.status.success(), true, "introspect succeeds")?;
