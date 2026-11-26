@@ -1848,6 +1848,11 @@ fn remember_memory_outcome_inner_with_store_and_batch_session(
         // and all of them were being handed an empty window forever. The
         // capability existed everywhere except at the one call site that feeds it.
         //
+        // Necessary, not sufficient: this operation goes to
+        // run_one_shot_write_intake below, which never records a write-stream
+        // observation. Only the WriteOwner actor does, so the layer still sees no
+        // `ee remember` (bd-write-immune-inert-in-production-qnc87).
+        //
         // The agent identity is the same snapshot used for trust above.
         // Sandbox imports without an agent still have an external source;
         // anonymous manual captures retain their existing None posture.
