@@ -309,12 +309,16 @@ fn embedding_fetch_repairs_machine_receipt_without_initializing_a_workspace() ->
         ("EE_EMBED_MODEL_DIR".to_string(), path_string(&model_root)),
     ]);
     // Deliberately omit --workspace: first-use repair runs from an ordinary cwd.
+    // Not workspace.path: that sits under the target dir, which an rch `--job`
+    // places inside a live checkout whose .ee/ the walk-up would find
+    // (bd-uuaa3). This dir has no .ee/ ancestor.
+    let cwd = isolated_ee::outside_workspace_tempdir()?;
     let output = ee_command_with_env(
         &workspace,
         &["model", "fetch", "embedding-default", "--json"],
         &env,
     )
-    .current_dir(&workspace.path)
+    .current_dir(cwd.path())
     .output()
     .map_err(|error| error.to_string())?;
     ensure_success(&output, "machine-only receipt repair")?;
@@ -325,6 +329,7 @@ fn embedding_fetch_repairs_machine_receipt_without_initializing_a_workspace() ->
     assert_eq!(data.get("databasePath"), Some(&Value::Null));
     assert_eq!(data.get("registryEntry"), Some(&Value::Null));
     assert_eq!(data["copied"], false);
+    assert!(!cwd.path().join(".ee").exists());
     assert!(!workspace.path.join(".ee").exists());
     assert!(is_verification_cached(&manifest, &model_dir));
 
