@@ -27,8 +27,20 @@ fn ensure_contains(haystack: &str, needle: &str, context: &str) -> TestResult {
     )
 }
 
+/// No caller names a workspace, so each spawn runs from a dir workspace
+/// discovery cannot climb out of, with `EE_WORKSPACE` removed (bd-uuaa3).
+/// Inheriting cargo's cwd read the checkout's own `.ee/` store. Every assertion
+/// here is a shape check plus exit 0, and status, check and doctor exit 0
+/// whatever the store's state.
 fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
-    crate::common_spawn::serialized_real_ee(args)
+    let cwd = crate::common_spawn::outside_workspace_dir()?;
+    crate::common_spawn::serialized_real_ee_with(|command| {
+        command
+            .current_dir(cwd.path())
+            .env_remove("EE_WORKSPACE")
+            .args(args);
+    })
+    .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
 #[test]

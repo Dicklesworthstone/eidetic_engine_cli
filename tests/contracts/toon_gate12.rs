@@ -42,7 +42,7 @@ fn ensure_not_contains(haystack: &str, needle: &str, context: &str) -> TestResul
 }
 
 fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
-    crate::common_spawn::serialized_real_ee(args)
+    run_ee_with_env(args, &[])
 }
 
 fn isolated_workspace(label: &str) -> Result<PathBuf, String> {
@@ -87,12 +87,22 @@ fn run_ee_in_workspace(workspace: &Path, args: &[&str]) -> Result<std::process::
     })
 }
 
+/// Spawns that name no workspace. They run from a dir workspace discovery
+/// cannot climb out of, with `EE_WORKSPACE` removed, so they never read the
+/// checkout's own `.ee/` store (bd-uuaa3). That store also made them contend
+/// for one database (bd-2td6p). Every assertion they make holds with no store:
+/// status, doctor, check and health all exit 0 through `write_stdout` whatever
+/// the store's state, and the fields checked are structural.
 fn run_ee_with_env(
     args: &[&str],
     env_overrides: &[(&str, &str)],
 ) -> Result<std::process::Output, String> {
+    let cwd = crate::common_spawn::outside_workspace_dir()?;
     crate::common_spawn::serialized_real_ee_with(|command| {
-        command.args(args);
+        command
+            .current_dir(cwd.path())
+            .env_remove("EE_WORKSPACE")
+            .args(args);
         for (key, value) in env_overrides {
             command.env(key, value);
         }

@@ -357,6 +357,46 @@ pub(super) fn isolated_home_dir() -> PathBuf {
     path
 }
 
+/// A fresh cwd for a spawn that names no workspace (bd-uuaa3).
+///
+/// With no `--workspace` and no `EE_WORKSPACE`, `ee` walks up from its cwd to
+/// the first ancestor holding a `.ee/` directory. A spawn that inherits cargo's
+/// cwd reads the checkout's own store that way, and on an rch worker
+/// `temp_dir()` is itself under the checkout, so this dir is made under `/tmp`
+/// where that exists. If an ancestor still holds a `.ee/`, it returns an error
+/// naming that ancestor rather than letting the stray store become the test's
+/// input. `outside_workspace_tempdir` in tests/support/isolated_ee.rs is the
+/// same rule for the suites; it is repeated here so contracts spawns keep going
+/// through this module's permit gate.
+pub fn outside_workspace_dir() -> Result<tempfile::TempDir, String> {
+    let system_tmp = std::path::Path::new("/tmp");
+    let parent = if system_tmp.is_dir() {
+        system_tmp.to_path_buf()
+    } else {
+        std::env::temp_dir()
+    };
+    let dir = tempfile::Builder::new()
+        .prefix("ee-contracts-no-workspace-")
+        .tempdir_in(&parent)
+        .map_err(|error| format!("create a temp dir under {}: {error}", parent.display()))?;
+    // The physical path is the one `ee` walks: /tmp is a symlink on macOS.
+    let physical = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
+    if let Some(store_root) = physical
+        .ancestors()
+        .find(|ancestor| ancestor.join(".ee").is_dir())
+    {
+        return Err(format!(
+            "{} is under {}, whose .ee/ workspace discovery would find",
+            physical.display(),
+            store_root.display()
+        ));
+    }
+    Ok(dir)
+}
+
 /// Path of the real `ee` binary provided by the Cargo test harness. This is
 /// the only `CARGO_BIN_EXE_ee` reference allowed in `tests/contracts`.
 pub fn ee_binary() -> &'static str {
