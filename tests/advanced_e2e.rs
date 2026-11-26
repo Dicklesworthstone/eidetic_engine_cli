@@ -806,6 +806,17 @@ fn ensure_exit_code(output: &Output, expected: i32, context: &str) -> TestResult
     )
 }
 
+/// The tripwire in a preflight `tripwires` array whose `source_id` matches.
+fn tripwire_by_source<'a>(
+    tripwires: &'a serde_json::Value,
+    source_id: &str,
+) -> Result<&'a serde_json::Value, String> {
+    tripwires
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["source_id"] == source_id))
+        .ok_or_else(|| format!("no tripwire with source_id {source_id} in {tripwires}"))
+}
+
 /// The economy payloads serialize `degraded` as aggregated entries with a `code`.
 fn ensure_economy_degraded_code(payload: &serde_json::Value, code: &str) -> TestResult {
     let codes: Vec<&str> = payload["degraded"]
@@ -2047,9 +2058,24 @@ fn preflight_run_show_close_persists_guard_tripwire_lifecycle() -> TestResult {
         &serde_json::json!("high"),
         "guard-backed run risk level",
     )?;
+    // `rm -rf /` matches two builtin rules: rm_rf_root and file_deletion, the
+    // RULE 1 matcher (3fd402e5d) that fires on any rm with a target. Both are
+    // advisory High at score 0.75, so generate_tripwires_from_sources breaks
+    // the tie on source_id and file_deletion sorts first. Look rm_rf_root up
+    // by source_id below rather than by position.
+    let expected_sources = serde_json::json!([
+        "preflight_guard:builtin:file_deletion",
+        "preflight_guard:builtin:rm_rf_root"
+    ]);
+    let source_ids = |tripwires: &serde_json::Value| -> serde_json::Value {
+        tripwires
+            .as_array()
+            .map(|items| items.iter().map(|item| item["source_id"].clone()).collect())
+            .unwrap_or_default()
+    };
     ensure_equal(
         &run_json["data"]["tripwires_set"],
-        &serde_json::json!(1),
+        &serde_json::json!(2),
         "guard-backed run tripwire count",
     )?;
     ensure_equal(
@@ -2058,19 +2084,23 @@ fn preflight_run_show_close_persists_guard_tripwire_lifecycle() -> TestResult {
         "guard-backed run must not report degraded mode",
     )?;
     ensure_equal(
-        &run_json["data"]["evidence_ids"][0],
-        &serde_json::json!("preflight_guard:builtin:rm_rf_root"),
-        "guard-backed run evidence id",
+        &run_json["data"]["evidence_ids"],
+        &expected_sources,
+        "guard-backed run evidence ids",
     )?;
     ensure_equal(
-        &run_json["data"]["tripwires"][0]["source_kind"],
+        &source_ids(&run_json["data"]["tripwires"]),
+        &expected_sources,
+        "guard-backed run tripwire provenance",
+    )?;
+    let rm_root_tripwire = tripwire_by_source(
+        &run_json["data"]["tripwires"],
+        "preflight_guard:builtin:rm_rf_root",
+    )?;
+    ensure_equal(
+        &rm_root_tripwire["source_kind"],
         &serde_json::json!("dependency_contract"),
         "guard-backed run tripwire source kind",
-    )?;
-    ensure_equal(
-        &run_json["data"]["tripwires"][0]["source_id"],
-        &serde_json::json!("preflight_guard:builtin:rm_rf_root"),
-        "guard-backed run tripwire provenance",
     )?;
     let run_id = run_json["data"]["run_id"]
         .as_str()
@@ -2082,7 +2112,7 @@ fn preflight_run_show_close_persists_guard_tripwire_lifecycle() -> TestResult {
     let expected_tripwire_provenance =
         format!("preflight://{run_id}/tripwire-source/preflight_guard:builtin:rm_rf_root");
     ensure(
-        run_json["data"]["tripwires"][0]["provenance"]
+        rm_root_tripwire["provenance"]
             .as_array()
             .is_some_and(|provenance| {
                 provenance.iter().any(|entry| {
@@ -2119,8 +2149,8 @@ fn preflight_run_show_close_persists_guard_tripwire_lifecycle() -> TestResult {
         "preflight run store captures dynamic run id",
     )?;
     ensure_equal(
-        &store_json["runs"][0]["report"]["tripwires"][0]["source_id"],
-        &serde_json::json!("preflight_guard:builtin:rm_rf_root"),
+        &source_ids(&store_json["runs"][0]["report"]["tripwires"]),
+        &expected_sources,
         "preflight run store captures guard tripwire provenance",
     )?;
     ensure_equal(
@@ -2164,12 +2194,15 @@ fn preflight_run_show_close_persists_guard_tripwire_lifecycle() -> TestResult {
         "preflight show reads persisted run id",
     )?;
     ensure_equal(
-        &show_json["data"]["tripwires"][0]["source_id"],
-        &serde_json::json!("preflight_guard:builtin:rm_rf_root"),
+        &source_ids(&show_json["data"]["tripwires"]),
+        &expected_sources,
         "preflight show reads persisted tripwire provenance",
     )?;
     ensure(
-        show_json["data"]["tripwires"][0]["provenance"]
+        tripwire_by_source(
+            &show_json["data"]["tripwires"],
+            "preflight_guard:builtin:rm_rf_root",
+        )?["provenance"]
             .as_array()
             .is_some_and(|provenance| {
                 provenance.iter().any(|entry| {

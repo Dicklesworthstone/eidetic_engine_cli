@@ -785,37 +785,36 @@ fn exit_130_sigint_terminates_gracefully() -> TestResult {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
-    // Create a named pipe so that ee import blocks waiting for data
+    // A command that genuinely blocks: recorder follow with no run id polls an
+    // initialised store and waits until interrupted. This row used to block
+    // `import jsonl` on a FIFO, but import has refused non-regular sources with
+    // exit 5 since 9dfd88b82, so the child was gone before the signal and the
+    // row measured a dead process. recorder_tail_follow.rs pins the follow
+    // loop's own SIGINT contract with a readiness event.
     let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let pipe_path = tempdir.path().join("pipe.jsonl");
-    let mkfifo = Command::new("mkfifo")
-        .arg("-m")
-        .arg("600")
-        .arg(&pipe_path)
-        .status()
-        .map_err(|e| format!("failed to run mkfifo: {e}"))?;
-    ensure(mkfifo.success(), "failed to create FIFO")?;
-
-    // Without a store the import exits 5 immediately, so the child is already
-    // gone before the SIGINT is sent and the test measures a dead process
-    // rather than graceful termination. The FIFO tempdir above is the pipe's
-    // home, not a workspace.
     let (_workspace_dir, workspace) = initialized_workspace()?;
     let mut child = crate::isolated_ee::isolated_ee_command(&tempdir.path().join(".ee-iso"))?
         .args([
             "--workspace",
             workspace.as_str(),
-            "import",
-            "jsonl",
-            "--source",
+            "recorder",
+            "follow",
+            "--json-lines",
+            "--poll-ms",
+            "10000",
         ])
-        .arg(&pipe_path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| e.to_string())?;
 
     std::thread::sleep(Duration::from_millis(500));
+    // The signal is meaningful only if the child is still running.
+    if let Some(early) = child.try_wait().map_err(|e| e.to_string())? {
+        return Err(format!(
+            "recorder follow exited before SIGINT was sent: {early:?}"
+        ));
+    }
 
     let kill = Command::new("kill")
         .arg("-INT")
