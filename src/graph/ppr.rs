@@ -330,10 +330,11 @@ fn store_ppr_prefetch_result(key: PprPrefetchCacheKey, result: &PageRankResult) 
 ///
 /// fnx ranks by one edge attribute, so the graph is projected first: the same
 /// nodes, and an edge wherever this module's ranking weight (relation weight
-/// x stored weight x confidence) is positive. Zero-weight relations
-/// (contradicts, supersedes) carry no rank, and a node left without an
-/// out-edge teleports through the seed vector, as the ACL-push kernel this
-/// replaced did. Scores come back in radix public-id order.
+/// x stored weight x confidence) is positive. Links that weigh nothing
+/// (contradicts and supersedes, or a stored weight or confidence of 0) carry
+/// no rank, and a node left without an out-edge teleports through the seed
+/// vector, as the ACL-push kernel this replaced did. Scores come back in radix
+/// public-id order.
 fn compute_personalized_pagerank_result_unbudgeted(
     graph: &DiGraph,
     seed_map: &BTreeMap<String, f64>,
@@ -485,6 +486,12 @@ fn normalized_seed_weights(
     seeds
 }
 
+/// A link's ranking weight: relation weight x stored weight x confidence.
+///
+/// An absent weight or confidence is neutral (1.0). A stored one is taken as
+/// it is, so a link stored at weight 0 or confidence 0 carries no rank, as it
+/// carries none in Louvain, Gomory-Hu and NetworkX. A negative or non-finite
+/// factor, which the schema does not admit, also counts as 0.
 fn edge_weight(graph: &DiGraph, source: &str, target: &str) -> f64 {
     let Some(attrs) = graph.edge_attrs(source, target) else {
         return 0.0;
@@ -493,17 +500,19 @@ fn edge_weight(graph: &DiGraph, source: &str, target: &str) -> f64 {
         .get("relation")
         .map(fnx_runtime::CgseValue::as_str)
         .unwrap_or_else(|| "related".to_owned());
-    let stored_weight = attrs
-        .get("weight")
-        .and_then(fnx_runtime::CgseValue::as_f64)
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .unwrap_or(1.0);
-    let confidence = attrs
-        .get("confidence")
-        .and_then(fnx_runtime::CgseValue::as_f64)
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .unwrap_or(1.0);
-    relation_weight(&relation) * stored_weight * confidence
+    let factor = |key: &str| {
+        attrs
+            .get(key)
+            .and_then(fnx_runtime::CgseValue::as_f64)
+            .map_or(1.0, |value| {
+                if value.is_finite() {
+                    value.max(0.0)
+                } else {
+                    0.0
+                }
+            })
+    };
+    relation_weight(&relation) * factor("weight") * factor("confidence")
 }
 
 fn relation_weight(relation: &str) -> f64 {
@@ -960,6 +969,51 @@ mod tests {
             confident_score > uncertain_score * 9.0,
             "edge confidence 1.0 should propagate roughly 10x more mass than 0.1: {result:?}"
         );
+        Ok(())
+    }
+
+    /// bd-ppr-zero-weight-link-reads-as-one-f11ls: a link stored at weight 0
+    /// or confidence 0 carries no rank, as in Louvain, Gomory-Hu and NetworkX.
+    /// The same link at weight 1 and confidence 1 is the control: it carries
+    /// rank, so the stored zero is what stops it.
+    #[test]
+    fn personalized_pagerank_gives_zero_weight_and_zero_confidence_links_no_rank() -> TestResult {
+        let seed = memory_id(91);
+        let beyond = memory_id(92);
+        let policy = PersonalizedPageRankPolicy {
+            tolerance: 1.0e-8,
+            ..PersonalizedPageRankPolicy::default()
+        };
+        for (weight, confidence, carries_rank) in
+            [(1.0, 1.0, true), (0.0, 1.0, false), (1.0, 0.0, false)]
+        {
+            let mut graph = DiGraph::strict();
+            graph
+                .add_edge_with_attrs(
+                    seed.to_string(),
+                    beyond.to_string(),
+                    edge_attrs("supports", weight, confidence),
+                )
+                .map_err(|error| error.to_string())?;
+            let result = graph_result(compute_personalized_pagerank_with_policy(
+                &graph,
+                &BTreeMap::from([(seed, 1.0)]),
+                policy,
+            ))?;
+            // A missing score fails both arms rather than passing as zero.
+            let beyond_score = result.get(&beyond).copied().unwrap_or(-1.0);
+            if carries_rank {
+                assert!(
+                    beyond_score > 0.0,
+                    "weight {weight}, confidence {confidence} should carry rank: {result:?}"
+                );
+            } else {
+                assert!(
+                    beyond_score.abs() < 1.0e-12,
+                    "weight {weight}, confidence {confidence} should carry none: {result:?}"
+                );
+            }
+        }
         Ok(())
     }
 

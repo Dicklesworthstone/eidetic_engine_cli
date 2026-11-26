@@ -13160,11 +13160,13 @@ pub struct MemoryLinkArgs {
     #[arg(long, value_name = "SOURCE", default_value = "human")]
     pub source: String,
 
-    /// Link weight from 0.0 to 1.0.
+    /// Link weight from 0.0 to 1.0. Louvain, Gomory-Hu and personalized
+    /// PageRank scale the link by it, so at 0 it is kept but carries no weight.
     #[arg(long, default_value = "1.0")]
     pub weight: String,
 
-    /// Link confidence from 0.0 to 1.0.
+    /// Link confidence from 0.0 to 1.0. Personalized PageRank also scales the
+    /// link by it, so at 0 the link carries no rank there.
     #[arg(long, default_value = "1.0")]
     pub confidence: String,
 
