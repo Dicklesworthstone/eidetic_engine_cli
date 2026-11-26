@@ -377,9 +377,8 @@ pub(super) fn bounded_generation_gap(
         };
         lease
     };
-    if !bounded_generation_fits(cx, index_dir, None)? {
-        return Ok(None);
-    }
+    // Avoid walking the active index and counting source rows on every up-to-date
+    // search. The watermark read independently caps bytes and rejects symlinks.
     let parsed = super::parse_index_metadata_with_limit(index_dir, MAX_INTERACTIVE_METADATA_BYTES);
     index_operation_checkpoint(cx, None)?;
     let Ok(Some(metadata)) = parsed else {
@@ -388,8 +387,16 @@ pub(super) fn bounded_generation_gap(
     let Some(index_generation) = metadata.generation else {
         return Ok(None);
     };
-    source_snapshot::capture(db, || {
+    let gap = source_snapshot::capture(db, || {
         index_operation_checkpoint(cx, None)?;
+        let generation = db.get_workspace_generation(workspace_id);
+        index_operation_checkpoint(cx, None)?;
+        let Some(gap) = generation?
+            .and_then(|source| source.checked_sub(index_generation))
+            .filter(|gap| *gap > 0 && *gap <= max_generation_gap)
+        else {
+            return Ok(None);
+        };
         #[cfg(feature = "lexical-bm25")]
         let rows_fit = source_snapshot::live_source_rows_fit(
             cx,
@@ -399,18 +406,12 @@ pub(super) fn bounded_generation_gap(
         )?;
         #[cfg(not(feature = "lexical-bm25"))]
         let rows_fit = false;
-        if !rows_fit {
-            return Ok(None);
-        }
-        let generation = db.get_workspace_generation(workspace_id);
-        index_operation_checkpoint(cx, None)?;
-        let Some(generation) = generation? else {
-            return Ok(None);
-        };
-        Ok(generation
-            .checked_sub(index_generation)
-            .filter(|gap| *gap > 0 && *gap <= max_generation_gap))
-    })
+        Ok(rows_fit.then_some(gap))
+    })?;
+    if gap.is_some() && !bounded_generation_fits(cx, index_dir, None)? {
+        return Ok(None);
+    }
+    Ok(gap)
 }
 
 #[cfg(test)]

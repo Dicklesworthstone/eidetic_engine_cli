@@ -1528,8 +1528,20 @@ impl BackupCassEvidenceRecord {
         }
     }
 
-    fn redact_for_export(&mut self, level: RedactionLevel, provenance_admitted: bool) {
-        evidence_export::redact_evidence(self, level, provenance_admitted);
+    fn for_export(
+        span: &StoredEvidenceSpan,
+        workspace_id: &str,
+        session: Option<&StoredSession>,
+        level: RedactionLevel,
+    ) -> Self {
+        let mut record = Self::from_stored(span);
+        if level != RedactionLevel::None {
+            let admitted = session.is_some_and(|session| {
+                span.is_derivation_admitted_for_session(workspace_id, session)
+            });
+            evidence_export::redact_evidence(&mut record, level, admitted);
+        }
+        record
     }
 }
 
@@ -7714,16 +7726,33 @@ fn collect_curation_history_payloads(
                         referenced_memories.insert(id.to_owned());
                     }
                 }
-                if source["kind"] == "evidence_span" {
+                if source["kind"] == "evidence_span"
+                    && redaction != RedactionLevel::None
+                    && !requires_fresh_review
+                {
                     let span_id = source["id"].as_str().ok_or_else(|| {
                         work_history_error("invalid curation source ref identity or hash")
                     })?;
                     let span = connection
                         .get_evidence_span(span_id)
                         .map_err(work_history_error)?;
-                    requires_fresh_review |= span.is_some_and(|span| {
-                        redact_content(&span.excerpt, redaction) != span.excerpt
-                    });
+                    // A clean excerpt can still be withheld because of its
+                    // metadata or source admission. Check the same projection
+                    // that will reach the archive against the reviewed hash.
+                    requires_fresh_review = if let Some(span) = span {
+                        let session = connection
+                            .get_session(&span.session_id)
+                            .map_err(work_history_error)?;
+                        let exported = BackupCassEvidenceRecord::for_export(
+                            &span,
+                            workspace_id,
+                            session.as_ref(),
+                            redaction,
+                        );
+                        exported.canonical_excerpt_hash.as_deref() != source["contentHash"].as_str()
+                    } else {
+                        true
+                    };
                 }
             }
         }
@@ -13065,19 +13094,17 @@ fn collect_cass_payloads(
         };
         let mut evidence_spans = Vec::with_capacity(spans.len());
         for span in spans {
-            let mut record = BackupCassEvidenceRecord::from_stored(&span);
+            let mut record = BackupCassEvidenceRecord::for_export(
+                &span,
+                workspace_id,
+                sessions_by_id.get(span.session_id.as_str()).copied(),
+                redaction_level,
+            );
             if let Some(id) = record.memory_id.as_mut()
                 && let Some(restored_id) = memory_ids.get(id)
             {
                 id.clone_from(restored_id);
             }
-            let provenance_admitted =
-                sessions_by_id
-                    .get(span.session_id.as_str())
-                    .is_some_and(|session| {
-                        span.is_derivation_admitted_for_session(workspace_id, session)
-                    });
-            record.redact_for_export(redaction_level, provenance_admitted);
             if let Err(error) = admission.observe(&span, &record) {
                 degraded.push(required_backup_rows_unreadable("evidence_spans", error));
                 return None;
@@ -21470,6 +21497,73 @@ mod tests {
                 json!([{"kind":"memory", "id":source_memory.id, "contentHash":hash}]).to_string(),
             );
             derived.derivation_metadata_json = Some(json!({"memorySpec":{"level":"semantic", "kind":"fact", "trustClass":"agent_assertion"},"producer":{"producer":"reflection"}}).to_string());
+            let session_id = SessionId::from_uuid(Uuid::from_u128(30)).to_string();
+            let session = backup_cass_session_fixture(&session_id, &workspace_id)
+                .into_restored(workspace_id.clone());
+            db.insert_session_for_recovery(&session)
+                .map_err(|e| e.to_string())?;
+            let evidence_id = EvidenceId::from_uuid(Uuid::from_u128(31)).to_string();
+            let excerpt = "The checksum matched the release manifest.";
+            let evidence_hash = hash_bytes(excerpt.as_bytes());
+            db.insert_evidence_span(
+                &evidence_id,
+                &CreateEvidenceSpanInput {
+                    workspace_id: workspace_id.clone(),
+                    session_id,
+                    memory_id: None,
+                    producer_kind: EvidenceProducerKind::CassImport,
+                    cass_span_id: "cass://release/1".to_owned(),
+                    span_kind: "message".to_owned(),
+                    start_line: 1,
+                    end_line: 1,
+                    start_byte: None,
+                    end_byte: None,
+                    role: Some("assistant".to_owned()),
+                    excerpt: excerpt.to_owned(),
+                    content_hash: evidence_hash.clone(),
+                    metadata_json: None,
+                    inherited_redaction_classes: Vec::new(),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            // The live parser sees the final, canonical value. The exporter
+            // must also screen earlier duplicate values in the original bytes.
+            let evidence = db
+                .get_evidence_span(&evidence_id)
+                .map_err(|e| e.to_string())?
+                .ok_or("source span")?;
+            let metadata = evidence.metadata_json.ok_or("canonical metadata")?.replacen(
+                '{',
+                r#"{"secretRedactionStatus":"api_key=curation-metadata-canary","#,
+                1,
+            );
+            db.execute(
+                "UPDATE evidence_spans SET metadata_json = ?1 WHERE id = ?2",
+                &[
+                    sqlmodel_core::Value::Text(metadata),
+                    sqlmodel_core::Value::Text(evidence_id.clone()),
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            let evidence = db
+                .get_evidence_span(&evidence_id)
+                .map_err(|e| e.to_string())?
+                .ok_or("metadata fixture")?;
+            ensure(
+                evidence.is_derivation_admitted_for_session(&workspace_id, &session),
+                "the source citation is admitted before export",
+            )?;
+            ensure_equal(
+                redact_content(excerpt, RedactionLevel::Standard),
+                excerpt.to_owned(),
+                "the excerpt alone would retain the approval",
+            )?;
+            let mut transcript = derived.clone();
+            transcript.id = recovery_candidate(&workspace_id, 15).id;
+            transcript.source_id = Some(evidence_id.clone());
+            transcript.derivation_source_refs_json = Some(json!([
+                {"kind":"evidence_span", "id":evidence_id, "contentHash":evidence_hash}
+            ]).to_string());
             let mut secret = recovery_candidate(&workspace_id, 8);
             secret.proposed_content = Some("api_key=curation-proposal-canary".to_owned());
             secret.reason = "api_key=curation-reason-canary".to_owned();
@@ -21490,7 +21584,7 @@ mod tests {
             rejected.ttl_policy_id = Some("api_key=curation-policy-canary-two".to_owned());
             db.with_transaction(|| {
                 db.restore_curation_ttl_policies(&policies)?;
-                for row in [&derived, &secret, &rejected] {
+                for row in [&derived, &transcript, &secret, &rejected] {
                     db.insert_curation_candidate_for_recovery(row)?;
                 }
                 Ok(())
@@ -21576,6 +21670,38 @@ mod tests {
                 redaction != RedactionLevel::Full,
                 "source redaction is observable",
             )?;
+            let citation = db
+                .get_evidence_span(&evidence_id)
+                .map_err(|e| e.to_string())?
+                .ok_or("restored citation")?;
+            let proposal = db
+                .get_curation_candidate(&destination, &transcript.id)
+                .map_err(|e| e.to_string())?
+                .ok_or("restored transcript proposal")?;
+            if redaction == RedactionLevel::None {
+                ensure_equal(
+                    citation.canonical_excerpt_hash.as_deref(),
+                    Some(evidence_hash.as_str()),
+                    "original evidence commitment",
+                )?;
+                ensure_equal(proposal.status.as_str(), "approved", "unchanged approval")?;
+            } else {
+                ensure(
+                    citation.canonical_excerpt_hash.is_none(),
+                    "export withheld the citation",
+                )?;
+                ensure_equal(
+                    proposal.status.as_str(),
+                    "pending",
+                    "withheld citation revokes approval",
+                )?;
+                ensure_equal(
+                    proposal.review_state.as_str(),
+                    "needs_evidence",
+                    "fresh evidence required",
+                )?;
+                ensure(proposal.ttl_policy_id.is_none(), "no automatic promotion")?;
+            }
             let actual_secret = db
                 .get_curation_candidate(&destination, &secret.id)
                 .map_err(|e| e.to_string())?
