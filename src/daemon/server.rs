@@ -68,7 +68,7 @@ use crate::core::context::{
     run_context_pack_with_runtime_and_performance_controlled,
 };
 use crate::core::search::{
-    PERFORMANCE_EXPLAIN_SCHEMA_V1, PERFORMANCE_FALLBACK_REDACTED_MESSAGE,
+    PERFORMANCE_EXPLAIN_SCHEMA_V1, PERFORMANCE_FALLBACK_REDACTED_MESSAGE, PackSearchHandoff,
     SearchAdvisoryDeliveryReservation, SearchAdvisorySession, SearchAdvisorySettlement,
     SearchDedupMode, SearchOptions, SearchPerformanceRun, SearchPerformanceTrace, SearchReport,
     SearchSourceMode, TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
@@ -4765,11 +4765,12 @@ fn dispatch_pack_search_with_runtime(
     // A cold read-only request can use a complete current lexical snapshot,
     // but the core guard must reject every model-requiring execution before
     // model preparation, including a changed publication or incomplete scan.
-    let retrieval = run_pack_search_with_runtime_and_cached_local_embedder(
+    let (retrieval, singleflight_degraded_codes) = run_daemon_pack_search(
         &options,
         loaded,
         request_runtime,
         require_cached_local,
+        crate::core::singleflight::daemon_search_singleflight_enabled(),
     );
     match retrieval {
         Ok(handoff) if model_free_required && !handoff.supports_read_only_pack() => {
@@ -4782,12 +4783,15 @@ fn dispatch_pack_search_with_runtime(
             )
         }
         Ok(handoff) => {
-            let response = DaemonResponse::ok(
+            let mut response = DaemonResponse::ok(
                 request.request_id.clone(),
                 request.agent_id.clone(),
                 request.workspace_id.clone(),
                 serde_json::json!({ "schema": DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4, "handoff": handoff }),
             );
+            for code in singleflight_degraded_codes {
+                response = response.with_degraded(code);
+            }
             if daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
                 response
             } else {
@@ -5029,14 +5033,66 @@ fn run_daemon_search(
         )
         .map_err(|error| error.to_string())
     })
-    .map_err(|error| match error {
-        // The search's own error, worded as an uncoalesced request words it.
-        crate::core::singleflight::SingleFlightError::LeaderFailed { message, .. } => message,
-        other => other.to_string(),
-    })?;
+    .map_err(daemon_singleflight_error_message)?;
     let mut run = shared.value;
     run.finish_coalesced_daemon_request(options, request_start);
     Ok((run, shared.degraded_codes))
+}
+
+/// Run the pack retrieval for one daemon `pack_search` request, and return it
+/// with any single-flight degraded codes.
+///
+/// With `coalesce` on, identical concurrent requests share one retrieval
+/// (bd-d67os.9). Retrieval writes nothing; the requesting client records the
+/// audit. Before using a handoff, the client checks its source and calibration
+/// witnesses against its own stores. So a follower's client either uses what
+/// its own retrieval would have returned or rejects the handoff and retrieves
+/// locally, including after a feedback write the key cannot see.
+fn run_daemon_pack_search(
+    options: &SearchOptions,
+    loaded: Option<crate::core::index::CachedLocalEmbedder>,
+    request_runtime: Option<&asupersync::runtime::Runtime>,
+    require_cached_local: bool,
+    coalesce: bool,
+) -> (Result<PackSearchHandoff, String>, Vec<&'static str>) {
+    let key = if coalesce {
+        daemon_pack_search_singleflight_key(
+            options,
+            require_cached_local,
+            loaded.as_ref().map(|loaded| &loaded.attestation),
+        )
+    } else {
+        None
+    };
+    let retrieve = move || {
+        run_pack_search_with_runtime_and_cached_local_embedder(
+            options,
+            loaded,
+            request_runtime,
+            require_cached_local,
+        )
+        .map_err(|error| error.to_string())
+    };
+    let Some(key) = key else {
+        return (retrieve(), Vec::new());
+    };
+    match crate::core::singleflight::run_daemon_pack_search(&key, retrieve) {
+        Ok(shared) => (Ok(shared.value), shared.degraded_codes),
+        Err(error) => (Err(daemon_singleflight_error_message(error)), Vec::new()),
+    }
+}
+
+/// The message a coalesced daemon read reports for a failure. The leader and
+/// its followers get the operation's own message, as an uncoalesced request
+/// would. A follower that timed out and then failed running the operation
+/// itself gets that message prefixed with the fallback it took.
+fn daemon_singleflight_error_message(
+    error: crate::core::singleflight::SingleFlightError,
+) -> String {
+    match error {
+        crate::core::singleflight::SingleFlightError::LeaderFailed { message, .. } => message,
+        other => other.to_string(),
+    }
 }
 
 /// How long building a key waits for its generation-read connection. Each
@@ -5044,25 +5100,59 @@ fn run_daemon_search(
 /// through it quickly.
 const DAEMON_SEARCH_KEY_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
 
-/// The single-flight key for one daemon search, or `None` when something the
-/// key needs cannot be read, in which case the request runs on its own.
-///
-/// Two requests may share a search only when it would have answered both the
-/// same, so the key carries everything the search reads:
-/// - the request: every `SearchOptions` field, the kind and the typed field
-///   filters. They enter through the derived `Debug`, which picks up a field
-///   added to `SearchOptions` later without anyone remembering to add it
-///   here. The key is process-local and never stored, so that format need
-///   not be stable across versions;
-/// - the stores: the workspace store's generation, the user-global store's
-///   when this search may read it, and the published index generation. A
-///   write or rebuild that lands before a request arrives therefore keys it
-///   apart from a search that started earlier;
-/// - the merged config, which no generation covers.
+/// The single-flight key for one daemon search: every `SearchOptions` field,
+/// the kind and the typed field filters, through their derived `Debug`. See
+/// [`daemon_read_singleflight_key`] for the rest.
 fn daemon_search_singleflight_key(
     options: &SearchOptions,
     kind: Option<&str>,
     field_filters: &[TypedMemoryFieldFilter],
+) -> Option<SingleFlightKey> {
+    daemon_read_singleflight_key(
+        SingleFlightSurface::Search,
+        DAEMON_SEARCH_RESPONSE_SCHEMA_V4,
+        options,
+        &format!("{options:?} kind={kind:?} filters={field_filters:?}"),
+    )
+}
+
+/// The single-flight key for one daemon pack retrieval: every
+/// `SearchOptions` field, whether the request requires a cached local model,
+/// and the attestation of the model already loaded for it, if any, since that
+/// decides whether retrieval runs semantically. Its response schema keeps it
+/// apart from a search with the same options.
+fn daemon_pack_search_singleflight_key(
+    options: &SearchOptions,
+    require_cached_local: bool,
+    model: Option<&crate::core::index::CachedLocalEmbedderAttestation>,
+) -> Option<SingleFlightKey> {
+    daemon_read_singleflight_key(
+        SingleFlightSurface::Context,
+        DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4,
+        options,
+        &format!("{options:?} require_cached_local={require_cached_local} model={model:?}"),
+    )
+}
+
+/// The single-flight key for one daemon read, or `None` when something the
+/// key needs cannot be read, in which case the request runs on its own.
+///
+/// Two requests may share a read only when it would have answered both the
+/// same, so the key carries everything the read uses:
+/// - `request`: the caller's `Debug` rendering of its parameters. `Debug`
+///   picks up a field added to `SearchOptions` later without anyone
+///   remembering to add it here. The key is process-local and never stored,
+///   so that format need not be stable across versions;
+/// - the stores: the workspace store's generation, the user-global store's
+///   when the read may use it, and the published index generation. A write
+///   or rebuild that lands before a request arrives therefore keys it apart
+///   from a read that started earlier;
+/// - the merged config, which no generation covers.
+fn daemon_read_singleflight_key(
+    surface: SingleFlightSurface,
+    response_schema: &str,
+    options: &SearchOptions,
+    request: &str,
 ) -> Option<SingleFlightKey> {
     let workspace_generation = daemon_search_store_generation(&options.resolve_database_path())?;
     let global_generation = if options.no_global {
@@ -5076,20 +5166,19 @@ fn daemon_search_singleflight_key(
         .ok()?
         .values;
 
-    let request = format!("{options:?} kind={kind:?} filters={field_filters:?}");
     let global_generation = format!("{global_generation:?}");
     let config = format!("{config:?}");
     let option_pairs = [
-        ("request", request.as_str()),
+        ("request", request),
         ("global_generation", global_generation.as_str()),
         ("merged_config", config.as_str()),
     ];
     let workspace_identity = options.workspace_path.to_string_lossy();
     let mut input = SingleFlightKeyInput::new(
-        SingleFlightSurface::Search,
+        surface,
         &workspace_identity,
         workspace_generation,
-        DAEMON_SEARCH_RESPONSE_SCHEMA_V4,
+        response_schema,
     );
     input.index_generation = index_generation;
     input.query_text = Some(&options.query);
@@ -10742,6 +10831,126 @@ mod tests {
             executed(),
             before + 1 + REQUESTS,
             "every coalesced request records its own audit"
+        );
+    }
+
+    /// bd-d67os.9: identical concurrent pack retrievals hand each request a
+    /// handoff its client accepts, holding what an uncoalesced retrieval
+    /// returns, and a pack retrieval never shares a search's key. A feedback
+    /// write moves no key, so the last assertion pins the client check that
+    /// catches it: a handoff taken before the write no longer validates.
+    #[test]
+    fn coalesced_daemon_pack_searches_return_handoffs_the_client_accepts() {
+        let (_workspace, workspace_path, connection, workspace_id) =
+            singleflight_search_fixture("Release provenance requires verified checksums.");
+        fs::write(
+            workspace_path.join(".ee/config.toml"),
+            "[memory]\ninclude_global = false\n",
+        )
+        .expect("workspace-only retrieval");
+        connection
+            .insert_search_index_job(
+                "sidx_01J00000000000000000000091",
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: workspace_id.clone(),
+                    job_type: crate::db::SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_owned()),
+                    document_id: Some("mem_01J00000000000000000000091".to_owned()),
+                    documents_total: 1,
+                },
+            )
+            .expect("queued source publication");
+        let (options, _, _, _) = DaemonSearchParams::from_value(&serde_json::json!({
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+            "query": "release",
+            "workspacePath": workspace_path,
+            "sourceMode": "lexical_only",
+            "strictSourceMode": true,
+            "relevanceFloor": 0.0,
+            "requireCachedLocalEmbedder": false,
+        }))
+        .expect("pack params")
+        .into_search_parts(&workspace_path.display().to_string())
+        .expect("pack parts");
+
+        let pack_key = |require_cached_local: bool| {
+            daemon_pack_search_singleflight_key(&options, require_cached_local, None)
+                .expect("an initialized store yields a key")
+                .key_hash
+        };
+        let search_key = daemon_search_singleflight_key(&options, None, &[])
+            .expect("an initialized store yields a key")
+            .key_hash;
+        assert_eq!(pack_key(false), pack_key(false), "identical requests share");
+        assert_ne!(pack_key(false), search_key, "never a search's key");
+        assert_ne!(
+            pack_key(false),
+            pack_key(true),
+            "the cached-model requirement"
+        );
+
+        let (baseline, codes) = run_daemon_pack_search(&options, None, None, false, false);
+        let baseline = baseline.expect("uncoalesced pack retrieval");
+        assert!(codes.is_empty(), "{codes:?}");
+        assert!(
+            !baseline.report.results.is_empty(),
+            "the fixture memory must be found"
+        );
+        let expected = serde_json::to_value(&baseline.report.results).expect("encode results");
+
+        const REQUESTS: usize = 4;
+        let barrier = std::sync::Barrier::new(REQUESTS);
+        let retrievals: Vec<_> = thread::scope(|scope| {
+            let handles: Vec<_> = (0..REQUESTS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        run_daemon_pack_search(&options, None, None, false, true)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("pack thread"))
+                .collect()
+        });
+        let mut handoffs = Vec::with_capacity(REQUESTS);
+        for (handoff, _codes) in retrievals {
+            let handoff = handoff.expect("coalesced pack retrieval");
+            assert_eq!(
+                serde_json::to_value(&handoff.report.results).expect("encode results"),
+                expected
+            );
+            assert!(handoff.matches_request(&options), "names its request");
+            assert!(
+                handoff.snapshot_matches(&options, &connection),
+                "validates against the store"
+            );
+            handoffs.push(handoff);
+        }
+
+        connection
+            .insert_feedback_event(
+                "fb_01J00000000000000000000091",
+                &crate::db::CreateFeedbackEventInput {
+                    workspace_id,
+                    target_type: "memory".to_owned(),
+                    target_id: "mem_01J00000000000000000000091".to_owned(),
+                    signal: "harmful".to_owned(),
+                    weight: 1.0,
+                    source_type: "outcome_observed".to_owned(),
+                    source_id: None,
+                    reason: None,
+                    evidence_json: None,
+                    session_id: None,
+                },
+            )
+            .expect("feedback after the retrievals");
+        assert!(
+            handoffs
+                .iter()
+                .all(|handoff| !handoff.snapshot_matches(&options, &connection)),
+            "a handoff taken before a feedback write must not validate after it"
         );
     }
 

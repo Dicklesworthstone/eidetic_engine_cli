@@ -60,6 +60,12 @@ const DAEMON_SEARCH_FOLLOWER_TIMEOUT: Duration = Duration::from_secs(60);
 static DAEMON_SEARCH_GROUP: OnceLock<SingleFlightGroup<crate::core::search::SearchPerformanceRun>> =
     OnceLock::new();
 
+/// Daemon `pack_search` retrievals, the search half of `ee context`. Reported
+/// as the `context` surface; same flag and follower timeout as search.
+static DAEMON_PACK_SEARCH_GROUP: OnceLock<
+    SingleFlightGroup<crate::core::search::PackSearchHandoff>,
+> = OnceLock::new();
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SingleFlightRole {
     Leader,
@@ -582,6 +588,12 @@ pub fn singleflight_posture_report() -> SingleFlightPostureReport {
             daemon_search_singleflight_enabled(),
             DAEMON_SEARCH_FOLLOWER_TIMEOUT,
         ),
+        surface_posture(
+            DAEMON_PACK_SEARCH_GROUP.get(),
+            SingleFlightSurface::Context,
+            daemon_search_singleflight_enabled(),
+            DAEMON_SEARCH_FOLLOWER_TIMEOUT,
+        ),
     ])
 }
 
@@ -634,6 +646,23 @@ where
         DAEMON_SEARCH_FOLLOWER_TIMEOUT,
         search,
     )
+}
+
+/// Run one daemon pack retrieval through the process's pack retrieval group.
+///
+/// `key` must carry everything the retrieval reads (see
+/// `daemon_pack_search_singleflight_key` in the daemon server). Retrieval
+/// writes nothing, so a follower needs no per-request work afterwards.
+pub(crate) fn run_daemon_pack_search<F>(
+    key: &SingleFlightKey,
+    retrieve: F,
+) -> Result<SingleFlightRun<crate::core::search::PackSearchHandoff>, SingleFlightError>
+where
+    F: FnOnce() -> Result<crate::core::search::PackSearchHandoff, String>,
+{
+    DAEMON_PACK_SEARCH_GROUP
+        .get_or_init(SingleFlightGroup::new)
+        .run(key, DAEMON_SEARCH_FOLLOWER_TIMEOUT, retrieve)
 }
 
 pub fn run_graph_feature_enrichment<F>(

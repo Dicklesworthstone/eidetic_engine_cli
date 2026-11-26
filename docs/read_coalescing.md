@@ -40,9 +40,10 @@ at the same instant — do **not** share a group and each runs its own
 computation. This is intentional for v1: it needs no shared state, no liveness
 protocol, and cannot serve a stale cross-process result.
 
-Two surfaces are wired: graph feature enrichment (`graph_feature_enrichment`)
-and daemon search (`search`, below). The single-flight posture for every
-surface is reported, redaction-safe, under `ee status --json` and
+Three surfaces are wired: graph feature enrichment (`graph_feature_enrichment`),
+daemon search (`search`) and daemon pack retrieval (`context`); the daemon ones
+are described below. The single-flight posture for every surface is reported,
+redaction-safe, under `ee status --json` and
 `ee doctor --json` at `data.singleFlight` (and folded into `ee swarm brief`).
 Those commands report their own process. The daemon's counts are in its
 `ee.daemon.telemetry` response.
@@ -50,29 +51,36 @@ Those commands report their own process. The daemon's counts are in its
 ## Daemon search (opt-in)
 
 `ee daemon` serves each connection on its own worker, so agents running
-`ee search --use-daemon` at the same moment reach the same process. With
-`EE_DAEMON_SEARCH_SINGLEFLIGHT=on` in the daemon's environment, identical
-concurrent `ee.daemon.search` requests run one search (bd-d67os.9). It is off
-by default.
+`ee search --use-daemon`, `ee context --use-daemon` or `ee pack --use-daemon`
+at the same moment reach the same process. With `EE_DAEMON_SEARCH_SINGLEFLIGHT=on` in the
+daemon's environment, identical concurrent `ee.daemon.search` requests run one
+search, and identical concurrent `ee.daemon.pack_search` requests run one pack
+retrieval (bd-d67os.9). It is off by default.
 
-- **The key** holds the exact query and every search option, the kind and
-  typed field filters, the workspace store's generation, the user-global
-  store's generation when the search may read it, the published index
-  generation and the merged config. A request whose store is missing or whose
-  generation cannot be read runs on its own.
+- **The key** holds the exact query and every search option, the workspace
+  store's generation, the user-global store's generation when the read may use
+  it, the published index generation and the merged config. A search key adds
+  the kind and typed field filters. A pack retrieval key adds whether a cached
+  local model is required and which model is loaded. A request whose store is
+  missing or whose generation cannot be read runs on its own.
 - **Audit.** The shared search runs without its retrieval audit, and every
   request then records its own. N coalesced requests leave N
-  `search.executed` rows, as N uncoalesced ones do.
-- **Not coalesced:** `ee.daemon.pack_search`, context packs and the swarm
-  brief. Each needs the same review of what it writes before it can share a
-  result.
+  `search.executed` rows, as N uncoalesced ones do. Pack retrieval writes
+  nothing in the daemon; each client records its own pack.
+- **Not coalesced:** `ee.daemon.context`, which assembles and stores a whole
+  pack, and the swarm brief. `ee serve` answers one connection at a time and
+  runs the brief as a command, so no process ever computes two briefs at
+  once.
 
-Two things a follower can see that an uncoalesced request would not, both
-bounded by the leader's run time:
+Two things a search follower can see that an uncoalesced request would not,
+both bounded by the leader's run time:
 
 - **Feedback edits.** Score calibration reads the feedback ledger, and no
   generation covers that ledger. A feedback event written while an identical
-  search is running does not key the next request apart from it.
+  search is running does not key the next request apart from it
+  (bd-coalesced-search-key-misses-feedback-4lneh). A pack retrieval is not
+  exposed to this: its client checks the handoff's calibration witness
+  against its own store and retrieves again locally when they differ.
 - **Reference time.** A request without `as_of` evaluates validity windows at
   the moment its search starts. A follower gets the leader's moment, which is
   slightly before its own arrival.
