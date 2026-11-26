@@ -1884,9 +1884,12 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
             .is_some_and(|pack_id| pack_id.starts_with("pack_")),
         "why latest pack selection must include a persisted pack id",
     )?;
+    // why redacts stored provenance URIs (ad157643a). The redactor reads
+    // `file://tests/...` as host `tests`, a UNC-style reference (1754c43a7),
+    // so the path is withheld and the line anchor survives.
     ensure_equal(
         &why_json["data"]["storage"]["provenanceUri"],
-        &serde_json::json!("file://tests/fixtures/eval/release_failure/source_memory.json#L1"),
+        &serde_json::json!("[REDACTED_PATH]#L1"),
         "why storage provenance",
     )?;
     ensure(
@@ -2035,9 +2038,13 @@ fn preflight_run_show_close_persists_guard_tripwire_lifecycle() -> TestResult {
         &serde_json::json!(true),
         "preflight run response success",
     )?;
+    // Command-risk memory is advisory only (AGENTS.md): stops_execution() is
+    // false even for a builtin Halt rule, so the match is High evidence, not
+    // Critical enforcement. The lib test
+    // preflight_run_guard_match_generates_evidence_tripwire pins the same.
     ensure_equal(
         &run_json["data"]["risk_level"],
-        &serde_json::json!("critical"),
+        &serde_json::json!("high"),
         "guard-backed run risk level",
     )?;
     ensure_equal(
@@ -3336,13 +3343,15 @@ fn ee_impact_path_surface_returns_exact_anchor_hit_with_stable_json() -> TestRes
         "impact hit matchType",
     )?;
 
-    // Graph-neighbors tier degrades honestly (deferred to bd-1n0np.3.4).
+    // The graph-neighbors tier shipped with bd-1n0np.3.4. It gets
+    // `limit - exact hits`, here 0, and reports that before its feature gate,
+    // so the status is the same whether or not the graph feature is built.
     ensure_equal(
         &impact_json
             .pointer("/data/phases/graphNeighbors/status")
             .and_then(serde_json::Value::as_str),
-        &Some("not_available"),
-        "impact graphNeighbors honest degraded status",
+        &Some("skipped_limit_filled"),
+        "impact graphNeighbors status when exact anchors fill the limit",
     )?;
 
     // Determinism: a second identical query yields equal JSON once the

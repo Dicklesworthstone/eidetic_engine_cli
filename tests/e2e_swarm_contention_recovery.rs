@@ -11,6 +11,7 @@
 // This concurrency harness treats poisoned test coordination mutexes as fatal.
 #![allow(clippy::unwrap_used)]
 
+use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsStr;
 use std::fmt::Debug;
@@ -40,6 +41,8 @@ struct ProcessLog {
     duration_ms: u64,
     exit_code: Option<i32>,
     stdout_hash: String,
+    /// Raw stdout, kept for comparing outputs; not written to the report.
+    stdout: String,
     stderr_lines: usize,
     stderr_preview: String,
     artifact_path: Option<PathBuf>,
@@ -478,14 +481,27 @@ fn swarm_deterministic_json_under_contention() -> TestResult {
 
     let process_logs = outputs.lock().unwrap().clone();
 
-    // Check that all successful runs produce the same stdout hash
-    let hashes: Vec<String> = process_logs
-        .iter()
-        .filter(|l| l.success)
-        .map(|l| l.stdout_hash.clone())
-        .collect();
+    // Raw stdout cannot match across processes. status samples an observation
+    // time per command (writeGroupCommit.generatedAt, since b59b24a60), and
+    // the default Full probe mode reports probe timings. So compare the parsed
+    // JSON with those normalized, and name every other field that differs.
+    let mut normalized = Vec::new();
+    for log in process_logs.iter().filter(|l| l.success) {
+        let mut value: Value = serde_json::from_str(log.stdout.trim())
+            .map_err(|error| format!("{} stdout is not JSON: {error}", log.command))?;
+        normalize_status_for_determinism(&mut value);
+        normalized.push(value);
+    }
+    let mut differences = Vec::new();
+    if let Some((first, rest)) = normalized.split_first() {
+        for other in rest {
+            json_differences(first, other, "", &mut differences);
+        }
+    }
+    differences.sort();
+    differences.dedup();
 
-    let determinism_ok = hashes.windows(2).all(|w| w[0] == w[1]);
+    let determinism_ok = normalized.len() >= 2 && differences.is_empty();
     let success_count = process_logs.iter().filter(|l| l.success).count();
     let failure_count = process_logs.iter().filter(|l| !l.success).count();
     let total_duration_ms = process_logs.iter().map(|l| l.duration_ms).sum();
@@ -505,14 +521,70 @@ fn swarm_deterministic_json_under_contention() -> TestResult {
     report.write_to_file(&artifact_dir.join("report.json"))?;
 
     ensure(
+        normalized.len() >= 2,
+        format!(
+            "determinism needs at least two successful status runs, got {}",
+            normalized.len()
+        ),
+    )?;
+    ensure(
         determinism_ok,
         format!(
-            "concurrent status outputs should be identical; hashes: {:?}",
-            hashes
+            "concurrent status outputs should be identical once observation times are normalized; differing fields: {differences:#?}"
         ),
     )?;
 
     Ok(())
+}
+
+/// Status fields that differ between processes by design: observation
+/// timestamps (`generatedAt`) and probe timings (`probeElapsedMs`).
+fn normalize_status_for_determinism(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for key in ["generatedAt", "probeElapsedMs"] {
+                if let Some(field) = map.get_mut(key) {
+                    *field = Value::String(format!("<normalized:{key}>"));
+                }
+            }
+            for child in map.values_mut() {
+                normalize_status_for_determinism(child);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                normalize_status_for_determinism(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every JSON pointer at which `left` and `right` differ, with both values.
+fn json_differences(left: &Value, right: &Value, pointer: &str, out: &mut Vec<String>) {
+    match (left, right) {
+        (Value::Object(left_map), Value::Object(right_map)) => {
+            let keys: BTreeSet<&String> = left_map.keys().chain(right_map.keys()).collect();
+            for key in keys {
+                let child = format!("{pointer}/{key}");
+                match (left_map.get(key), right_map.get(key)) {
+                    (Some(left_value), Some(right_value)) => {
+                        json_differences(left_value, right_value, &child, out);
+                    }
+                    _ => out.push(format!("{child}: present in only one run")),
+                }
+            }
+        }
+        (Value::Array(left_items), Value::Array(right_items))
+            if left_items.len() == right_items.len() =>
+        {
+            for (index, (left_item, right_item)) in left_items.iter().zip(right_items).enumerate() {
+                json_differences(left_item, right_item, &format!("{pointer}/{index}"), out);
+            }
+        }
+        _ if left == right => {}
+        _ => out.push(format!("{pointer}: {left} != {right}")),
+    }
 }
 
 // =============================================================================
@@ -635,6 +707,7 @@ where
                 duration_ms,
                 exit_code,
                 stdout_hash,
+                stdout,
                 stderr_lines,
                 stderr_preview: redact_paths(&stderr_preview),
                 artifact_path: None,
@@ -651,6 +724,7 @@ where
             duration_ms,
             exit_code: None,
             stdout_hash: String::new(),
+            stdout: String::new(),
             stderr_lines: 0,
             stderr_preview: String::new(),
             artifact_path: None,
