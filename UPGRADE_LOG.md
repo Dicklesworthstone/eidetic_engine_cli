@@ -1,5 +1,16 @@
 # Dependency Upgrade Log
 
+## 2026-11-26 — FrankenNetworkX 0.3.0 -> 0.4.1 (GH #73, bd-reality-core-convergence-1azkt.82)
+
+`fnx-algorithms`, `fnx-classes` and `fnx-runtime` move `=0.3.0 -> =0.4.1`, and transitive `fnx-cgse` moves `0.2.3 -> 0.4.1`. Those four are the only packages that change in `Cargo.lock` and `fuzz/Cargo.lock`. Every other new 0.4.1 dependency (`rayon`, `mt19937`, `mwmatching`, `rand_core 0.10`, `indexmap`, `rustc-hash`) was already in the tree, and `ftui`/`pprof`/`dhat` stay optional and off.
+
+- **API changes ee had to absorb:**
+  - `louvain_communities` takes a `PythonSum` and returns `Option`, with `None` where networkx would raise. ee passes `PythonSum::Plain`, the plain `+=` that 0.3.0 summed with. Both callers (`src/graph/health.rs`, the `graph louvain` CLI) go through `louvain_communities_or_singletons`, which leaves every node alone when fnx declines: with ee's float or absent weights, that is a zero, non-finite or overflowing total weight.
+  - `AttrMap` is now an insertion-ordered struct, not a `BTreeMap<String, CgseValue>` alias, and `CgseValue::Map` holds one. The nested-map arm of `cgse_value_to_json` now sorts, so content hashes keep their old key order. The two edge-attribute sites already collected into a `BTreeMap`.
+- **What 0.4.1 makes available:** `personalized_pagerank`, a deterministic weighted seed-personalized PageRank. That is the upstream capability whose absence keeps pack PPR on `ppr_algorithm_unavailable` (item 3 of the bead).
+- **Provenance:** `franken-stack.lock` moves `franken_networkx` to `9b566128f`. That is the v0.4.1 tag, and it is the commit that `.cargo_vcs_info.json` names (`dirty=false`) in all three published crates.
+- **Gates:** `check-forbidden-deps.sh` keeps its fnx caps, now `=0.4.1`, with reasons rewritten for the new pin. Its self-test passes every arm, and `--strict-fuzz-lock --json` reports `root.status = "audited"` and `fuzz.status = "audited"`.
+
 ## 2026-11-21 — v0.19.0 release dependency refresh
 
 Registry dependencies in `Cargo.toml`, `Cargo.lock`, and `fuzz/Cargo.lock` were refreshed to the latest compatible stable releases under the pinned `nightly-2026-08-31` toolchain while preserving all coordinated franken-stack pins and load-bearing forbidden-dependency caps.

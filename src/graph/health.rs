@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-use fnx_algorithms::{k_truss, louvain_communities};
+use fnx_algorithms::{PythonSum, k_truss, louvain_communities};
 use fnx_classes::Graph;
 use serde::Serialize;
 
@@ -133,14 +133,45 @@ pub fn compute_k_truss(graph: &Graph) -> KTrussReport {
 
 #[must_use]
 pub fn detect_louvain_communities(graph: &Graph) -> Vec<Vec<String>> {
-    louvain_communities(
+    louvain_communities_or_singletons(
         graph,
         DEFAULT_LOUVAIN_RESOLUTION,
-        LOUVAIN_WEIGHT_ATTR,
         DEFAULT_LOUVAIN_THRESHOLD,
         None,
         Some(DEFAULT_LOUVAIN_SEED),
     )
+}
+
+/// Louvain over the `weight` edge attribute, summing plainly as fnx 0.3.0 did.
+///
+/// fnx 0.4 returns `None` where networkx would raise. ee's edges carry float
+/// weights or none (read as 1), so that means a zero, non-finite or
+/// overflowing total weight. Modularity is undefined there, so every node
+/// stands alone rather than being grouped arbitrarily.
+#[must_use]
+pub fn louvain_communities_or_singletons(
+    graph: &Graph,
+    resolution: f64,
+    threshold: f64,
+    max_level: Option<usize>,
+    seed: Option<u64>,
+) -> Vec<Vec<String>> {
+    louvain_communities(
+        graph,
+        resolution,
+        LOUVAIN_WEIGHT_ATTR,
+        threshold,
+        max_level,
+        seed,
+        PythonSum::Plain,
+    )
+    .unwrap_or_else(|| {
+        graph
+            .nodes_ordered()
+            .into_iter()
+            .map(|node| vec![node.to_owned()])
+            .collect()
+    })
 }
 
 #[must_use]

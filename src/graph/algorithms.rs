@@ -553,7 +553,7 @@ pub struct SamplingWitness {
 impl SamplingWitness {
     #[must_use]
     pub fn to_cgse_value(&self) -> CgseValue {
-        let mut fields = BTreeMap::new();
+        let mut fields = fnx_runtime::AttrMap::new();
         fields.insert(
             "algorithm".to_owned(),
             CgseValue::String(self.algorithm.clone()),

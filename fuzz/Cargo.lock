@@ -1160,7 +1160,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1350,7 +1350,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1441,25 +1441,27 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "fnx-algorithms"
-version = "0.3.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e69a71602f1c31774043e7aecbb5d78bd7de946faa463b4f5dcec7e38445ded"
+checksum = "a460c4ad82a5127d4deab80f6eb291a3092060e0d58c6ce849193166ff3feb49"
 dependencies = [
  "fnx-cgse",
  "fnx-classes",
  "fnx-runtime",
+ "indexmap",
  "mt19937",
  "mwmatching",
  "rand_core 0.10.1",
  "rayon",
+ "rustc-hash",
  "serde",
 ]
 
 [[package]]
 name = "fnx-cgse"
-version = "0.2.3"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ea25f3018ee2ea49524f5525969582e4616249ff09f3fb606ff70b369edf91c"
+checksum = "92d898d78be5ce18049f511b66fbdbaa981c9622c53457d714f022337ae00857"
 dependencies = [
  "blake3",
  "hex",
@@ -1469,9 +1471,9 @@ dependencies = [
 
 [[package]]
 name = "fnx-classes"
-version = "0.3.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13f9b31039ff228b89f7fca07fbca5eb9bdc93f4a26704677ed001db339fb87a"
+checksum = "6469123bb657c4d9005df482663fdcd9504fcb35026d4279ed0ae5b2a6c4a908"
 dependencies = [
  "fnx-runtime",
  "indexmap",
@@ -1481,11 +1483,12 @@ dependencies = [
 
 [[package]]
 name = "fnx-runtime"
-version = "0.3.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee559f4c159dd8bb2017f3d41318e38cb9432f893ccfaafc0c89ed486061e034"
+checksum = "7151ad6fd231b63d6583745201614ef34ebd25020e26a427d2368fec3c96e8e7"
 dependencies = [
  "asupersync",
+ "rustc-hash",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2578,7 +2581,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c91d8cffac8849493a82233811bd02b2b183b8cf39bf704de0fa0841b737595"
 dependencies = [
  "bstr",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -3657,7 +3660,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4358,7 +4361,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4976,10 +4979,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5576,7 +5579,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

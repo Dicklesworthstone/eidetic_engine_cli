@@ -147,9 +147,9 @@ dependency_resolution_inventory() {
 asupersync|0.5.0|direct|Cargo.toml dependencies|must_be_published
 franken-agent-detection|0.3.8|direct|Cargo.toml dependencies|must_be_published
 frankensearch|0.7.1|direct|Cargo.toml dependencies|must_be_published
-fnx-algorithms|0.3.0|direct|Cargo.toml dependencies|graph_feature_or_publish
-fnx-classes|0.3.0|direct|Cargo.toml dependencies|graph_feature_or_publish
-fnx-runtime|0.3.0|direct|Cargo.toml dependencies|graph_feature_or_publish
+fnx-algorithms|0.4.1|direct|Cargo.toml dependencies|graph_feature_or_publish
+fnx-classes|0.4.1|direct|Cargo.toml dependencies|graph_feature_or_publish
+fnx-runtime|0.4.1|direct|Cargo.toml dependencies|graph_feature_or_publish
 sqlmodel-core|0.5.0|direct|Cargo.toml dependencies|must_be_published
 sqlmodel-frankensqlite|0.5.0|direct|Cargo.toml dependencies|must_be_published
 tru|0.2.4|direct|Cargo.toml dependencies|must_be_published

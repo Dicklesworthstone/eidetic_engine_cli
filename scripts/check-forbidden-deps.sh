@@ -114,9 +114,9 @@ PY
 # Format: crate | required bound | why it exists
 LOAD_BEARING_CAPS=(
     'wasm-bindgen-futures|<0.4.79|0.4.79 adds a tokio dependency; ee reaches this crate through asupersync, which requires only "0.4" (bd-iuybr)'
-    'fnx-algorithms|=0.3.0|0.3.1 changes louvain_communities to 7 args (PythonSum) and Option<Vec<Vec<String>>>; bumping past =0.3.0 without migrating src/cli/mod.rs, src/graph/algorithms.rs, and src/graph/health.rs breaks compilation under --lib/--all-targets (bd-lrymw)'
-    'fnx-classes|=0.3.0|keep fnx crate family aligned at =0.3.0 with fnx-algorithms and fnx-runtime until call-site migration lands (bd-lrymw)'
-    'fnx-runtime|=0.3.0|0.3.1 changes runtime types paired with fnx-algorithms 0.3.1; bumping past =0.3.0 without migrating src/graph/algorithms.rs breaks compilation (bd-lrymw)'
+    'fnx-algorithms|=0.4.1|upstream changes signatures inside a minor series (louvain_communities gained PythonSum and an Option return at 0.3.1), so ee pins the release src/graph/health.rs was migrated against and a bump is a deliberate migration (bd-lrymw)'
+    'fnx-classes|=0.4.1|keep the fnx crate family aligned at the release ee graph code was migrated against, with fnx-algorithms and fnx-runtime (bd-lrymw)'
+    'fnx-runtime|=0.4.1|0.4 turned AttrMap from a BTreeMap alias into an insertion-ordered struct; pinned with fnx-algorithms so a bump re-checks ordering in src/graph/mod.rs (bd-lrymw)'
 )
 
 # Assert every load-bearing cap is still declared in the manifest and still
@@ -419,14 +419,14 @@ name = "fixture"
 version = "0.0.0"
 
 [dependencies]
-fnx-algorithms = { version = "=0.3.0" }
-fnx-classes = { version = "=0.3.0" }
-fnx-runtime = { version = "=0.3.0", default-features = false, features = ["asupersync-integration"] }
+fnx-algorithms = { version = "=0.4.1" }
+fnx-classes = { version = "=0.4.1" }
+fnx-runtime = { version = "=0.4.1", default-features = false, features = ["asupersync-integration"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = { version = ">=0.4, <0.4.79", default-features = false }
 CAPFIXTURE
-    printf '{"packages":[{"name":"wasm-bindgen-futures","version":"0.4.78"},{"name":"fnx-algorithms","version":"0.3.0"},{"name":"fnx-classes","version":"0.3.0"},{"name":"fnx-runtime","version":"0.3.0"}]}\n' \
+    printf '{"packages":[{"name":"wasm-bindgen-futures","version":"0.4.78"},{"name":"fnx-algorithms","version":"0.4.1"},{"name":"fnx-classes","version":"0.4.1"},{"name":"fnx-runtime","version":"0.4.1"}]}\n' \
         > "${fixture_dir}/caps-ok.json"
     if ! check_load_bearing_caps "${caps_manifest}" "${fixture_dir}/caps-ok.json" \
         > "${fixture_dir}/caps-ok.out" 2>&1; then
@@ -469,9 +469,9 @@ name = "fixture"
 version = "0.0.0"
 
 [dependencies]
-fnx-algorithms = { version = "=0.3.0" }
-fnx-classes = { version = "=0.3.0" }
-fnx-runtime = { version = "=0.3.0" }
+fnx-algorithms = { version = "=0.4.1" }
+fnx-classes = { version = "=0.4.1" }
+fnx-runtime = { version = "=0.4.1" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"
@@ -485,9 +485,9 @@ name = "fixture"
 version = "0.0.0"
 
 [dependencies]
-fnx-algorithms = { version = "=0.3.1" }
-fnx-classes = { version = "=0.3.1" }
-fnx-runtime = { version = "=0.3.1" }
+fnx-algorithms = { version = "=0.4.2" }
+fnx-classes = { version = "=0.4.2" }
+fnx-runtime = { version = "=0.4.2" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = { version = ">=0.4, <0.4.79", default-features = false }
@@ -495,14 +495,14 @@ CAPFIXTURE
     expect_cap_failure cap_fnx_bumped 'bd-lrymw' \
         "${fixture_dir}/caps-fnx-bumped.toml" "${fixture_dir}/caps-ok.json"
 
-    printf '{"packages":[{"name":"wasm-bindgen-futures","version":"0.4.79"},{"name":"fnx-algorithms","version":"0.3.0"},{"name":"fnx-classes","version":"0.3.0"},{"name":"fnx-runtime","version":"0.3.0"}]}\n' \
+    printf '{"packages":[{"name":"wasm-bindgen-futures","version":"0.4.79"},{"name":"fnx-algorithms","version":"0.4.1"},{"name":"fnx-classes","version":"0.4.1"},{"name":"fnx-runtime","version":"0.4.1"}]}\n' \
         > "${fixture_dir}/caps-violated.json"
     expect_cap_failure cap_not_effective 'not effective' \
         "${caps_manifest}" "${fixture_dir}/caps-violated.json"
 
-    printf '{"packages":[{"name":"wasm-bindgen-futures","version":"0.4.78"},{"name":"fnx-algorithms","version":"0.3.1"},{"name":"fnx-classes","version":"0.3.0"},{"name":"fnx-runtime","version":"0.3.0"}]}\n' \
+    printf '{"packages":[{"name":"wasm-bindgen-futures","version":"0.4.78"},{"name":"fnx-algorithms","version":"0.4.2"},{"name":"fnx-classes","version":"0.4.1"},{"name":"fnx-runtime","version":"0.4.1"}]}\n' \
         > "${fixture_dir}/caps-fnx-lock-violated.json"
-    expect_cap_failure cap_fnx_lock_not_effective 'exact pin says =0.3.0' \
+    expect_cap_failure cap_fnx_lock_not_effective 'exact pin says =0.4.1' \
         "${caps_manifest}" "${fixture_dir}/caps-fnx-lock-violated.json"
 
     # The cap may legitimately move between dependency tables; only deleting it
@@ -514,9 +514,9 @@ version = "0.0.0"
 
 [dependencies]
 wasm-bindgen-futures = { version = ">=0.4, <0.4.79" }
-fnx-algorithms = { version = "=0.3.0" }
-fnx-classes = { version = "=0.3.0" }
-fnx-runtime = { version = "=0.3.0" }
+fnx-algorithms = { version = "=0.4.1" }
+fnx-classes = { version = "=0.4.1" }
+fnx-runtime = { version = "=0.4.1" }
 CAPFIXTURE
     if ! check_load_bearing_caps "${fixture_dir}/caps-moved.toml" "${fixture_dir}/caps-ok.json" \
         > "${fixture_dir}/caps-moved.out" 2>&1; then
@@ -539,9 +539,9 @@ CAPFIXTURE
 
         for spec in \
             "wasm-bindgen-futures:0.4.78" \
-            "fnx-algorithms:0.3.0" \
-            "fnx-classes:0.3.0" \
-            "fnx-runtime:0.3.0"
+            "fnx-algorithms:0.4.1" \
+            "fnx-classes:0.4.1" \
+            "fnx-runtime:0.4.1"
         do
             cname="${spec%%:*}"
             cver="${spec##*:}"
@@ -562,9 +562,9 @@ version = "0.18.0"
 edition = "2024"
 
 [dependencies]
-fnx-algorithms = { version = "=0.3.0", path = "vendor/fnx-algorithms" }
-fnx-classes = { version = "=0.3.0", path = "vendor/fnx-classes" }
-fnx-runtime = { version = "=0.3.0", path = "vendor/fnx-runtime" }
+fnx-algorithms = { version = "=0.4.1", path = "vendor/fnx-algorithms" }
+fnx-classes = { version = "=0.4.1", path = "vendor/fnx-classes" }
+fnx-runtime = { version = "=0.4.1", path = "vendor/fnx-runtime" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = { version = ">=0.4, <0.4.79", path = "vendor/wasm-bindgen-futures" }

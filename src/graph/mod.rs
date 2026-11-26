@@ -2622,10 +2622,15 @@ fn cgse_value_to_json(value: &CgseValue) -> serde_json::Value {
         CgseValue::Float(value) => serde_json::Number::from_f64(*value)
             .map_or(serde_json::Value::Null, serde_json::Value::Number),
         CgseValue::String(value) => serde_json::Value::String(value.clone()),
+        // fnx 0.4's AttrMap iterates in insertion order, and serde_json keeps
+        // insertion order here (preserve_order). Sort so content hashes keep
+        // the key order the old BTreeMap gave them.
         CgseValue::Map(value) => serde_json::Value::Object(
             value
                 .iter()
                 .map(|(key, value)| (key.clone(), cgse_value_to_json(value)))
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
                 .collect(),
         ),
     }

@@ -37381,10 +37381,9 @@ where
     {
         match graph_algorithm_input(cli, GraphReadOptions::from(args)) {
             Ok(input) => {
-                let communities = fnx_algorithms::louvain_communities(
+                let communities = crate::graph::health::louvain_communities_or_singletons(
                     &input.undirected,
                     args.resolution,
-                    "weight",
                     args.threshold,
                     args.max_level,
                     args.seed,

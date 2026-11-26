@@ -42,6 +42,13 @@
 # Sibling checkouts remain NOT required to use this lock; they are required only
 # to re-run this check.
 #
+# 2026-11-26: franken_networkx moved 0159a5d90 -> 9b566128f for the fnx 0.4.1
+# migration (bd-reality-core-convergence-1azkt.82). 9b566128f is the v0.4.1 tag,
+# and it is also the commit `.cargo_vcs_info.json` names (dirty=false) in all
+# three published 0.4.1 crates. By the TOML method above, fnx-algorithms,
+# fnx-classes and fnx-runtime read 0.4.1 there (inherited from
+# [workspace.package]), and 0.3.0 at the old row, which is the control.
+#
 # If you re-run it, PARSE THE TOML -- do not match `^version = "..."` with a
 # line-anchored regex. Such a regex reads whichever `version` comes first in the
 # file, so a `[dependencies.x]` table above `[package]`, or a crate that
@@ -60,7 +67,7 @@
 # check that before extending this check to another package.
 asupersync	78b64636e99fea4ea2d868096576021dd3b8e519
 franken_agent_detection	99ae86cdf8c71c53cec1df5760766038eca20375
-franken_networkx	0159a5d90a45092792e9b04fbfd87f8b57fb79ee
+franken_networkx	9b566128fc0feedc18b610b77cf5029d84f974fd
 frankensearch	d1cb86e1848309fe39fb7c8c4c4d7356ebd878aa
 frankensqlite	92aeb2b9762f2f38154fde74c4055959c6ebe294
 sqlmodel_rust	12d490b22ce3a82533591b5b39d2318b21da1f0f
