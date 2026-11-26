@@ -2710,9 +2710,7 @@ fn calibration_review_authority_borrows_snapshots_without_losing_feedback() {
                     source_type: "outcome_observed".to_owned(),
                     source_id: None,
                     reason: None,
-                    evidence_json: Some(
-                        r#"{"score":0.8,"groundTruthRelevance":0.6}"#.to_owned(),
-                    ),
+                    evidence_json: Some(r#"{"score":0.8,"groundTruthRelevance":0.6}"#.to_owned()),
                     session_id: None,
                 },
             )
