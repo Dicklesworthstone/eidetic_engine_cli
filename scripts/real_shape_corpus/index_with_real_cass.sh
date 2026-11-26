@@ -37,6 +37,7 @@ EXPECTED_CASS_VERSION="0.8.0"
 
 CORPUS="$REPO_ROOT/tests/fixtures/real_shape_cass"
 DATA_DIR=""
+CASS_BIN="cass"
 ALLOW_VERSION_DRIFT="false"
 SMOKE_QUERY="cargo publish"
 
@@ -48,6 +49,7 @@ usage: index_with_real_cass.sh --data-dir DIR [options]
                          Required: it is written to, so it must not be the fixture.
   --corpus DIR           Corpus to index (default: tests/fixtures/real_shape_cass).
   --smoke-query STR      Query that must return >0 hits (default: "cargo publish").
+  --cass PATH            Run this cass executable for every phase (default: cass on PATH).
   --allow-version-drift  Report a cass version other than the pin instead of failing.
 USAGE
 }
@@ -57,6 +59,7 @@ while [ $# -gt 0 ]; do
         --data-dir) DATA_DIR="${2:?--data-dir requires a path}"; shift 2 ;;
         --corpus) CORPUS="${2:?--corpus requires a path}"; shift 2 ;;
         --smoke-query) SMOKE_QUERY="${2:?--smoke-query requires a string}"; shift 2 ;;
+        --cass) CASS_BIN="${2:?--cass requires a path}"; shift 2 ;;
         --allow-version-drift) ALLOW_VERSION_DRIFT="true"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) printf 'index_with_real_cass: unknown argument %s\n' "$1" >&2; usage; exit 2 ;;
@@ -72,9 +75,9 @@ fail() { printf 'index_with_real_cass: %s\n' "$1" >&2; exit "${2:-1}"; }
 # REFUSE RATHER THAN FALL BACK. A missing cass is exactly the condition that
 # would otherwise be papered over by the emulator, which is the thing this
 # script exists not to do.
-command -v cass >/dev/null 2>&1 || fail "cass is not on PATH; this script will not fall back to the stub emulator" 3
+command -v "$CASS_BIN" >/dev/null 2>&1 || fail "cass is not on PATH; this script will not fall back to the stub emulator" 3
 
-CASS_VERSION="$(cass --version 2>&1 | head -1 | awk '{print $NF}')"
+CASS_VERSION="$("$CASS_BIN" --version 2>&1 | head -1 | awk '{print $NF}')"
 printf 'index_with_real_cass: cass_version=%s pinned=%s\n' "$CASS_VERSION" "$EXPECTED_CASS_VERSION" >&2
 if [ "$CASS_VERSION" != "$EXPECTED_CASS_VERSION" ]; then
     if [ "$ALLOW_VERSION_DRIFT" = "true" ]; then
@@ -102,7 +105,7 @@ run_cass() {
         XDG_DATA_HOME="$DATA_DIR/xdg/data" \
         XDG_CACHE_HOME="$DATA_DIR/xdg/cache" \
         XDG_STATE_HOME="$DATA_DIR/xdg/state" \
-        cass "$@"
+        "$CASS_BIN" "$@"
 }
 
 printf 'index_with_real_cass: indexing with REAL cass (not the stub emulator)\n' >&2
@@ -146,6 +149,14 @@ printf 'index_with_real_cass: smoke query %s -> hits=%s\n' "$SMOKE_QUERY" "$HITS
 [ "${HITS:-0}" -gt 0 ] 2>/dev/null \
     || fail "smoke query '$SMOKE_QUERY' returned $HITS hits from a populated index" 7
 
-printf '{"schema":"ee.real_shape_cass.real_index.v1","cass_version":"%s","pinned_cass_version":"%s","corpus":"%s","data_dir":"%s","sessions":%s,"conversations":%s,"messages":%s,"smoke_query":"%s","hits":%s,"indexer":"real"}\n' \
-    "$CASS_VERSION" "$EXPECTED_CASS_VERSION" "$CORPUS" "$DATA_DIR" \
-    "$EXPECTED_SESSIONS" "$CONVERSATIONS" "$MESSAGES" "$SMOKE_QUERY" "$HITS"
+python3 - "$CASS_VERSION" "$EXPECTED_CASS_VERSION" "$CORPUS" "$DATA_DIR" \
+    "$EXPECTED_SESSIONS" "$CONVERSATIONS" "$MESSAGES" "$SMOKE_QUERY" "$HITS" <<'PY'
+import json, sys
+
+version, pin, corpus, data, sessions, conversations, messages, query, hits = sys.argv[1:]
+print(json.dumps({"schema": "ee.real_shape_cass.real_index.v1", "cass_version": version,
+                  "pinned_cass_version": pin, "corpus": corpus, "data_dir": data,
+                  "sessions": int(sessions), "conversations": int(conversations),
+                  "messages": int(messages), "smoke_query": query, "hits": int(hits),
+                  "indexer": "real"}))
+PY
