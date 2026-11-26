@@ -792,6 +792,20 @@ fn procedure_promote_without_dry_run_reports_not_found_for_missing_record() -> T
 // Economy Tests (EE-431 - Degraded until DB-backed metrics exist)
 // ============================================================================
 
+/// An exit-code check whose failure carries the status and both streams.
+fn ensure_exit_code(output: &Output, expected: i32, context: &str) -> TestResult {
+    ensure(
+        output.status.code() == Some(expected),
+        format!(
+            "{context}: expected exit {expected}, got {} (code {:?})\nstdout={}\nstderr={}",
+            output.status,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
+}
+
 /// The economy payloads serialize `degraded` as aggregated entries with a `code`.
 fn ensure_economy_degraded_code(payload: &serde_json::Value, code: &str) -> TestResult {
     let codes: Vec<&str> = payload["degraded"]
@@ -819,7 +833,7 @@ fn ensure_economy_degraded_code(payload: &serde_json::Value, code: &str) -> Test
 fn economy_report_degrades_until_db_backed_metrics_exist() -> TestResult {
     let (_tempdir, workspace) = initialized_workspace()?;
     let output = run_ee(&["--workspace", &workspace, "economy", "report", "--json"])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure_exit_code(&output, 0, "economy report on an empty store")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     let json = stdout_json(&output)?;
@@ -860,7 +874,7 @@ fn economy_score_degrades_instead_of_scoring_seed_artifacts() -> TestResult {
         "mem_nonexistent",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(1), "exit code")?;
+    ensure_exit_code(&output, 1, "economy score of an unknown id")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     let json = stdout_json(&output)?;
     ensure_equal(
@@ -891,7 +905,7 @@ fn economy_simulate_degrades_instead_of_ranking_seed_artifacts() -> TestResult {
         "8000",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure_exit_code(&output, 0, "economy simulate on an empty store")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
     ensure(
@@ -960,7 +974,7 @@ fn economy_prune_plan_dry_run_degrades_until_db_backed_metrics_exist() -> TestRe
         "5",
         "--json",
     ])?;
-    ensure_equal(&output.status.code(), &Some(0), "exit code")?;
+    ensure_exit_code(&output, 0, "economy prune-plan on an empty store")?;
     ensure(stdout_is_json(&output), "stdout must be valid JSON")?;
     ensure(stdout_is_clean(&output), "stdout must be clean")?;
 
