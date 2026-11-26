@@ -44,9 +44,27 @@ fn ensure_command_success(output: &Output, context: &str) -> TestResult {
     )
 }
 
-fn run_ee(args: &[&str]) -> Result<Output, String> {
+/// The directory a step's `ee` runs from, as recorded in its `cwd.txt`.
+///
+/// A step that names no workspace (`health` and `capabilities`) runs from a dir
+/// workspace discovery cannot climb out of (bd-uuaa3). From cargo's cwd it
+/// resolved the checkout. The returned guard keeps that dir alive until the
+/// spawn returns.
+#[cfg(unix)]
+fn step_cwd(args: &[&str]) -> Result<(PathBuf, Option<tempfile::TempDir>), String> {
+    if args.contains(&"--workspace") {
+        let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+        return Ok((cwd, None));
+    }
+    let dir = crate::isolated_ee::outside_workspace_tempdir()?;
+    Ok((dir.path().to_path_buf(), Some(dir)))
+}
+
+#[cfg(unix)]
+fn run_ee(cwd: &Path, args: &[&str]) -> Result<Output, String> {
     let temp = tempfile::tempdir().map_err(|error| format!("isolated tempdir: {error}"))?;
     crate::isolated_ee::isolated_ee_command(temp.path())?
+        .current_dir(cwd)
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
@@ -116,7 +134,7 @@ fn run_logged_json_step(
         format!("ee {}\n", args.join(" ")),
     )
     .map_err(|error| error.to_string())?;
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let (cwd, _cwd_guard) = step_cwd(args)?;
     fs::write(dossier_dir.join("cwd.txt"), format!("{}\n", cwd.display()))
         .map_err(|error| error.to_string())?;
     fs::write(
@@ -135,7 +153,7 @@ fn run_logged_json_step(
     )?;
 
     let started = Instant::now();
-    let output = run_ee(args)?;
+    let output = run_ee(&cwd, args)?;
     let elapsed_ms = started.elapsed().as_millis();
 
     fs::write(
@@ -247,7 +265,7 @@ fn run_logged_markdown_step(
         format!("ee {}\n", args.join(" ")),
     )
     .map_err(|error| error.to_string())?;
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let (cwd, _cwd_guard) = step_cwd(args)?;
     fs::write(dossier_dir.join("cwd.txt"), format!("{}\n", cwd.display()))
         .map_err(|error| error.to_string())?;
     fs::write(
@@ -266,7 +284,7 @@ fn run_logged_markdown_step(
     )?;
 
     let started = Instant::now();
-    let output = run_ee(args)?;
+    let output = run_ee(&cwd, args)?;
     let elapsed_ms = started.elapsed().as_millis();
 
     fs::write(
