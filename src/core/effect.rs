@@ -1844,7 +1844,7 @@ impl EffectManifest {
                 "preflight guard",
                 "Alias for read-only advisory command-risk memory retrieval",
             ),
-            CommandEffect::read_only("plan goal", "Recommends recipes for goals"),
+            CommandEffect::read_only("plan goal", "Builds an ordered command plan for a goal"),
             CommandEffect::read_only_db(
                 "plan explain",
                 "Explains recipe provenance and applicability",

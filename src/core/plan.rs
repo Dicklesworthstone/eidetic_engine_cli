@@ -1055,7 +1055,6 @@ impl TaskFramePlanPosture {
 #[must_use]
 pub fn generate_plan(options: &PlanGoalOptions) -> GoalPlan {
     let classification = classify_goal(&options.goal);
-    let plan_id = format!("plan-{:08x}", rand_id());
     let task_frame_posture = options.workspace.as_ref().and_then(|workspace| {
         task_frame_plan_posture(workspace, options.task_frame_id.as_deref()).ok()
     });
@@ -1086,6 +1085,15 @@ pub fn generate_plan(options: &PlanGoalOptions) -> GoalPlan {
         ),
     };
 
+    let plan_id = plan_id_for(
+        &options.goal,
+        options.profile,
+        &recipe_id,
+        recipe_version,
+        task_frame_posture
+            .as_ref()
+            .map(|posture| posture.frame_id.as_str()),
+    );
     let dry_run_recommended = options.profile == PlanProfile::Safe;
 
     let mut next_inspection_commands = vec![
@@ -1212,20 +1220,30 @@ fn plan_preconditions(task_frame_posture: Option<&TaskFramePlanPosture>) -> Vec<
     preconditions
 }
 
-/// Generate a pseudo-random ID (deterministic for testing when seeded).
-fn rand_id() -> u32 {
-    let mut bytes = [0u8; 4];
-    if getrandom::fill(&mut bytes).is_err() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        return now.subsec_nanos() ^ saturating_unix_seconds_u32(now);
+/// A plan's identity is a digest of what it was planned from: the goal, the
+/// profile, the chosen recipe and the task frame. So the same inputs give
+/// byte-identical plans (bd-2iqsl). Each part is length-prefixed so
+/// boundaries cannot shift between parts.
+fn plan_id_for(
+    goal: &str,
+    profile: PlanProfile,
+    recipe_id: &str,
+    recipe_version: u32,
+    task_frame_id: Option<&str>,
+) -> String {
+    let recipe_version = recipe_version.to_string();
+    let mut hasher = blake3::Hasher::new();
+    for part in [
+        goal,
+        profile.as_str(),
+        recipe_id,
+        recipe_version.as_str(),
+        task_frame_id.unwrap_or(""),
+    ] {
+        hasher.update(&u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(part.as_bytes());
     }
-    u32::from_ne_bytes(bytes)
-}
-
-fn saturating_unix_seconds_u32(duration: std::time::Duration) -> u32 {
-    u32::try_from(duration.as_secs()).unwrap_or(u32::MAX)
+    format!("plan-{}", &hasher.finalize().to_hex()[..8])
 }
 
 // ============================================================================
@@ -2300,9 +2318,28 @@ mod tests {
     }
 
     #[test]
-    fn rand_id_fallback_seconds_saturate_before_narrowing() {
-        let duration = std::time::Duration::from_secs(u64::from(u32::MAX) + 1);
-        assert_eq!(saturating_unix_seconds_u32(duration), u32::MAX);
+    fn plan_goal_is_deterministic_and_the_profile_changes_the_plan() {
+        let plan_for = |profile| {
+            generate_plan(&PlanGoalOptions {
+                goal: "fix failing release workflow".to_string(),
+                workspace: None,
+                profile,
+                task_frame_id: None,
+            })
+        };
+        let safe = plan_for(PlanProfile::Safe);
+        let full = plan_for(PlanProfile::Full);
+        assert!(safe.dry_run_recommended);
+        assert!(!full.dry_run_recommended);
+        assert_ne!(safe.plan_id, full.plan_id);
+        assert_eq!(safe.recipe_id, full.recipe_id);
+        assert_eq!(
+            plan_for(PlanProfile::Safe).data_json(true).to_string(),
+            safe.data_json(true).to_string(),
+            "two runs from the same inputs must be byte-identical"
+        );
+        assert!(safe.plan_id.starts_with("plan-"));
+        assert_eq!(safe.plan_id.len(), "plan-".len() + 8);
     }
 
     #[test]

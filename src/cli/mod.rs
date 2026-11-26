@@ -8403,9 +8403,14 @@ pub struct PlanGoalArgs {
     #[arg(long, value_name = "TEXT")]
     pub goal: String,
 
-    /// Not applied: plan goal returns `plan recommend`'s ranked recipes. Accepted for
-    /// compatibility; bd-2iqsl decides whether the profile-aware planner replaces it.
-    #[arg(long, value_name = "PROFILE", default_value = "full")]
+    /// Plan profile: `full` (default), `compact` (omits rejected alternatives), or
+    /// `safe` (sets dryRunRecommended).
+    #[arg(
+        long,
+        value_name = "PROFILE",
+        default_value = "full",
+        value_parser = ["compact", "full", "safe"]
+    )]
     pub profile: String,
 }
 
@@ -28208,20 +28213,80 @@ where
     W: Write,
     E: Write,
 {
-    use crate::core::plan::{PlanRecommendOptions, recommend_recipes};
+    use crate::core::plan::{GOAL_PLAN_SCHEMA_V1, PlanGoalOptions, PlanProfile, generate_plan};
 
-    let (workspace_path, _) = resolve_local_workspace_for_cli(cli, None);
-    let options = PlanRecommendOptions {
-        task: args.goal.clone(),
-        limit: 5,
-        min_score: 0.3,
-        workspace_path,
-        database_path: None,
+    // `plan goal` returns an ordered plan for one recipe and honours
+    // --profile; ranked recipe lists are `plan recommend`'s job (bd-2iqsl).
+    // clap already restricts the value, so this refusal is defensive.
+    let Some(profile) = PlanProfile::from_str(&args.profile) else {
+        let error = DomainError::Usage {
+            message: format!(
+                "Unknown plan profile `{}`; use compact, full or safe.",
+                args.profile
+            ),
+            repair: Some("ee plan goal --help".to_owned()),
+        };
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
     };
-    match recommend_recipes(&options) {
-        Ok(report) => write_plan_recommend_report(cli, &report, stdout),
-        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
+    let (workspace_path, _) = resolve_local_workspace_for_cli(cli, None);
+    let plan = generate_plan(&PlanGoalOptions {
+        goal: args.goal.clone(),
+        workspace: Some(workspace_path.to_string_lossy().into_owned()),
+        profile,
+        task_frame_id: None,
+    });
+    // compact leaves out the rejected alternatives; full and safe keep them.
+    let mut data = plan.data_json(profile != PlanProfile::Compact);
+    if let Some(fields) = data.as_object_mut() {
+        fields.insert("command".to_owned(), serde_json::json!("plan goal"));
     }
+    let json = serde_json::json!({
+        "schema": GOAL_PLAN_SCHEMA_V1,
+        "success": true,
+        "data": data,
+    });
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_goal_plan_human(&json["data"]))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&json.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(json.to_string() + "\n")),
+    }
+}
+
+fn render_goal_plan_human(data: &serde_json::Value) -> String {
+    use std::fmt::Write as _;
+
+    let text = |value: &serde_json::Value| value.as_str().unwrap_or_default().to_owned();
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Plan {} for goal: {}\nRecipe: {} (profile {})",
+        text(&data["planId"]),
+        text(&data["goalInput"]),
+        text(&data["recipeId"]),
+        text(&data["profile"])
+    );
+    for step in data["steps"].as_array().into_iter().flatten() {
+        let _ = writeln!(
+            out,
+            "  {}. {} [{}]\n     {}",
+            step["order"],
+            text(&step["command"]),
+            text(&step["effectClass"]),
+            text(&step["description"])
+        );
+    }
+    if data["dryRunRecommended"].as_bool() == Some(true) {
+        out.push_str("Dry run recommended: use each step's --dry-run first.\n");
+    }
+    out
 }
 
 fn handle_plan_recipe_save<W: Write, E: Write>(

@@ -16119,7 +16119,7 @@ ee model status --workspace . --json
 
 **Severity:** warning
 
-**Surfaces:** plan recommend, plan goal
+**Surfaces:** plan recommend
 
 **Introduced by:** bd-jfd9 (epic PLAN)
 
@@ -19626,5 +19626,5 @@ the gap is one of:
 For new degraded codes, follow the J6 fixture-authoring workflow in
 `tests/fixtures/failure_modes/` (see any existing fixture as a
 template), then regenerate.
-<!-- degraded-codes-fingerprint inputs=sha256:c2dddf147b5b5dd1f04b3a4cde132512769853f224fa9039cc0b71537ac19948 -->
-<!-- degraded-codes-fingerprint body=sha256:19194ecef49b93e386cbbb750bb09804b394441df05f22efe1fa5273c95dec90 -->
+<!-- degraded-codes-fingerprint inputs=sha256:fb521b86d451b0eff349adbc7f6c222d0eb9452593faf847f94a59a7c9feaa4b -->
+<!-- degraded-codes-fingerprint body=sha256:64f0dc940d8a3dfe287cc67e67a813be401757efb5d544c3789ee9839fffe63b -->

@@ -2,7 +2,7 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "semantic_search_unavailable",
   "introduced_by": { "bead": "bd-jfd9", "epic_letter": "PLAN" },
-  "surfaces": ["plan recommend", "plan goal"],
+  "surfaces": ["plan recommend"],
   "severity": "warning",
   "repair_present": false,
   "trigger": {

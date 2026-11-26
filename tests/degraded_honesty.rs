@@ -3291,7 +3291,7 @@ fn plan_goal_and_explain_report_catalog_reasoning_without_unavailable_sentinel()
         (
             "plan-goal-catalog",
             "plan goal",
-            "ee.plan.recommend.v1",
+            "ee.plan.goal.v1",
             vec![
                 "--workspace".to_owned(),
                 workspace_arg.clone(),
@@ -3342,15 +3342,10 @@ fn plan_goal_and_explain_report_catalog_reasoning_without_unavailable_sentinel()
             json!(true),
             &format!("{command} success flag"),
         )?;
-        let expected_command = if command == "plan goal" {
-            "plan recommend"
-        } else {
-            "plan explain"
-        };
         ensure_json_pointer(
             &result.parsed,
             "/data/command",
-            json!(expected_command),
+            json!(command),
             &format!("{command} command label"),
         )?;
         ensure(
@@ -3358,13 +3353,29 @@ fn plan_goal_and_explain_report_catalog_reasoning_without_unavailable_sentinel()
             format!("{command} must not emit the removed unavailable sentinel"),
         )?;
         if command == "plan goal" {
+            // bd-2iqsl: plan goal returns the profile-aware GoalPlan, one catalog
+            // recipe as ordered steps, not plan recommend's ranked list.
             ensure(
                 result
                     .parsed
-                    .pointer("/data/recommendations")
+                    .pointer("/data/steps")
                     .and_then(Value::as_array)
-                    .is_some_and(|items| !items.is_empty()),
-                "plan goal must return at least one catalog recommendation",
+                    .is_some_and(|steps| !steps.is_empty()),
+                "plan goal must return at least one ordered step",
+            )?;
+            ensure(
+                result
+                    .parsed
+                    .pointer("/data/recipeId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|recipe| !recipe.is_empty() && recipe != "unknown"),
+                "plan goal must choose a catalog recipe for a release goal",
+            )?;
+            ensure_json_pointer(
+                &result.parsed,
+                "/data/profile",
+                json!("full"),
+                "plan goal default profile",
             )?;
         } else {
             ensure_json_pointer(
@@ -3404,20 +3415,15 @@ fn plan_goal_and_explain_report_catalog_reasoning_without_unavailable_sentinel()
             .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
         let log_json: Value = serde_json::from_str(&log_text)
             .map_err(|error| format!("e2e log must be JSON: {error}"))?;
-        // Recipe semantic scoring needs an embedder for the workspace. This one is
-        // uninitialized, so whether one is available depends on the host's model
-        // configuration and cache: a lane worker has none, and plan goal then says
-        // `semantic_search_unavailable` and scores lexically. That is an honest
-        // degradation, not the removed sentinel, and it is the only code accepted.
-        // plan explain reads the catalog only and must report nothing.
+        // Both read the static recipe catalog only. plan goal classifies the goal
+        // by keyword (bd-2iqsl) and no longer scores recipes semantically, so the
+        // host's model cache cannot make it degrade. Neither may report anything.
         let logged_codes = log_json
             .pointer("/degradationCodes")
             .cloned()
             .unwrap_or(Value::Null);
-        let honest = logged_codes == json!([])
-            || (command == "plan goal" && logged_codes == json!(["semantic_search_unavailable"]));
         ensure(
-            honest,
+            logged_codes == json!([]),
             format!("logged {command} degradation codes: {logged_codes}"),
         )?;
         ensure_json_pointer(
