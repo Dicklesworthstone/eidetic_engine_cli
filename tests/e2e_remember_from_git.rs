@@ -434,24 +434,40 @@ fn assert_persisted_anchors(workspace: &Path, log_path: &Path, memory_id: &str) 
     let all_hashes_stable = anchors.iter().all(|anchor| {
         anchor.anchor_value_hash.starts_with("blake3:")
             && anchor.captured_span_hash.starts_with("blake3:")
-            && anchor.source == MemoryAnchorSource::Remember
+    });
+    // Git capture writes its paths and symbols into the body as
+    // `ee-anchor:path:` / `ee-anchor:symbol:` markers (src/core/memory.rs), and
+    // marker anchors are Explicit. Extraction takes markers first and keeps
+    // the first entry per (kind, hash). Anything else, such as a config key
+    // found in the diff text, is extracted heuristically under the memory's
+    // own source, Remember. This term used to require Remember for every
+    // anchor, which no capture could satisfy: markers were Explicit before
+    // this test was written.
+    let sources_match_extraction = anchors.iter().all(|anchor| {
+        let expected = match anchor.anchor_kind {
+            MemoryAnchorKind::Path | MemoryAnchorKind::Symbol => MemoryAnchorSource::Explicit,
+            _ => MemoryAnchorSource::Remember,
+        };
+        anchor.source == expected
     });
     assert_logged(
         log_path,
         "remember_apply_persisted_path_and_symbol_anchors",
         kinds.contains(&MemoryAnchorKind::Path)
             && kinds.contains(&MemoryAnchorKind::Symbol)
-            && all_hashes_stable,
+            && all_hashes_stable
+            && sources_match_extraction,
         json!({
             "memoryId": memory_id,
             "anchorCount": anchors.len(),
             "kinds": anchors.iter().map(|anchor| anchor.anchor_kind.as_str()).collect::<Vec<_>>(),
             "redactedValues": anchors.iter().map(|anchor| anchor.redacted_anchor_value.as_str()).collect::<Vec<_>>(),
             "allHashesStable": all_hashes_stable,
-            // Per anchor, the three terms all_hashes_stable combines, so a red
-            // names the failing one (the lane run at 23525cf36 could not).
-            // Hashes are classified rather than printed: a malformed one may
-            // be a raw value.
+            "sourcesMatchExtraction": sources_match_extraction,
+            // Per anchor, the terms behind those two flags, so a red names
+            // the failing one (the lane run at 23525cf36 could not). Hashes
+            // are classified rather than printed: a malformed one may be a
+            // raw value.
             "sources": anchors.iter().map(|anchor| anchor.source.as_str()).collect::<Vec<_>>(),
             "valueHashIsBlake3": anchors
                 .iter()
