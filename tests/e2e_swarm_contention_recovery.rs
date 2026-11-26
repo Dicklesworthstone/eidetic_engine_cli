@@ -601,7 +601,12 @@ where
     let ee_binary = ee_binary_path();
     let iso_root = workspace.join(".ee-iso");
     let mut cmd = Command::new(&ee_binary);
+    // Named as well as used as the cwd (bd-uuaa3): before `ee init` creates
+    // `<workspace>/.ee/`, discovery from the cwd walks up past it, and rch roots
+    // temp dirs under the checkout, so `init` would reach the checkout's store.
     cmd.current_dir(workspace)
+        .arg("--workspace")
+        .arg(workspace)
         .env("HOME", iso_root.join("home"))
         .env("XDG_DATA_HOME", iso_root.join("xdg-data"))
         .env("XDG_CONFIG_HOME", iso_root.join("xdg-config"));
@@ -697,6 +702,8 @@ fn verify_db_integrity(workspace: &Path) -> Result<bool, String> {
             // sqlite3 CLI not available; verify via ee status instead
             let ee_status = Command::new(ee_binary_path())
                 .current_dir(workspace)
+                .arg("--workspace")
+                .arg(workspace)
                 .args(["status", "--json"])
                 .output();
             match ee_status {
