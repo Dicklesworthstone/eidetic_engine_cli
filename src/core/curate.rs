@@ -29,13 +29,13 @@ use crate::curate::{
     ReflectionPromptProfile, ReflectionRequestArtifact, ReflectionRequestLedgerMaterial,
     ReflectionRequestLifecycleConfig, ReflectionResultArtifact, ReflectionResultCandidateMaterial,
     ReflectionResultIngestDecision, ReflectionResultReplayGate, ReflectionSourceInput,
-    ReflectionSourceMetadata, ReflectionSourcePackageLimits, ReviewQueueState,
+    ReflectionSourceMetadata, ReflectionSourcePackageLimits, ReviewQueueState, SpecificityConfig,
     build_reflection_request_artifact_with_profile, build_reflection_source_package,
     canonical_derivation_metadata_json, canonical_derivation_source_refs_json,
     parse_reflection_result_artifact_json, prepare_reflection_request_with_config,
     reflection_ledger_source_refs, reflection_result_artifact_hash,
     reflection_result_ingest_decision_from_ledger, resolve_derivation_memory_scores,
-    validate_candidate, validate_candidate_trust_evidence,
+    validate_candidate_trust_evidence, validate_candidate_with_config,
     validate_reflection_request_matches_ledger_material, validate_review_queue_transition,
 };
 use crate::db::{
@@ -5997,6 +5997,7 @@ pub fn validate_curation_candidate(
     )
     .map(|c| c.value == "true")
     .unwrap_or(true);
+    let specificity = workspace_specificity_config(options.workspace_path);
     let parsed_candidate_type = CandidateType::from_str(&stored.candidate_type);
     let mut decision = if crate::core::conflict_proposal::is_candidate(&stored) {
         evaluate_conflict_candidate_for_validation(&connection, &stored)
@@ -6008,6 +6009,7 @@ pub fn validate_curation_candidate(
                     &stored,
                     &now,
                     prompt_injection_guard,
+                    &specificity,
                 )
             }
             Ok(_) | Err(_) => {
@@ -6023,6 +6025,7 @@ pub fn validate_curation_candidate(
                     target_memory.as_ref(),
                     &now,
                     prompt_injection_guard,
+                    &specificity,
                 )
             }
         }
@@ -6233,6 +6236,7 @@ pub fn show_curation_candidate(
                     &stored,
                     &now,
                     prompt_injection_guard,
+                    &workspace_specificity_config(options.workspace_path),
                 );
                 Some(planned_application_from_decision(&stored, &decision))
             }
@@ -6496,6 +6500,7 @@ fn apply_curation_candidate_with_recipe(
                     &stored,
                     &now,
                     prompt_injection_guard,
+                    &workspace_specificity_config(options.workspace_path),
                 )
             }
             Ok(_) | Err(_) => {
@@ -7447,6 +7452,17 @@ pub fn workspace_structural_decay_policy(workspace_path: &Path) -> StructuralDec
         .map_or_else(StructuralDecayPolicy::default, |config| {
             structural_decay_policy_from_config(&config)
         })
+}
+
+/// `[curation].specificity_min` from every config layer, for `ee curate
+/// validate`, `show` and `apply`. The proposers keep the default: the
+/// session-arc proposer uses it to choose the template that fixes a
+/// candidate's content and id.
+fn workspace_specificity_config(workspace_path: &Path) -> SpecificityConfig {
+    SpecificityConfig::from_optional_minimum(
+        crate::core::config_surface::effective_workspace_config(workspace_path)
+            .and_then(|config| config.curation.specificity_min),
+    )
 }
 
 /// Maximum bytes inspected when reading `<workspace>/.ee/config.toml` from
@@ -11197,6 +11213,7 @@ fn evaluate_candidate_for_validation(
     target_memory: Option<&StoredMemory>,
     now_rfc3339: &str,
     prompt_injection_guard: bool,
+    specificity: &SpecificityConfig,
 ) -> ValidationDecision {
     let mut errors = Vec::new();
     let warnings = Vec::new();
@@ -11281,7 +11298,12 @@ fn evaluate_candidate_for_validation(
                 confidence: stored.confidence,
                 ttl_seconds: None,
             };
-            if let Err(error) = validate_candidate(input, now_rfc3339, prompt_injection_guard) {
+            if let Err(error) = validate_candidate_with_config(
+                input,
+                now_rfc3339,
+                prompt_injection_guard,
+                specificity,
+            ) {
                 errors.push(validation_issue(
                     error.code(),
                     error.to_string(),
@@ -11304,6 +11326,7 @@ fn evaluate_create_derived_candidate_for_validation(
     stored: &StoredCurationCandidate,
     now_rfc3339: &str,
     prompt_injection_guard: bool,
+    specificity: &SpecificityConfig,
 ) -> ValidationDecision {
     let mut errors = Vec::new();
     let warnings = Vec::new();
@@ -11397,9 +11420,13 @@ fn evaluate_create_derived_candidate_for_validation(
             // command/path tokens required by the generic rule-prose heuristic.
             // Every other validation error remains fatal, and the native
             // reconstruction is mandatory even when only this gate is waived.
-            if let Err(error) = validate_candidate(input, now_rfc3339, prompt_injection_guard)
-                && !(summary::is_summary(stored)
-                    && matches!(&error, CandidateValidationError::CandidateTooGeneric { .. }))
+            if let Err(error) = validate_candidate_with_config(
+                input,
+                now_rfc3339,
+                prompt_injection_guard,
+                specificity,
+            ) && !(summary::is_summary(stored)
+                && matches!(&error, CandidateValidationError::CandidateTooGeneric { .. }))
             {
                 errors.push(validation_issue(
                     error.code(),
@@ -13001,6 +13028,7 @@ fn evaluate_create_derived_candidate_for_apply(
     stored: &StoredCurationCandidate,
     now_rfc3339: &str,
     prompt_injection_guard: bool,
+    specificity: &SpecificityConfig,
 ) -> ApplyDecision {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
@@ -13057,6 +13085,7 @@ fn evaluate_create_derived_candidate_for_apply(
         stored,
         now_rfc3339,
         prompt_injection_guard,
+        specificity,
     );
     errors.extend(validation.validation.errors);
     warnings.extend(validation.validation.warnings);
@@ -20939,6 +20968,26 @@ mod tests {
     }
 
     #[test]
+    fn workspace_specificity_config_reads_curation_specificity_min() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        assert_eq!(
+            super::workspace_specificity_config(tempdir.path()),
+            super::SpecificityConfig::default(),
+            "no config keeps the 0.45 default"
+        );
+
+        fs::create_dir_all(tempdir.path().join(".ee")).map_err(|error| error.to_string())?;
+        fs::write(
+            tempdir.path().join(".ee").join("config.toml"),
+            "[curation]\nspecificity_min = 0.9\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let minimum = super::workspace_specificity_config(tempdir.path()).minimum_score;
+        assert!((minimum - 0.9).abs() < 1e-6, "minimum {minimum}");
+        Ok(())
+    }
+
+    #[test]
     fn structural_decay_feature_policy_carries_the_graph_curate_tuning() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         fs::create_dir_all(tempdir.path().join(".ee")).map_err(|error| error.to_string())?;
@@ -21386,8 +21435,13 @@ mod tests {
             derivation_metadata_json: None,
         };
 
-        let decision =
-            evaluate_candidate_for_validation(&stored, None, "2026-05-01T00:03:00Z", true);
+        let decision = evaluate_candidate_for_validation(
+            &stored,
+            None,
+            "2026-05-01T00:03:00Z",
+            true,
+            &Default::default(),
+        );
 
         assert_eq!(decision.validation.status, "failed");
         assert!(
@@ -23723,6 +23777,7 @@ mod tests {
             &stored,
             "2026-05-01T00:00:00Z",
             true,
+            &Default::default(),
         );
         let codes = decision
             .validation

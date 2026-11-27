@@ -318,10 +318,16 @@ fn episodic_summary_source_coverage_replaces_only_the_generic_prose_gate() -> Te
     );
     let now = Utc::now().to_rfc3339();
     assert!(
-        evaluate_create_derived_candidate_for_validation(&workspace.db, &stored, &now, true)
-            .validation
-            .errors
-            .is_empty()
+        evaluate_create_derived_candidate_for_validation(
+            &workspace.db,
+            &stored,
+            &now,
+            true,
+            &Default::default()
+        )
+        .validation
+        .errors
+        .is_empty()
     );
 
     let mut generic = stored.clone();
@@ -329,8 +335,13 @@ fn episodic_summary_source_coverage_replaces_only_the_generic_prose_gate() -> Te
     metadata.producer.producer = "manual_summary".to_owned();
     generic.derivation_metadata_json = Some(canonical_derivation_metadata_json(&metadata)?);
     generic.source_id = Some("manual_summary".to_owned());
-    let rejected =
-        evaluate_create_derived_candidate_for_validation(&workspace.db, &generic, &now, true);
+    let rejected = evaluate_create_derived_candidate_for_validation(
+        &workspace.db,
+        &generic,
+        &now,
+        true,
+        &Default::default(),
+    );
     assert!(
         rejected
             .validation
@@ -341,8 +352,13 @@ fn episodic_summary_source_coverage_replaces_only_the_generic_prose_gate() -> Te
 
     // A reserved source label alone cannot borrow the native exception.
     generic.source_id = Some(PRODUCER.to_owned());
-    let spoofed =
-        evaluate_create_derived_candidate_for_validation(&workspace.db, &generic, &now, true);
+    let spoofed = evaluate_create_derived_candidate_for_validation(
+        &workspace.db,
+        &generic,
+        &now,
+        true,
+        &Default::default(),
+    );
     assert!(
         spoofed
             .validation
@@ -355,11 +371,17 @@ fn episodic_summary_source_coverage_replaces_only_the_generic_prose_gate() -> Te
     invented.proposed_content =
         Some("The cache recovery observation proves every deployment will succeed.".to_owned());
     assert!(
-        evaluate_create_derived_candidate_for_validation(&workspace.db, &invented, &now, true)
-            .validation
-            .errors
-            .iter()
-            .any(|issue| issue.code == "episodic_summary_source_changed")
+        evaluate_create_derived_candidate_for_validation(
+            &workspace.db,
+            &invented,
+            &now,
+            true,
+            &Default::default()
+        )
+        .validation
+        .errors
+        .iter()
+        .any(|issue| issue.code == "episodic_summary_source_changed")
     );
 
     let mut insufficient = stored.clone();
@@ -367,11 +389,17 @@ fn episodic_summary_source_coverage_replaces_only_the_generic_prose_gate() -> Te
     refs.pop();
     insufficient.derivation_source_refs_json = Some(canonical_derivation_source_refs_json(&refs)?);
     assert!(
-        evaluate_create_derived_candidate_for_validation(&workspace.db, &insufficient, &now, true)
-            .validation
-            .errors
-            .iter()
-            .any(|issue| issue.code == "episodic_summary_source_changed")
+        evaluate_create_derived_candidate_for_validation(
+            &workspace.db,
+            &insufficient,
+            &now,
+            true,
+            &Default::default()
+        )
+        .validation
+        .errors
+        .iter()
+        .any(|issue| issue.code == "episodic_summary_source_changed")
     );
     Ok(())
 }
@@ -617,7 +645,13 @@ fn episodic_summary_writer_revalidation_blocks_a_drifted_prepared_plan() -> Test
     let proposed = workspace.discover(true, None)?;
     let candidate = workspace.approve(&proposed.candidates.first().ok_or("proposal")?.id)?;
     let now = Utc::now().to_rfc3339();
-    let plan = evaluate_create_derived_candidate_for_apply(&workspace.db, &candidate, &now, true);
+    let plan = evaluate_create_derived_candidate_for_apply(
+        &workspace.db,
+        &candidate,
+        &now,
+        true,
+        &Default::default(),
+    );
     let derived = plan
         .derived_create
         .as_ref()

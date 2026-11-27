@@ -237,6 +237,7 @@ fn derived_apply_rechecks_authority_after_approval_and_planning() -> TestResult 
             &stored,
             &now,
             true,
+            &Default::default(),
         );
         assert!(planned.should_persist, "{:?}", planned.application.errors);
         fixture.withdraw(posture)?;

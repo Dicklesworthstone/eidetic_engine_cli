@@ -30,6 +30,14 @@ The scorer:
 The threshold is configurable as `[curation].specificity_min`. The weights are
 kept in code for now so the v1 contract is deterministic and reviewable.
 
+`ee curate validate`, `ee curate show` and `ee curate apply` read the configured
+threshold. The proposers that build candidates (session arcs, verified repairs,
+reflection drafts) keep `0.45`: the session-arc proposer uses it to choose the
+template that fixes a candidate's content and id, and a config change must not
+re-key candidates that already exist. So raising the threshold makes validation
+stricter than proposal, and lowering it admits only candidates that come from
+somewhere other than those three proposers.
+
 ## Consequences
 
 Future curation validation and auto-promotion paths can call one shared contract

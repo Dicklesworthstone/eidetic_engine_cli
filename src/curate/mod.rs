@@ -6944,6 +6944,19 @@ impl Default for SpecificityConfig {
     }
 }
 
+impl SpecificityConfig {
+    /// The default contract with `[curation].specificity_min` applied. The
+    /// config parser keeps the value in `[0, 1]`.
+    #[must_use]
+    pub fn from_optional_minimum(minimum_score: Option<f64>) -> Self {
+        let mut config = Self::default();
+        if let Some(minimum_score) = minimum_score {
+            config.minimum_score = minimum_score as f32;
+        }
+        config
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum SpecificityTokenKind {
     BranchOrTag,
@@ -8059,6 +8072,21 @@ pub fn validate_candidate(
     now_rfc3339: &str,
     prompt_injection_guard: bool,
 ) -> Result<ValidatedCandidate, CandidateValidationError> {
+    validate_candidate_with_config(
+        input,
+        now_rfc3339,
+        prompt_injection_guard,
+        &SpecificityConfig::default(),
+    )
+}
+
+/// [`validate_candidate`] against a workspace's `[curation].specificity_min`.
+pub fn validate_candidate_with_config(
+    input: CandidateInput,
+    now_rfc3339: &str,
+    prompt_injection_guard: bool,
+    specificity: &SpecificityConfig,
+) -> Result<ValidatedCandidate, CandidateValidationError> {
     // Validate required fields
     if input.workspace_id.trim().is_empty() {
         return Err(CandidateValidationError::EmptyWorkspaceId);
@@ -8182,7 +8210,7 @@ pub fn validate_candidate(
     let specificity_report = proposed_content
         .as_ref()
         .filter(|_| !structured_payload)
-        .map(|content| specificity_score(content));
+        .map(|content| specificity_score_with_config(content, specificity));
     if let Some(report) = &specificity_report
         && !report.passes_threshold
     {
@@ -9909,17 +9937,17 @@ mod tests {
         ReflectionResultArtifact, ReflectionResultIngestDecision, ReflectionResultIngestError,
         ReflectionResultProducer, ReflectionResultReplayGate, ReflectionResultValidationError,
         ReflectionSourceInput, ReflectionSourceMetadata, ReflectionSourcePackageLimits,
-        ReflectionSourcePackageOmission, ReviewQueueState, SpecificityPlatform, SpecificityReport,
-        SpecificityTokenKind, TRAUMA_GUARD_SCHEMA_V1, TraumaGuardDecision, TraumaGuardInput,
-        attach_reflection_request_challenge, attach_reflection_request_challenge_with_key,
-        build_reflection_request_artifact, build_reflection_request_artifact_with_profile,
-        build_reflection_request_challenge, build_reflection_request_challenge_with_key,
-        build_reflection_request_fingerprint, build_reflection_request_fingerprint_with_profile,
-        build_reflection_source_package, candidate_embedding_text,
-        canonical_derivation_metadata_json, canonical_derivation_source_refs_json,
-        canonical_reflection_challenge_binding_json, canonical_reflection_request_artifact_json,
-        canonical_reflection_source_package_json, check_duplicate_rule,
-        check_duplicate_rule_with_config, evaluate_trauma_guard,
+        ReflectionSourcePackageOmission, ReviewQueueState, SpecificityConfig, SpecificityPlatform,
+        SpecificityReport, SpecificityTokenKind, TRAUMA_GUARD_SCHEMA_V1, TraumaGuardDecision,
+        TraumaGuardInput, attach_reflection_request_challenge,
+        attach_reflection_request_challenge_with_key, build_reflection_request_artifact,
+        build_reflection_request_artifact_with_profile, build_reflection_request_challenge,
+        build_reflection_request_challenge_with_key, build_reflection_request_fingerprint,
+        build_reflection_request_fingerprint_with_profile, build_reflection_source_package,
+        candidate_embedding_text, canonical_derivation_metadata_json,
+        canonical_derivation_source_refs_json, canonical_reflection_challenge_binding_json,
+        canonical_reflection_request_artifact_json, canonical_reflection_source_package_json,
+        check_duplicate_rule, check_duplicate_rule_with_config, evaluate_trauma_guard,
         parse_reflection_result_artifact_json, prepare_reflection_request_with_config,
         reflection_prompt_template_descriptor, reflection_prompt_template_descriptor_for_profile,
         reflection_request_ledger_material, reflection_request_source_content_hashes_json,
@@ -9929,7 +9957,8 @@ mod tests {
         reflection_result_schema_contract_json, render_reflection_prompt,
         render_reflection_prompt_with_profile, render_reflection_request_prompt,
         resolve_derivation_memory_scores, specificity_score, subsystem_name, validate_candidate,
-        validate_reflection_request_artifact, validate_reflection_request_matches_ledger_material,
+        validate_candidate_with_config, validate_reflection_request_artifact,
+        validate_reflection_request_matches_ledger_material,
         validate_reflection_result_artifact_with_key, validate_reflection_source_package,
         validate_review_queue_transition, validate_status_transition,
         verify_reflection_request_challenge, verify_reflection_request_challenge_with_key,
@@ -11195,6 +11224,31 @@ Then update src/policy/mod.rs on main."
             result,
             Err(CandidateValidationError::ContentRequiredForType { .. })
         ));
+    }
+
+    #[test]
+    fn validate_candidate_with_config_applies_the_configured_specificity_minimum() -> TestResult {
+        let content = include_str!("../../tests/fixtures/specificity/positive_release_rule.txt");
+        let score = specificity_score(content).score;
+        let mut input = valid_input();
+        input.candidate_type = CandidateType::Consolidate;
+        input.proposed_content = Some(content.to_owned());
+        let now = "2026-04-29T12:00:00Z";
+
+        validate_candidate_with_config(input.clone(), now, false, &SpecificityConfig::default())
+            .map_err(|error| format!("the default minimum admits the release rule: {error:?}"))?;
+
+        // Validation scored against 0.45 whatever [curation].specificity_min said.
+        let stricter = SpecificityConfig::from_optional_minimum(Some(f64::from(score) + 0.01));
+        match validate_candidate_with_config(input, now, false, &stricter) {
+            Err(CandidateValidationError::CandidateTooGeneric { threshold, .. }) => {
+                assert_eq!(threshold, format!("{:.4}", stricter.minimum_score));
+                Ok(())
+            }
+            other => Err(format!(
+                "expected the stricter minimum to reject, got {other:?}"
+            )),
+        }
     }
 
     #[test]
