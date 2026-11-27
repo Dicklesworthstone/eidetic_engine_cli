@@ -128,6 +128,22 @@ pub struct ContradictionDetectionConfig {
     pub include_fuzzy_near_conflict: bool,
 }
 
+/// The cluster policy `graph.health.contradiction_threshold` sets for a
+/// workspace, read through every config layer as `ee config show` reports it.
+///
+/// For the graph health surfaces, `ee health` and `ee insights`. `ee conflict`
+/// keeps the default, because its resolve validators rebuild the surface
+/// with only a workspace id, and the list and the validator must agree.
+#[must_use]
+pub fn workspace_contradiction_policy(
+    workspace_path: &std::path::Path,
+) -> ContradictionClusterPolicy {
+    ContradictionClusterPolicy::from_optional_config(
+        crate::core::config_surface::effective_workspace_config(workspace_path)
+            .and_then(|config| config.graph.health.contradiction_threshold),
+    )
+}
+
 impl Default for ContradictionDetectionConfig {
     fn default() -> Self {
         Self {
@@ -1727,6 +1743,29 @@ mod tests {
             ),
         };
         (connection, audit)
+    }
+
+    #[test]
+    fn workspace_contradiction_policy_reads_the_graph_health_threshold() -> Result<(), String> {
+        let unset = tempfile::tempdir().map_err(|error| error.to_string())?;
+        assert_eq!(
+            super::workspace_contradiction_policy(unset.path()).density_threshold,
+            crate::graph::health::DEFAULT_CONTRADICTION_DENSITY_THRESHOLD,
+        );
+
+        let tuned = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(tuned.path().join(".ee")).map_err(|error| error.to_string())?;
+        std::fs::write(
+            tuned.path().join(".ee").join("config.toml"),
+            "[graph.health]\ncontradiction_threshold = 0.9\n",
+        )
+        .map_err(|error| error.to_string())?;
+        // `ee health` and `ee insights` used the 0.20 default whatever this said.
+        assert_eq!(
+            super::workspace_contradiction_policy(tuned.path()).density_threshold,
+            0.9
+        );
+        Ok(())
     }
 
     #[test]

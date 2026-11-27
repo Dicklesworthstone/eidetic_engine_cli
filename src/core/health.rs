@@ -18,7 +18,7 @@ use crate::db::{
 };
 use crate::graph::health::{
     ContradictionCluster, ContradictionSeverity, HEALTH_STRUCTURAL_SCHEMA_V1, KTrussReport,
-    compute_k_truss, detect_contradiction_clusters,
+    compute_k_truss, detect_contradiction_clusters_with_policy,
 };
 use crate::models::degradation::{GRAPH_HEALTH_NO_CONTRADICTIONS_CODE, GRAPH_METRICS_UNAVAILABLE};
 use crate::models::{CapabilityStatus, DomainError};
@@ -1316,7 +1316,10 @@ impl StructuralHealthReport {
         let contradiction_graph =
             relation_graph(&links, &memory_ids, MemoryLinkRelation::Contradicts);
         let k_truss = compute_k_truss(&support_graph);
-        let contradiction_clusters = detect_contradiction_clusters(&contradiction_graph);
+        let contradiction_clusters = detect_contradiction_clusters_with_policy(
+            &contradiction_graph,
+            super::contradiction_detect::workspace_contradiction_policy(workspace_path),
+        );
         Self::from_graph_reports(
             snapshot_version,
             &support_graph,

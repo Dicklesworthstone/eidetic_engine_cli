@@ -1253,7 +1253,18 @@ fn load_contradiction_clusters(
     let Some(data) = load_workspace_insights_graph_data(workspace, database_path)? else {
         return Ok(Vec::new());
     };
-    contradiction_clusters_from_links(&data.links)
+    contradiction_clusters_from_links(&data.links, insights_contradiction_policy(workspace))
+}
+
+/// `graph.health.contradiction_threshold` for this workspace, or the default
+/// when insights reads a database without one.
+fn insights_contradiction_policy(
+    workspace: Option<&Path>,
+) -> crate::graph::health::ContradictionClusterPolicy {
+    workspace.map_or_else(
+        crate::graph::health::ContradictionClusterPolicy::default,
+        crate::core::contradiction_detect::workspace_contradiction_policy,
+    )
 }
 
 fn load_knowledge_gap_inputs(
@@ -1263,7 +1274,7 @@ fn load_knowledge_gap_inputs(
     let Some(data) = load_workspace_insights_graph_data(workspace, database_path)? else {
         return Ok(Vec::new());
     };
-    knowledge_gap_inputs_from_graph_data(&data)
+    knowledge_gap_inputs_from_graph_data(&data, insights_contradiction_policy(workspace))
 }
 
 fn load_top_memory_inputs(
@@ -1715,6 +1726,7 @@ fn contradiction_cluster_relation(relation: &str) -> bool {
 
 fn contradiction_clusters_from_links(
     links: &[StoredMemoryLink],
+    policy: crate::graph::health::ContradictionClusterPolicy,
 ) -> Result<Vec<crate::graph::health::ContradictionCluster>, DomainError> {
     let contradiction_links = links
         .iter()
@@ -1725,7 +1737,7 @@ fn contradiction_clusters_from_links(
         return Ok(Vec::new());
     }
     let graph = proximity_graph_from_links(&contradiction_links)?;
-    Ok(crate::graph::health::detect_contradiction_clusters(&graph))
+    Ok(crate::graph::health::detect_contradiction_clusters_with_policy(&graph, policy))
 }
 
 fn collect_rust_source_paths(workspace: &Path) -> Result<Vec<PathBuf>, DomainError> {
@@ -2065,6 +2077,7 @@ fn is_identifier_char(character: char) -> bool {
 
 fn knowledge_gap_inputs_from_graph_data(
     data: &WorkspaceInsightsGraphData,
+    contradiction_policy: crate::graph::health::ContradictionClusterPolicy,
 ) -> Result<Vec<KnowledgeGapInput>, DomainError> {
     if data.memories.is_empty() && data.links.is_empty() {
         return Ok(Vec::new());
@@ -2108,7 +2121,7 @@ fn knowledge_gap_inputs_from_graph_data(
         });
     }
 
-    for cluster in contradiction_clusters_from_links(&data.links)? {
+    for cluster in contradiction_clusters_from_links(&data.links, contradiction_policy)? {
         let source_memory_ids =
             sorted_unique_memory_ids(cluster.exemplar_memory_ids.iter().map(String::as_str));
         if source_memory_ids.is_empty()
@@ -5949,7 +5962,7 @@ mod tests {
             ),
         ];
 
-        let clusters = contradiction_clusters_from_links(&links)
+        let clusters = contradiction_clusters_from_links(&links, Default::default())
             .map_err(|error| format!("contradiction cluster build failed: {error}"))?;
         let section = contradiction_clusters_section_from_clusters(&clusters);
 
@@ -6095,7 +6108,7 @@ mod tests {
             ],
         };
 
-        let gaps = knowledge_gap_inputs_from_graph_data(&data)
+        let gaps = knowledge_gap_inputs_from_graph_data(&data, Default::default())
             .map_err(|error| format!("knowledge gap input build failed: {error}"))?;
         let section = knowledge_gaps_section_from_inputs(&gaps);
         let section_json = serde_json::to_value(&section)
@@ -6190,7 +6203,7 @@ mod tests {
             memories: Vec::new(),
             links: Vec::new(),
         };
-        let empty_gaps = knowledge_gap_inputs_from_graph_data(&empty)
+        let empty_gaps = knowledge_gap_inputs_from_graph_data(&empty, Default::default())
             .map_err(|error| format!("empty knowledge gap build failed: {error}"))?;
         assert!(
             knowledge_gaps_section_from_inputs(&empty_gaps)
@@ -6246,7 +6259,7 @@ mod tests {
                 ),
             ],
         };
-        let healthy_gaps = knowledge_gap_inputs_from_graph_data(&healthy)
+        let healthy_gaps = knowledge_gap_inputs_from_graph_data(&healthy, Default::default())
             .map_err(|error| format!("healthy knowledge gap build failed: {error}"))?;
         assert!(
             knowledge_gaps_section_from_inputs(&healthy_gaps)
@@ -6290,11 +6303,11 @@ mod tests {
         };
 
         let forward_section = knowledge_gaps_section_from_inputs(
-            &knowledge_gap_inputs_from_graph_data(&forward)
+            &knowledge_gap_inputs_from_graph_data(&forward, Default::default())
                 .map_err(|error| format!("forward knowledge gap build failed: {error}"))?,
         );
         let reverse_section = knowledge_gaps_section_from_inputs(
-            &knowledge_gap_inputs_from_graph_data(&reverse)
+            &knowledge_gap_inputs_from_graph_data(&reverse, Default::default())
                 .map_err(|error| format!("reverse knowledge gap build failed: {error}"))?,
         );
 
