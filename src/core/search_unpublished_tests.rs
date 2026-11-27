@@ -1562,7 +1562,7 @@ fn embedding_search_publishes_first_generation_from_deferred_remember() {
 
 /// Why the pre-read repair left a delta unpublished, as far as a test can see.
 ///
-/// The repair can stop at three stages, and it reports none of them to the
+/// The repair can stop at several points, and it reports none of them to the
 /// caller, only to tracing, which is not captured here. So a red could not
 /// name its cause (bd-q1e4y: C75z5 at 3ed75b4a1 showed one embed call since
 /// the remember, the index one generation behind, and nothing else). That
@@ -1572,7 +1572,10 @@ fn embedding_search_publishes_first_generation_from_deferred_remember() {
 /// 1. the source upper bound against the full-rebuild ceiling, where `Some(false)`
 ///    selects the bounded path;
 /// 2. the bounded generation gap, where `Ok(None)` skips the repair;
-/// 3. the bounded coalesced processor, with the same one-job limit, since both
+/// 3. the metadata gate inside the processor's streamed-delta path, evaluated
+///    on its own: the process default embedder its embedding-space check
+///    compares against, and the verdict, where any `Err` declines the delta;
+/// 4. the bounded coalesced processor, with the same one-job limit, since both
 ///    callers queue exactly one delta. A job reported skipped as "deferred"
 ///    means the streamed delta was declined. The census beside it shows the
 ///    index directory against that path's generation limits: 512 entries,
@@ -1596,6 +1599,12 @@ fn delta_publication_probe(fixture: &Fixture, options: &SearchOptions) -> String
         &index_dir,
         "probe the index directory",
     );
+    let delta_gate = match fixture.db.get_workspace_generation(&fixture.workspace) {
+        Ok(generation) => {
+            crate::core::index::delta_metadata_gate_for_test(&index_dir, generation.unwrap_or(0))
+        }
+        Err(error) => format!("database generation unreadable: {error}"),
+    };
     let status_options = IndexStatusOptions {
         workspace_path: options.workspace_path.clone(),
         database_path: options.database_path.clone(),
@@ -1654,7 +1663,8 @@ fn delta_publication_probe(fixture: &Fixture, options: &SearchOptions) -> String
     };
     format!(
         "jobs before probe {jobs:?}; 1. upper bound fits {upper_bound_fits:?}; \
-         2. bounded gap {gap}; 3. processor {processed}; \
+         2. bounded gap {gap}; 3. delta metadata gate {delta_gate}; \
+         4. processor {processed}; \
          index dir {census}, symlink-free {symlink_free:?}"
     )
 }

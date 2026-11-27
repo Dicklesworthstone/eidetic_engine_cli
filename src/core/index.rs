@@ -4499,6 +4499,29 @@ fn validate_incremental_index_metadata_with_limit(
     Ok(())
 }
 
+/// What the streamed-delta path's metadata gate sees, for bd-q1e4y's probe.
+///
+/// `delta_source::prepare_with_limits` runs exactly this validation and, on a
+/// refusal, only logs it before declining the delta. One refusal is the
+/// embedding-space check, which compares the stored producer with
+/// [`active_semantic_identity`]. That is the process-wide default embedder,
+/// once anything in the process has resolved it, and not the workspace stack
+/// that will embed the delta. Reporting both lets a red name that case.
+#[cfg(all(test, unix))]
+pub(crate) fn delta_metadata_gate_for_test(index_dir: &Path, database_generation: u64) -> String {
+    format!(
+        "process default resolved {}, identity {:?}; validation {:?}",
+        default_search_embedder_resolved(),
+        active_semantic_identity(),
+        validate_incremental_index_metadata_with_limit(
+            index_dir,
+            database_generation,
+            u64::MAX,
+            delta_source::MAX_INTERACTIVE_METADATA_BYTES,
+        ),
+    )
+}
+
 #[cfg(test)]
 async fn upsert_incremental_document(
     cx: &asupersync::Cx,
