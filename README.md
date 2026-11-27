@@ -2632,9 +2632,9 @@ current inventory records `unsupported.resource_profile_budget_admission` with
 `abstentionReason=unsupported_policy_domain` until that decision plane has a
 safe shadow implementation.
 
-Use `--shadow compare --policy <policy-id>` only to collect comparison evidence.
-Shadow mode does not promote candidates, mutate live policy, or replace the
-incumbent result without an explicit future apply step.
+Use `ee shadow run --policy <policy-id>` to collect comparison evidence; the
+global `--shadow` flag is reserved and no command reads it yet. A shadow run does
+not promote or mutate live policy; `ee shadow promote` is the explicit apply step.
 
 The retrieval-weights domain is the first with a full runnable loop:
 `ee shadow run --policy candidate.retrieval.outcome_tuned_weights --json`

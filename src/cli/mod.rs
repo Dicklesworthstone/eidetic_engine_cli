@@ -510,7 +510,9 @@ pub struct Cli {
     #[arg(long, global = true, action = ArgAction::SetTrue)]
     pub meta: bool,
 
-    /// Shadow mode for decision plane tracking (off/compare/record).
+    /// Reserved shadow mode for decision plane tracking (off/compare/record).
+    /// No command reads it yet; `ee shadow run --policy <id>` is the
+    /// comparison loop that runs.
     #[arg(long, global = true, value_enum, default_value_t = ShadowMode::Off)]
     pub shadow: ShadowMode,
 
