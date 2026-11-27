@@ -10896,10 +10896,11 @@ mod tests {
         });
         let model: crate::core::index::CachedLocalEmbedderAttestation =
             serde_json::from_value(identity.clone()).expect("model identity fixture");
-        let key = |options: &SearchOptions,
-                   model: Option<&crate::core::index::CachedLocalEmbedderAttestation>| {
-            daemon_search_singleflight_key(options, kind.as_deref(), &filters, model)
-        };
+        let key =
+            |options: &SearchOptions,
+             model: Option<&crate::core::index::CachedLocalEmbedderAttestation>| {
+                daemon_search_singleflight_key(options, kind.as_deref(), &filters, model)
+            };
 
         for source_mode in [SearchSourceMode::Hybrid, SearchSourceMode::SemanticOnly] {
             options.source_mode = source_mode;
@@ -10971,13 +10972,8 @@ mod tests {
                     "dimension": 256,
                 }))
                 .expect("model identity fixture");
-            daemon_search_singleflight_key(
-                &options,
-                kind.as_deref(),
-                &filters,
-                Some(&model),
-            )
-            .expect("admitted model key")
+            daemon_search_singleflight_key(&options, kind.as_deref(), &filters, Some(&model))
+                .expect("admitted model key")
         };
         let first_key = key("blake3:first-model");
         let next_key = key("blake3:next-model");
@@ -11003,7 +10999,10 @@ mod tests {
             Ok("next model result")
         });
         release_tx.send(()).expect("release the first computation");
-        let first = first.join().expect("first model thread").expect("first run");
+        let first = first
+            .join()
+            .expect("first model thread")
+            .expect("first run");
         let next = next.expect("next run");
         assert_eq!(first.value, "first model result");
         assert_eq!(next.value, "next model result");
