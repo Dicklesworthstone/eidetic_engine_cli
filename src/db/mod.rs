@@ -28899,13 +28899,33 @@ impl DbConnection {
             .collect()
     }
 
-    /// List all sentinel specs in deterministic order for the explicit
-    /// `ee sentinel check` sweep.
+    /// List all stored sentinel specs across every workspace in deterministic order.
     pub fn list_all_memory_sentinel_specs(&self) -> Result<Vec<StoredMemorySentinelSpec>> {
         let rows = self.query_for(
             DbOperation::Query,
             "SELECT spec_hash, memory_id, sentinel_kind, target, expected_predicate, safety_class, provenance, stale_threshold_seconds, created_at, updated_at, polarity FROM memory_sentinel_specs ORDER BY memory_id ASC, sentinel_kind ASC, target ASC, expected_predicate ASC, spec_hash ASC",
             &[],
+        )?;
+        rows.iter()
+            .map(stored_memory_sentinel_spec_from_row)
+            .collect()
+    }
+
+    /// Load the check targets belonging to a single workspace binding. Including
+    /// its stored path lets a caller detect a relocation before publishing results.
+    pub(crate) fn workspace_sentinel_check_specs(
+        &self,
+        workspace: &StoredWorkspace,
+        memory_id: Option<&str>,
+    ) -> Result<Vec<StoredMemorySentinelSpec>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT s.spec_hash, s.memory_id, s.sentinel_kind, s.target, s.expected_predicate, s.safety_class, s.provenance, s.stale_threshold_seconds, s.created_at, s.updated_at, s.polarity FROM memory_sentinel_specs s JOIN memories m ON m.id = s.memory_id JOIN workspaces w ON w.id = m.workspace_id WHERE w.id = ?1 AND w.path = ?2 AND (?3 IS NULL OR s.memory_id = ?3) ORDER BY s.memory_id, s.sentinel_kind, s.target, s.expected_predicate, s.spec_hash",
+            &[
+                Value::Text(workspace.id.clone()),
+                Value::Text(workspace.path.clone()),
+                optional_text_value(memory_id),
+            ],
         )?;
         rows.iter()
             .map(stored_memory_sentinel_spec_from_row)

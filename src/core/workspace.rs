@@ -2729,7 +2729,7 @@ fn looks_like_path(path: &Path) -> bool {
         || rendered.contains('\\')
 }
 
-fn canonical_or_lexical(path: &Path) -> Result<PathBuf, DomainError> {
+pub(crate) fn canonical_or_lexical(path: &Path) -> Result<PathBuf, DomainError> {
     let boundary = crate::util::fs_boundary().map_err(|error| boundary_path_error(path, error))?;
     if let Some(boundary) = boundary.as_ref() {
         boundary

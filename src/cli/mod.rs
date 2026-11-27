@@ -10541,7 +10541,7 @@ pub enum SentinelCommand {
 /// Arguments for `ee sentinel check`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct SentinelCheckArgs {
-    /// Optional memory ID. Omit to check every stored sentinel spec.
+    /// Optional memory ID. Omit to check all sentinel specs in the addressed workspace.
     #[arg(value_name = "MEMORY_ID")]
     pub memory_id: Option<String>,
 
@@ -60490,19 +60490,33 @@ fn sentinel_check_data(
             ),
             repair: Some("ee doctor --workspace . --json".to_string()),
         })?;
-    let stored_specs = match args.memory_id.as_deref() {
-        Some(memory_id) => connection.list_memory_sentinel_specs(memory_id),
-        None => connection.list_all_memory_sentinel_specs(),
+    let check_root = workspace_core::canonical_or_lexical(&workspace_path)?;
+    let workspace =
+        workspace_core::addressed_workspace_row(&connection, &workspace_path, &database_path)?;
+    if let Some(owner) = &workspace
+        && workspace_core::canonical_or_lexical(Path::new(&owner.path))? != check_root
+    {
+        return Err(DomainError::PolicyDenied {
+            message: "The stored memory workspace is bound to a different directory.".to_owned(),
+            repair: Some("Run ee sentinel check with --workspace set to the owning directory.".to_owned()),
+        });
     }
-    .map_err(|error| DomainError::Storage {
-        message: format!("Failed to load memory sentinel specs: {error}"),
-        repair: Some("ee migrate status --workspace . --json".to_string()),
-    })?;
+    let memory_id = args.memory_id.as_deref();
+    let stored_specs = workspace
+        .as_ref()
+        .map(|workspace| connection.workspace_sentinel_check_specs(workspace, memory_id))
+        .transpose()
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load workspace sentinel specs: {error}"),
+            repair: Some("ee migrate status --workspace . --json".to_owned()),
+        })?
+        .unwrap_or_default();
 
     let checked_at = chrono::Utc::now().to_rfc3339();
-    let ctx = SentinelCheckContext::new(&workspace_path);
+    let ctx = SentinelCheckContext::new(&check_root);
     let mut totals = SentinelCheckCounts::default();
     let mut by_polarity = [SentinelCheckCounts::default(); 2];
+    let mut checked = Vec::with_capacity(stored_specs.len());
     let mut result_rows = Vec::with_capacity(stored_specs.len());
     for stored in &stored_specs {
         let spec = sentinel_spec_from_stored(stored)?;
@@ -60518,12 +60532,6 @@ fn sentinel_check_data(
             stale_threshold_seconds: stored.stale_threshold_seconds,
         })
         .map_err(memory_sentinel_validation_to_domain)?;
-        connection
-            .insert_memory_sentinel_result(&result)
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to persist memory sentinel result: {error}"),
-                repair: Some("ee doctor --workspace . --json".to_string()),
-            })?;
         result_rows.push(serde_json::json!({
             "schema": result.schema,
             "memoryId": stored.memory_id,
@@ -60539,6 +60547,29 @@ fn sentinel_check_data(
             "evidenceSummary": result.evidence_summary,
             "staleThresholdSeconds": result.stale_threshold_seconds,
         }));
+        checked.push(result);
+    }
+
+    // Filesystem and command-help probes run outside the writer. Publish the
+    // sweep together only if its owning memories and predicates still match.
+    if let Some(workspace) = workspace.as_ref().filter(|_| !checked.is_empty()) {
+        connection
+            .with_transaction(|| {
+                if connection.workspace_sentinel_check_specs(workspace, memory_id)? != stored_specs {
+                    return Err(crate::db::DbError::MalformedRow {
+                        operation: crate::db::DbOperation::Execute,
+                        message: "Workspace sentinel specs changed during the check".to_owned(),
+                    });
+                }
+                for result in &checked {
+                    connection.insert_memory_sentinel_result(result)?;
+                }
+                Ok(())
+            })
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to persist workspace sentinel check: {error}"),
+                repair: Some("Rerun ee sentinel check in the owning workspace.".to_owned()),
+            })?;
     }
 
     Ok(serde_json::json!({

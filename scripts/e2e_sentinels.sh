@@ -366,6 +366,27 @@ assert_jq "$why" \
      and any(.data.sentinel.specs[]?; .polarity == "gate" and .latestResult.status == "fail")' \
     "why reports latest failed sentinel status"
 
+step "shared database checks probe only the addressed workspace"
+with_temp_workspace SECOND_WS
+shared_db="$WS/.ee/ee.db"
+printf 'ready\n' >"$SECOND_WS/second-only.marker"
+second_mem="$(ee_json remember "Second workspace release gate" --workspace "$SECOND_WS" \
+    --database "$shared_db" --sentinel path_exists:second-only.marker --json)"
+assert_jq "$second_mem" '.success == true and .data.persisted == true' "second workspace memory persisted"
+second_id="$(printf '%s' "$second_mem" | jq -r '.data.memory_id // empty')"
+
+second_sweep="$(ee_json sentinel check --workspace "$SECOND_WS" --database "$shared_db" --json)"
+SECOND_ID="$second_id" assert_jq "$second_sweep" \
+    '.success == true and .data.resultCount == 1 and .data.results[0].memoryId == env.SECOND_ID
+     and .data.results[0].status == "pass"' "workspace sweep uses its own file and spec"
+foreign_check="$(ee_json sentinel check "$second_id" --workspace "$WS" --database "$shared_db" --json)"
+assert_jq "$foreign_check" '.success == true and .data.resultCount == 0' \
+    "an explicit memory ID cannot check a different workspace"
+first_sweep="$(ee_json sentinel check --workspace "$WS" --database "$shared_db" --json)"
+SECOND_ID="$second_id" assert_jq "$first_sweep" \
+    '.success == true and .data.resultCount > 0 and all(.data.results[]; .memoryId != env.SECOND_ID)' \
+    "first workspace sweep excludes the other workspace"
+
 step "orient revival degradation fixture has a reproducible real filesystem trigger"
 BROKEN_REVIVAL_WS=""
 with_temp_workspace BROKEN_REVIVAL_WS
