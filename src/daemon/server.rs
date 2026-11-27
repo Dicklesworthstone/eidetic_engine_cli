@@ -5116,11 +5116,7 @@ fn daemon_search_singleflight_key(
     field_filters: &[TypedMemoryFieldFilter],
     model: Option<&crate::core::index::CachedLocalEmbedderAttestation>,
 ) -> Option<SingleFlightKey> {
-    let model = if options.execution_source_mode().uses_embeddings() {
-        Some(model?)
-    } else {
-        None
-    };
+    let model = daemon_read_model_witness(options, model)?;
     daemon_read_singleflight_key(
         SingleFlightSurface::Search,
         DAEMON_SEARCH_RESPONSE_SCHEMA_V4,
@@ -5131,20 +5127,37 @@ fn daemon_search_singleflight_key(
 
 /// The single-flight key for one daemon pack retrieval: every
 /// `SearchOptions` field, whether the request requires a cached local model,
-/// and the attestation of the model already loaded for it, if any, since that
-/// decides whether retrieval runs semantically. Its response schema keeps it
-/// apart from a search with the same options.
+/// and the attestation of the model already loaded for it, since that decides
+/// whether retrieval runs semantically. As with search, an unresolved embedding
+/// request runs independently. Its response schema keeps it apart from a search
+/// with the same options.
 fn daemon_pack_search_singleflight_key(
     options: &SearchOptions,
     require_cached_local: bool,
     model: Option<&crate::core::index::CachedLocalEmbedderAttestation>,
 ) -> Option<SingleFlightKey> {
+    let model = daemon_read_model_witness(options, model)?;
     daemon_read_singleflight_key(
         SingleFlightSurface::Context,
         DAEMON_PACK_SEARCH_RESPONSE_SCHEMA_V4,
         options,
         &format!("{options:?} require_cached_local={require_cached_local} model={model:?}"),
     )
+}
+
+/// Model witness shared by ordinary search and pack retrieval. The outer
+/// `None` declines coalescing: no admitted model describes an embedding read
+/// that has not prepared its producer yet. `Some(None)` is a lexical read,
+/// whose result cannot depend on an unused model or its warm-up state.
+fn daemon_read_model_witness<'a>(
+    options: &SearchOptions,
+    model: Option<&'a crate::core::index::CachedLocalEmbedderAttestation>,
+) -> Option<Option<&'a crate::core::index::CachedLocalEmbedderAttestation>> {
+    if options.execution_source_mode().uses_embeddings() {
+        Some(Some(model?))
+    } else {
+        Some(None)
+    }
 }
 
 /// The single-flight key for one daemon read, or `None` when something the
@@ -10878,7 +10891,7 @@ mod tests {
     }
 
     /// Model admission is tested by index_ask. These identity-only fixtures
-    /// exercise the coalescing boundary without loading weights or downloading.
+    /// exercise both coalescing boundaries without loading weights or downloading.
     #[test]
     fn daemon_search_singleflight_requires_exact_loaded_model_for_embeddings() {
         let (_workspace, workspace_path, _connection, _) =
@@ -10887,7 +10900,6 @@ mod tests {
             singleflight_search_parts(&workspace_path, "loaded model identity", 5);
         options.no_global = true;
         options.as_of = Some(chrono::Utc::now() + chrono::Duration::hours(1));
-        options.speed = SpeedMode::Default;
         let identity = serde_json::json!({
             "backend": "neural_local",
             "modelId": "potion-base-8m",
@@ -10896,58 +10908,68 @@ mod tests {
         });
         let model: crate::core::index::CachedLocalEmbedderAttestation =
             serde_json::from_value(identity.clone()).expect("model identity fixture");
-        let key =
-            |options: &SearchOptions,
-             model: Option<&crate::core::index::CachedLocalEmbedderAttestation>| {
-                daemon_search_singleflight_key(options, kind.as_deref(), &filters, model)
+        // None is ordinary search; the other cases are pack retrieval with
+        // and without its stronger cached-local admission requirement.
+        for require_cached_local in [None, Some(false), Some(true)] {
+            let key = |options: &SearchOptions,
+                       model: Option<&crate::core::index::CachedLocalEmbedderAttestation>| {
+                match require_cached_local {
+                    Some(required) => {
+                        daemon_pack_search_singleflight_key(options, required, model)
+                    }
+                    None => {
+                        daemon_search_singleflight_key(options, kind.as_deref(), &filters, model)
+                    }
+                }
             };
-
-        for source_mode in [SearchSourceMode::Hybrid, SearchSourceMode::SemanticOnly] {
-            options.source_mode = source_mode;
-            assert!(
-                key(&options, None).is_none(),
-                "cold model preparation cannot attest the eventual retrieval backend"
-            );
-            let original = key(&options, Some(&model)).expect("loaded model witness");
-            assert_eq!(
-                key(&options, Some(&model)).unwrap().key_hash,
-                original.key_hash,
-                "equal admitted model identities may share work"
-            );
-            for (field, value) in [
-                ("backend", serde_json::json!("hash_fallback")),
-                ("modelId", serde_json::json!("potion-base-32m")),
-                ("modelHash", serde_json::json!("blake3:replacement-model")),
-                ("dimension", serde_json::json!(512)),
-            ] {
-                let mut changed = identity.clone();
-                changed[field] = value;
-                let changed: crate::core::index::CachedLocalEmbedderAttestation =
-                    serde_json::from_value(changed).expect("changed identity fixture");
-                assert_ne!(
-                    key(&options, Some(&changed)).unwrap().key_hash,
+            options.speed = SpeedMode::Default;
+            for source_mode in [SearchSourceMode::Hybrid, SearchSourceMode::SemanticOnly] {
+                options.source_mode = source_mode;
+                assert!(
+                    key(&options, None).is_none(),
+                    "cold model preparation cannot attest the eventual retrieval backend"
+                );
+                let original = key(&options, Some(&model)).expect("loaded model witness");
+                assert_eq!(
+                    key(&options, Some(&model)).unwrap().key_hash,
                     original.key_hash,
-                    "an embedding request must bind model {field}"
+                    "equal admitted model identities may share work"
+                );
+                for (field, value) in [
+                    ("backend", serde_json::json!("hash_fallback")),
+                    ("modelId", serde_json::json!("potion-base-32m")),
+                    ("modelHash", serde_json::json!("blake3:replacement-model")),
+                    ("dimension", serde_json::json!(512)),
+                ] {
+                    let mut changed = identity.clone();
+                    changed[field] = value;
+                    let changed: crate::core::index::CachedLocalEmbedderAttestation =
+                        serde_json::from_value(changed).expect("changed identity fixture");
+                    assert_ne!(
+                        key(&options, Some(&changed)).unwrap().key_hash,
+                        original.key_hash,
+                        "an embedding request must bind model {field}"
+                    );
+                }
+                let encoded = serde_json::to_string(&original).expect("redaction-safe key");
+                assert!(!encoded.contains("private-model-identity-fixture"));
+                assert!(!encoded.contains("potion-base-8m"));
+            }
+
+            for (speed, source_mode) in [
+                (SpeedMode::Default, SearchSourceMode::LexicalOnly),
+                (SpeedMode::Instant, SearchSourceMode::Hybrid),
+                (SpeedMode::Instant, SearchSourceMode::SemanticOnly),
+            ] {
+                options.speed = speed;
+                options.source_mode = source_mode;
+                let lexical = key(&options, None).expect("model-free execution still coalesces");
+                assert_eq!(
+                    key(&options, Some(&model)).unwrap().key_hash,
+                    lexical.key_hash,
+                    "unused model identity must not partition lexical execution"
                 );
             }
-            let encoded = serde_json::to_string(&original).expect("redaction-safe key");
-            assert!(!encoded.contains("private-model-identity-fixture"));
-            assert!(!encoded.contains("potion-base-8m"));
-        }
-
-        for (speed, source_mode) in [
-            (SpeedMode::Default, SearchSourceMode::LexicalOnly),
-            (SpeedMode::Instant, SearchSourceMode::Hybrid),
-            (SpeedMode::Instant, SearchSourceMode::SemanticOnly),
-        ] {
-            options.speed = speed;
-            options.source_mode = source_mode;
-            let lexical = key(&options, None).expect("model-free execution still coalesces");
-            assert_eq!(
-                key(&options, Some(&model)).unwrap().key_hash,
-                lexical.key_hash,
-                "unused model identity must not partition lexical execution"
-            );
         }
     }
 
@@ -10963,55 +10985,66 @@ mod tests {
         options.as_of = Some(chrono::Utc::now() + chrono::Duration::hours(1));
         options.speed = SpeedMode::Default;
         options.source_mode = SearchSourceMode::Hybrid;
-        let key = |model_hash: &str| {
-            let model: crate::core::index::CachedLocalEmbedderAttestation =
-                serde_json::from_value(serde_json::json!({
-                    "backend": "neural_local",
-                    "modelId": "potion-base-8m",
-                    "modelHash": model_hash,
-                    "dimension": 256,
-                }))
-                .expect("model identity fixture");
-            daemon_search_singleflight_key(&options, kind.as_deref(), &filters, Some(&model))
-                .expect("admitted model key")
-        };
-        let first_key = key("blake3:first-model");
-        let next_key = key("blake3:next-model");
-        let group = Arc::new(SingleFlightGroup::<&'static str>::new());
-        let first_group = Arc::clone(&group);
-        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
-        let (release_tx, release_rx) = mpsc::sync_channel(1);
-        let first = thread::spawn(move || {
-            first_group.run(&first_key, Duration::from_secs(5), || {
-                entered_tx.send(()).map_err(|error| error.to_string())?;
-                release_rx
-                    .recv_timeout(Duration::from_secs(5))
-                    .map_err(|error| error.to_string())?;
-                Ok("first model result")
-            })
-        });
-        entered_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the first model's computation is in flight");
-        // Keep the first computation alive throughout the second. If model
-        // identity is omitted, this becomes a follower timeout and retry.
-        let next = group.run(&next_key, Duration::from_millis(25), || {
-            Ok("next model result")
-        });
-        release_tx.send(()).expect("release the first computation");
-        let first = first
-            .join()
-            .expect("first model thread")
-            .expect("first run");
-        let next = next.expect("next run");
-        assert_eq!(first.value, "first model result");
-        assert_eq!(next.value, "next model result");
-        assert_eq!(first.role, SingleFlightRole::Leader);
-        assert_eq!(next.role, SingleFlightRole::Leader);
-        assert!(!first.shared && !next.shared);
-        assert!(first.degraded_codes.is_empty());
-        assert!(next.degraded_codes.is_empty());
-        assert_eq!(group.active_len().unwrap(), 0);
+        for pack_search in [false, true] {
+            let key = |model_hash: &str| {
+                let model: crate::core::index::CachedLocalEmbedderAttestation =
+                    serde_json::from_value(serde_json::json!({
+                        "backend": "neural_local",
+                        "modelId": "potion-base-8m",
+                        "modelHash": model_hash,
+                        "dimension": 256,
+                    }))
+                    .expect("model identity fixture");
+                let selected = if pack_search {
+                    daemon_pack_search_singleflight_key(&options, false, Some(&model))
+                } else {
+                    daemon_search_singleflight_key(
+                        &options,
+                        kind.as_deref(),
+                        &filters,
+                        Some(&model),
+                    )
+                };
+                selected.expect("admitted model key")
+            };
+            let first_key = key("blake3:first-model");
+            let next_key = key("blake3:next-model");
+            let group = Arc::new(SingleFlightGroup::<&'static str>::new());
+            let first_group = Arc::clone(&group);
+            let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+            let (release_tx, release_rx) = mpsc::sync_channel(1);
+            let first = thread::spawn(move || {
+                first_group.run(&first_key, Duration::from_secs(5), || {
+                    entered_tx.send(()).map_err(|error| error.to_string())?;
+                    release_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|error| error.to_string())?;
+                    Ok("first model result")
+                })
+            });
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the first model's computation is in flight");
+            // Keep the first computation alive throughout the second. If model
+            // identity is omitted, this becomes a follower timeout and retry.
+            let next = group.run(&next_key, Duration::from_millis(25), || {
+                Ok("next model result")
+            });
+            release_tx.send(()).expect("release the first computation");
+            let first = first
+                .join()
+                .expect("first model thread")
+                .expect("first run");
+            let next = next.expect("next run");
+            assert_eq!(first.value, "first model result");
+            assert_eq!(next.value, "next model result");
+            assert_eq!(first.role, SingleFlightRole::Leader);
+            assert_eq!(next.role, SingleFlightRole::Leader);
+            assert!(!first.shared && !next.shared);
+            assert!(first.degraded_codes.is_empty());
+            assert!(next.degraded_codes.is_empty());
+            assert_eq!(group.active_len().unwrap(), 0);
+        }
     }
 
     #[test]

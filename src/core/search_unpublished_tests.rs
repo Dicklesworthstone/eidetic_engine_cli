@@ -1797,6 +1797,11 @@ fn strict_semantic_search_publishes_a_small_delta_without_reembedding_a_larger_c
             .get_workspace_generation(&fixture.workspace)
             .unwrap()
             .expect("initial source generation");
+        assert_eq!(
+            crate::core::index::published_index_generation(&index_dir),
+            Some(initial_generation),
+            "daemon keys and prefetch retain a foreign-default workspace's watermark"
+        );
 
         let remembered = fixture.remember_deferred(BODY);
         let jobs_before = fixture
@@ -1870,12 +1875,19 @@ fn strict_semantic_search_publishes_a_small_delta_without_reembedding_a_larger_c
         let status = crate::core::index::get_index_status(&IndexStatusOptions {
             workspace_path: fixture.root.clone(),
             database_path: Some(fixture.root.join(".ee/ee.db")),
-            index_dir: Some(index_dir),
+            index_dir: Some(index_dir.clone()),
         })
         .unwrap();
         assert_eq!(status.health, IndexHealth::Ready);
         assert_eq!(status.index_generation, status.db_generation);
         assert_eq!(status.index_document_count, Some(129));
+        let published = crate::core::index::published_index_generation(&index_dir);
+        assert_eq!(published, status.index_generation);
+        assert_ne!(
+            published,
+            Some(initial_generation),
+            "foreign-default workspaces must not collapse distinct publications to None"
+        );
 
         options.query = RETAINED_BODY.to_owned();
         let retained = run_search_with_performance(&options).unwrap();
@@ -1886,6 +1898,33 @@ fn strict_semantic_search_publishes_a_small_delta_without_reembedding_a_larger_c
         );
         assert!(!retained.report.source_mode_fallback);
         assert!(retained.report.index_freshness.is_none());
+
+        // Removing process-model authority must not relax structural,
+        // security or source-watermark admission for any hint consumer.
+        let metadata_path = index_dir.join("meta.json");
+        let original_bytes = std::fs::read(&metadata_path).unwrap();
+        let original: serde_json::Value = serde_json::from_slice(&original_bytes).unwrap();
+        for (field, value) in [
+            ("schema", serde_json::json!("unsupported-index-schema")),
+            ("corpusRevision", serde_json::json!("foreign-corpus")),
+            ("evidenceSecurityPolicyEpoch", serde_json::json!(u64::MAX)),
+            ("sourceGeneration", serde_json::json!(u64::MAX)),
+            ("documentCount", serde_json::json!(0)),
+        ] {
+            let mut invalid = original.clone();
+            invalid[field] = value;
+            std::fs::write(&metadata_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert_eq!(
+                crate::core::index::published_index_generation(&index_dir),
+                None,
+                "published watermark must reject invalid {field}"
+            );
+        }
+        std::fs::write(&metadata_path, original_bytes).unwrap();
+        assert_eq!(
+            crate::core::index::published_index_generation(&index_dir),
+            published
+        );
     });
     println!("{SENTINEL}");
 }
