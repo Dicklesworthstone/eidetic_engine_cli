@@ -5005,7 +5005,12 @@ fn run_daemon_search(
     coalesce: bool,
 ) -> Result<(SearchPerformanceRun, Vec<&'static str>), String> {
     let key = if coalesce {
-        daemon_search_singleflight_key(options, kind, field_filters)
+        daemon_search_singleflight_key(
+            options,
+            kind,
+            field_filters,
+            loaded.as_ref().map(|loaded| &loaded.attestation),
+        )
     } else {
         None
     };
@@ -5100,18 +5105,27 @@ fn daemon_singleflight_error_message(
 const DAEMON_SEARCH_KEY_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// The single-flight key for one daemon search: every `SearchOptions` field,
-/// the kind and the typed field filters, through their derived `Debug`. See
-/// [`daemon_read_singleflight_key`] for the rest.
+/// the kind, typed field filters, and the exact already-loaded model identity.
+/// Cold embedding requests prepare their model during execution, so they have
+/// no model witness yet and must run independently. Lexical execution does not
+/// read the model and remains coalescible during warm-up. See
+/// [`daemon_read_singleflight_key`] for the remaining source witnesses.
 fn daemon_search_singleflight_key(
     options: &SearchOptions,
     kind: Option<&str>,
     field_filters: &[TypedMemoryFieldFilter],
+    model: Option<&crate::core::index::CachedLocalEmbedderAttestation>,
 ) -> Option<SingleFlightKey> {
+    let model = if options.execution_source_mode().uses_embeddings() {
+        Some(model?)
+    } else {
+        None
+    };
     daemon_read_singleflight_key(
         SingleFlightSurface::Search,
         DAEMON_SEARCH_RESPONSE_SCHEMA_V4,
         options,
-        &format!("{options:?} kind={kind:?} filters={field_filters:?}"),
+        &format!("{options:?} kind={kind:?} filters={field_filters:?} model={model:?}"),
     )
 }
 
@@ -10430,7 +10444,7 @@ mod tests {
                 ))
                 .expect("same-count feedback update");
             let keys = (
-                daemon_search_singleflight_key(&key_options, None, &[])
+                daemon_search_singleflight_key(&key_options, None, &[], None)
                     .expect("bound workspace search witness")
                     .key_hash,
                 daemon_pack_search_singleflight_key(&key_options, false, None)
@@ -10838,7 +10852,7 @@ mod tests {
             singleflight_search_fixture("Singleflight key fixture memory");
         let key = |query: &str, limit: u32| {
             let (options, kind, filters) = singleflight_search_parts(&workspace_path, query, limit);
-            daemon_search_singleflight_key(&options, kind.as_deref(), &filters)
+            daemon_search_singleflight_key(&options, kind.as_deref(), &filters, None)
                 .expect("an initialized store yields a key")
                 .key_hash
         };
@@ -10858,9 +10872,147 @@ mod tests {
         let bare_path = fs::canonicalize(bare.path()).expect("canonical bare workspace");
         let (options, kind, filters) = singleflight_search_parts(&bare_path, "Singleflight key", 5);
         assert!(
-            daemon_search_singleflight_key(&options, kind.as_deref(), &filters).is_none(),
+            daemon_search_singleflight_key(&options, kind.as_deref(), &filters, None).is_none(),
             "no store, no key"
         );
+    }
+
+    /// Model admission is tested by index_ask. These identity-only fixtures
+    /// exercise the coalescing boundary without loading weights or downloading.
+    #[test]
+    fn daemon_search_singleflight_requires_exact_loaded_model_for_embeddings() {
+        let (_workspace, workspace_path, _connection, _) =
+            singleflight_search_fixture("Loaded model identity belongs to each search.");
+        let (mut options, kind, filters) =
+            singleflight_search_parts(&workspace_path, "loaded model identity", 5);
+        options.no_global = true;
+        options.as_of = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+        options.speed = SpeedMode::Default;
+        let identity = serde_json::json!({
+            "backend": "neural_local",
+            "modelId": "potion-base-8m",
+            "modelHash": "blake3:private-model-identity-fixture",
+            "dimension": 256,
+        });
+        let model: crate::core::index::CachedLocalEmbedderAttestation =
+            serde_json::from_value(identity.clone()).expect("model identity fixture");
+        let key = |options: &SearchOptions,
+                   model: Option<&crate::core::index::CachedLocalEmbedderAttestation>| {
+            daemon_search_singleflight_key(options, kind.as_deref(), &filters, model)
+        };
+
+        for source_mode in [SearchSourceMode::Hybrid, SearchSourceMode::SemanticOnly] {
+            options.source_mode = source_mode;
+            assert!(
+                key(&options, None).is_none(),
+                "cold model preparation cannot attest the eventual retrieval backend"
+            );
+            let original = key(&options, Some(&model)).expect("loaded model witness");
+            assert_eq!(
+                key(&options, Some(&model)).unwrap().key_hash,
+                original.key_hash,
+                "equal admitted model identities may share work"
+            );
+            for (field, value) in [
+                ("backend", serde_json::json!("hash_fallback")),
+                ("modelId", serde_json::json!("potion-base-32m")),
+                ("modelHash", serde_json::json!("blake3:replacement-model")),
+                ("dimension", serde_json::json!(512)),
+            ] {
+                let mut changed = identity.clone();
+                changed[field] = value;
+                let changed: crate::core::index::CachedLocalEmbedderAttestation =
+                    serde_json::from_value(changed).expect("changed identity fixture");
+                assert_ne!(
+                    key(&options, Some(&changed)).unwrap().key_hash,
+                    original.key_hash,
+                    "an embedding request must bind model {field}"
+                );
+            }
+            let encoded = serde_json::to_string(&original).expect("redaction-safe key");
+            assert!(!encoded.contains("private-model-identity-fixture"));
+            assert!(!encoded.contains("potion-base-8m"));
+        }
+
+        for (speed, source_mode) in [
+            (SpeedMode::Default, SearchSourceMode::LexicalOnly),
+            (SpeedMode::Instant, SearchSourceMode::Hybrid),
+            (SpeedMode::Instant, SearchSourceMode::SemanticOnly),
+        ] {
+            options.speed = speed;
+            options.source_mode = source_mode;
+            let lexical = key(&options, None).expect("model-free execution still coalesces");
+            assert_eq!(
+                key(&options, Some(&model)).unwrap().key_hash,
+                lexical.key_hash,
+                "unused model identity must not partition lexical execution"
+            );
+        }
+    }
+
+    #[test]
+    fn overlapping_daemon_searches_with_different_models_do_not_share_results() {
+        use crate::core::singleflight::{SingleFlightGroup, SingleFlightRole};
+
+        let (_workspace, workspace_path, _connection, _) =
+            singleflight_search_fixture("Independent model executions must remain independent.");
+        let (mut options, kind, filters) =
+            singleflight_search_parts(&workspace_path, "independent models", 5);
+        options.no_global = true;
+        options.as_of = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+        options.speed = SpeedMode::Default;
+        options.source_mode = SearchSourceMode::Hybrid;
+        let key = |model_hash: &str| {
+            let model: crate::core::index::CachedLocalEmbedderAttestation =
+                serde_json::from_value(serde_json::json!({
+                    "backend": "neural_local",
+                    "modelId": "potion-base-8m",
+                    "modelHash": model_hash,
+                    "dimension": 256,
+                }))
+                .expect("model identity fixture");
+            daemon_search_singleflight_key(
+                &options,
+                kind.as_deref(),
+                &filters,
+                Some(&model),
+            )
+            .expect("admitted model key")
+        };
+        let first_key = key("blake3:first-model");
+        let next_key = key("blake3:next-model");
+        let group = Arc::new(SingleFlightGroup::<&'static str>::new());
+        let first_group = Arc::clone(&group);
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let first = thread::spawn(move || {
+            first_group.run(&first_key, Duration::from_secs(5), || {
+                entered_tx.send(()).map_err(|error| error.to_string())?;
+                release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|error| error.to_string())?;
+                Ok("first model result")
+            })
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the first model's computation is in flight");
+        // Keep the first computation alive throughout the second. If model
+        // identity is omitted, this becomes a follower timeout and retry.
+        let next = group.run(&next_key, Duration::from_millis(25), || {
+            Ok("next model result")
+        });
+        release_tx.send(()).expect("release the first computation");
+        let first = first.join().expect("first model thread").expect("first run");
+        let next = next.expect("next run");
+        assert_eq!(first.value, "first model result");
+        assert_eq!(next.value, "next model result");
+        assert_eq!(first.role, SingleFlightRole::Leader);
+        assert_eq!(next.role, SingleFlightRole::Leader);
+        assert!(!first.shared && !next.shared);
+        assert!(first.degraded_codes.is_empty());
+        assert!(next.degraded_codes.is_empty());
+        assert_eq!(group.active_len().unwrap(), 0);
     }
 
     #[test]
@@ -10873,7 +11025,7 @@ mod tests {
         options.as_of = Some(chrono::Utc::now() + chrono::Duration::hours(1));
         let keys = || {
             (
-                daemon_search_singleflight_key(&options, kind.as_deref(), &filters)
+                daemon_search_singleflight_key(&options, kind.as_deref(), &filters, None)
                     .expect("search witness")
                     .key_hash,
                 daemon_pack_search_singleflight_key(&options, false, None)
@@ -10970,7 +11122,8 @@ mod tests {
             generation,
             "none of these edits advances the old generation-only key"
         );
-        let key = daemon_search_singleflight_key(&options, kind.as_deref(), &filters).unwrap();
+        let key =
+            daemon_search_singleflight_key(&options, kind.as_deref(), &filters, None).unwrap();
         let encoded = serde_json::to_string(&key).unwrap();
         assert!(!encoded.contains("PRIVATE-FEEDBACK-REASON"));
         assert!(!encoded.contains("fb_01J00000000000000000000091"));
@@ -10984,12 +11137,16 @@ mod tests {
             singleflight_search_parts(&workspace_path, "release checksums", 5);
         options.no_global = true;
         start_clear_of_a_minute_boundary();
-        assert!(daemon_search_singleflight_key(&options, kind.as_deref(), &filters).is_some());
+        assert!(
+            daemon_search_singleflight_key(&options, kind.as_deref(), &filters, None).is_some()
+        );
         // A directory is consistently unreadable as a JSONL file even when
         // tests run as root. The canonical search reports its normal gap.
         fs::create_dir_all(workspace_path.join(".ee/search/calibration.jsonl"))
             .expect("unreadable calibration fixture");
-        assert!(daemon_search_singleflight_key(&options, kind.as_deref(), &filters).is_none());
+        assert!(
+            daemon_search_singleflight_key(&options, kind.as_deref(), &filters, None).is_none()
+        );
         assert!(daemon_pack_search_singleflight_key(&options, false, None).is_none());
         let (baseline, _) =
             run_daemon_search(&options, kind.as_deref(), &filters, None, None, false)
@@ -11015,7 +11172,7 @@ mod tests {
             .execute_raw("ALTER TABLE feedback_events RENAME TO withheld_feedback_events")
             .expect("withhold ledger without deleting it");
         assert!(other_db.total_workspace_generation().is_ok());
-        assert!(daemon_search_singleflight_key(&other_options, None, &[]).is_none());
+        assert!(daemon_search_singleflight_key(&other_options, None, &[], None).is_none());
         assert!(daemon_pack_search_singleflight_key(&other_options, false, None).is_none());
         assert!(connection.total_workspace_generation().is_ok());
     }
@@ -11051,7 +11208,7 @@ mod tests {
         options.as_of = Some(chrono::Utc::now() + chrono::Duration::hours(1));
         let keys = |options: &SearchOptions| {
             (
-                daemon_search_singleflight_key(options, None, &[])
+                daemon_search_singleflight_key(options, None, &[], None)
                     .expect("search witness")
                     .key_hash,
                 daemon_pack_search_singleflight_key(options, false, None)
@@ -11114,7 +11271,7 @@ mod tests {
         global
             .execute_raw("ALTER TABLE feedback_events RENAME TO withheld_feedback_events")
             .expect("withhold global ledger");
-        assert!(daemon_search_singleflight_key(&options, None, &[]).is_none());
+        assert!(daemon_search_singleflight_key(&options, None, &[], None).is_none());
         assert!(daemon_pack_search_singleflight_key(&options, false, None).is_none());
         assert_eq!(keys(&excluded), excluded_keys);
     }
@@ -11226,7 +11383,7 @@ mod tests {
         };
         let keys = || {
             (
-                daemon_search_singleflight_key(&options, kind.as_deref(), &filters)
+                daemon_search_singleflight_key(&options, kind.as_deref(), &filters, None)
                     .expect("search witness")
                     .key_hash,
                 daemon_pack_search_singleflight_key(&options, false, None)
@@ -11438,7 +11595,7 @@ mod tests {
                 .expect("an initialized store yields a key")
                 .key_hash
         };
-        let search_key = daemon_search_singleflight_key(&options, None, &[])
+        let search_key = daemon_search_singleflight_key(&options, None, &[], None)
             .expect("an initialized store yields a key")
             .key_hash;
         assert_eq!(pack_key(false), pack_key(false), "identical requests share");
@@ -11564,7 +11721,7 @@ mod tests {
         options.no_global = true;
         let keys = || {
             (
-                daemon_search_singleflight_key(&options, None, &[])
+                daemon_search_singleflight_key(&options, None, &[], None)
                     .expect("search authority")
                     .key_hash,
                 daemon_pack_search_singleflight_key(&options, false, None)
@@ -11681,12 +11838,12 @@ mod tests {
             singleflight_search_fixture("Separate review authority fixture");
         let (mut other_options, _, _) = singleflight_search_parts(&other_path, "review", 5);
         other_options.no_global = true;
-        assert!(daemon_search_singleflight_key(&other_options, None, &[]).is_some());
+        assert!(daemon_search_singleflight_key(&other_options, None, &[], None).is_some());
         assert!(daemon_pack_search_singleflight_key(&other_options, false, None).is_some());
         other_db
             .execute_raw("ALTER TABLE feedback_quarantine RENAME TO withheld_review_holds")
             .unwrap();
-        assert!(daemon_search_singleflight_key(&other_options, None, &[]).is_none());
+        assert!(daemon_search_singleflight_key(&other_options, None, &[], None).is_none());
         assert!(daemon_pack_search_singleflight_key(&other_options, false, None).is_none());
     }
 
