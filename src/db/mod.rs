@@ -34038,7 +34038,11 @@ impl DbConnection {
     /// AND length(id) = 31`, which `sidx_` plus the 26-character Crockford
     /// payload of a fresh id satisfies exactly (`src/models/id.rs`:
     /// `ENCODED_LEN = 26`).
-    fn enqueue_memory_reindex_job(&self, workspace_id: &str, memory_id: &str) -> Result<()> {
+    pub(crate) fn enqueue_memory_reindex_job(
+        &self,
+        workspace_id: &str,
+        memory_id: &str,
+    ) -> Result<()> {
         let index_job_id = format!(
             "sidx_{}",
             crate::models::MemoryId::now()

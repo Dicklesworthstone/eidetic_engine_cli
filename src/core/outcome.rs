@@ -2800,6 +2800,14 @@ pub fn review_feedback_quarantine(
             },
         ));
     }
+    if is_write_immune_quarantine(&row) {
+        let summary = review_write_immune_quarantine(&connection, &row, options)?;
+        return Ok(outcome_quarantine_review_report(
+            &prepared,
+            &quarantine_id,
+            summary,
+        ));
+    }
     if options.dry_run {
         if !options.reject {
             let (event_id, feedback_input) = quarantined_feedback_event(&row)?;
@@ -2841,6 +2849,250 @@ pub fn review_feedback_quarantine(
         &quarantine_id,
         summary,
     ))
+}
+
+const WRITE_IMMUNE_QUARANTINE_HASH_PREFIX: &str = "blake3:write-immune-v1:";
+
+/// Bind a memory hold to its complete immutable payload. The tagged hash keeps
+/// a damaged hold from being mistaken for an observed harmful feedback event.
+pub(crate) fn write_immune_quarantine_hash(input: &CreateFeedbackQuarantineInput) -> String {
+    let payload = serde_json::json!({
+        "schema": "ee.write_immune.quarantine_payload.v1",
+        "workspaceId": input.workspace_id,
+        "sourceId": input.source_id,
+        "targetType": input.target_type,
+        "targetId": input.target_id,
+        "signal": input.signal,
+        "weight": score_json_value(input.weight),
+        "sourceType": input.source_type,
+        "proposedEventId": input.proposed_event_id,
+        "recordedAt": input.recorded_at,
+        "reason": input.reason,
+        "eventReason": input.event_reason,
+        "evidenceJson": input.evidence_json,
+        "sessionId": input.session_id,
+    });
+    format!(
+        "{WRITE_IMMUNE_QUARANTINE_HASH_PREFIX}{}",
+        blake3::hash(payload.to_string().as_bytes()).to_hex()
+    )
+}
+
+fn is_write_immune_quarantine(row: &StoredFeedbackQuarantine) -> bool {
+    row.raw_event_hash
+        .starts_with(WRITE_IMMUNE_QUARANTINE_HASH_PREFIX)
+        || row.reason.starts_with("write-immune advisory quarantine:")
+        || (row.proposed_event_id.is_none()
+            && row.source_type == super::write_owner::WRITE_IMMUNE_QUARANTINE_SOURCE_TYPE
+            && row.evidence_json.as_deref().is_some_and(|raw| {
+                serde_json::from_str::<serde_json::Value>(raw).is_ok_and(|evidence| {
+                    evidence.get("schema").and_then(serde_json::Value::as_str)
+                        == Some(super::write_owner::WRITE_IMMUNE_QUARANTINE_DECISION_SCHEMA_V1)
+                })
+            }))
+}
+
+fn validate_write_immune_quarantine(row: &StoredFeedbackQuarantine) -> Result<(), DomainError> {
+    let invalid = || DomainError::PolicyDenied {
+        message: format!(
+            "Write-immune quarantine payload is invalid or changed for {}.",
+            row.id
+        ),
+        repair: Some(
+            "Inspect the quarantine evidence and restore its original payload before review."
+                .to_owned(),
+        ),
+    };
+    let evidence = row
+        .evidence_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .ok_or_else(invalid)?;
+    if row.target_type != super::write_owner::WRITE_IMMUNE_QUARANTINE_TARGET_TYPE
+        || row.signal != super::write_owner::WRITE_IMMUNE_QUARANTINE_SIGNAL
+        || row.source_type != super::write_owner::WRITE_IMMUNE_QUARANTINE_SOURCE_TYPE
+        || row.weight != super::write_owner::WRITE_IMMUNE_QUARANTINE_WEIGHT
+        || row.proposed_event_id.is_some()
+        || row.event_reason.is_some()
+        || row.released_feedback_event_id.is_some()
+        || !row.reason.starts_with("write-immune advisory quarantine:")
+        || evidence.get("schema").and_then(serde_json::Value::as_str)
+            != Some(super::write_owner::WRITE_IMMUNE_QUARANTINE_DECISION_SCHEMA_V1)
+        || evidence.get("action").and_then(serde_json::Value::as_str) != Some("quarantine")
+        || evidence.get("sourceId").and_then(serde_json::Value::as_str)
+            != Some(row.source_id.as_str())
+        || evidence
+            .get("whitelisted")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+        || !evidence
+            .get("reasons")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|reasons| !reasons.is_empty())
+    {
+        return Err(invalid());
+    }
+    let input = CreateFeedbackQuarantineInput {
+        workspace_id: row.workspace_id.clone(),
+        source_id: row.source_id.clone(),
+        target_type: row.target_type.clone(),
+        target_id: row.target_id.clone(),
+        signal: row.signal.clone(),
+        weight: row.weight,
+        source_type: row.source_type.clone(),
+        proposed_event_id: row.proposed_event_id.clone(),
+        recorded_at: row.recorded_at.clone(),
+        reason: row.reason.clone(),
+        event_reason: row.event_reason.clone(),
+        evidence_json: row.evidence_json.clone(),
+        session_id: row.session_id.clone(),
+        raw_event_hash: String::new(),
+    };
+    if row.raw_event_hash != write_immune_quarantine_hash(&input) {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn validate_write_immune_quarantine_target(
+    connection: &DbConnection,
+    row: &StoredFeedbackQuarantine,
+) -> crate::db::Result<()> {
+    let memory = connection.get_memory(&row.target_id)?;
+    if !memory.is_some_and(|memory| memory.workspace_id == row.workspace_id) {
+        return Err(crate::db::DbError::MalformedRow {
+            operation: crate::db::DbOperation::Query,
+            message: "Write-immune quarantine memory is no longer owned by its original workspace."
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn review_write_immune_quarantine(
+    connection: &DbConnection,
+    row: &StoredFeedbackQuarantine,
+    options: &OutcomeQuarantineReviewOptions<'_>,
+) -> Result<QuarantineReviewSummary<'static>, DomainError> {
+    validate_write_immune_quarantine(row)?;
+    let storage_error = |error| DomainError::Storage {
+        message: format!("Failed to review write-immune quarantine: {error}"),
+        repair: Some("ee doctor".to_owned()),
+    };
+    let action = if options.reject { "reject" } else { "release" };
+    if options.dry_run {
+        validate_write_immune_quarantine_target(connection, row).map_err(storage_error)?;
+        return Ok(QuarantineReviewSummary {
+            action,
+            status: "dry_run",
+            changed: true,
+            dry_run: true,
+            feedback_event_id: None,
+            audit_id: None,
+        });
+    }
+    let status = if options.reject {
+        "rejected"
+    } else {
+        "released"
+    };
+    let audit_id = generate_audit_id();
+    connection
+        .with_transaction(|| {
+            if !connection.update_feedback_quarantine_status(
+                &row.id,
+                status,
+                options.actor,
+                None,
+            )? {
+                return already_reviewed_feedback_quarantine_summary(connection, row, action);
+            }
+            // The review claim may run triggers and follows an earlier read.
+            // Recheck both the held bytes and current ownership under the writer
+            // transaction before granting admission or changing the memory.
+            let current = connection
+                .get_feedback_quarantine(&row.id)?
+                .ok_or_else(|| crate::db::DbError::MalformedRow {
+                    operation: crate::db::DbOperation::Query,
+                    message: "Write-immune quarantine disappeared during review.".to_owned(),
+                })?;
+            validate_write_immune_quarantine(&current).map_err(|error| {
+                crate::db::DbError::MalformedRow {
+                    operation: crate::db::DbOperation::Query,
+                    message: error.message(),
+                }
+            })?;
+            if current.raw_event_hash != row.raw_event_hash || current.status != status {
+                return Err(crate::db::DbError::MalformedRow {
+                    operation: crate::db::DbOperation::Query,
+                    message: "Write-immune quarantine changed before review could commit."
+                        .to_owned(),
+                });
+            }
+            validate_write_immune_quarantine_target(connection, &current)?;
+            // A hold is not an outcome observation. Approval only releases it;
+            // rejection uses the reversible memory lifecycle so clearing the
+            // pending hold cannot silently return rejected content to packs.
+            let tombstone_audit_id = if options.reject {
+                let tombstone_audit_id = connection
+                    .tombstone_memory_audited_in_current_transaction(
+                        &current.target_id,
+                        &current.workspace_id,
+                        options.actor,
+                        Some(&format!("Rejected write-immune quarantine {}", current.id)),
+                    )?;
+                if tombstone_audit_id.is_some() {
+                    connection
+                        .enqueue_memory_reindex_job(&current.workspace_id, &current.target_id)?;
+                }
+                tombstone_audit_id
+            } else {
+                // An index built while the hold was pending may have omitted
+                // this memory. Approval owns the durable freshness repair too.
+                connection.enqueue_memory_reindex_job(&current.workspace_id, &current.target_id)?;
+                None
+            };
+            let details = serde_json::json!({
+                "feedbackQuarantineId": current.id,
+                "quarantineKind": "write_immune_memory_hold",
+                "status": status,
+                "targetType": current.target_type,
+                "targetId": current.target_id,
+                "sourceId": redact_outcome_public_source_ref(&current.source_id),
+                "rawEventHash": current.raw_event_hash,
+                "releasedFeedbackEventId": serde_json::Value::Null,
+                "tombstoneAuditId": tombstone_audit_id,
+            })
+            .to_string();
+            connection.insert_audit(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(row.workspace_id.clone()),
+                    actor: options
+                        .actor
+                        .map(str::to_owned)
+                        .or_else(|| Some("ee outcome quarantine".to_owned())),
+                    action: if options.reject {
+                        audit_actions::FEEDBACK_QUARANTINE_REJECT
+                    } else {
+                        audit_actions::FEEDBACK_QUARANTINE_RELEASE
+                    }
+                    .to_owned(),
+                    target_type: Some("feedback_quarantine".to_owned()),
+                    target_id: Some(row.id.clone()),
+                    details: Some(details),
+                },
+            )?;
+            Ok(QuarantineReviewSummary {
+                action,
+                status,
+                changed: true,
+                dry_run: false,
+                feedback_event_id: None,
+                audit_id: Some(audit_id.clone()),
+            })
+        })
+        .map_err(storage_error)
 }
 
 /// Receipt lookup verifies the target's durable identity and current owner.
@@ -4086,7 +4338,7 @@ fn insert_feedback_event_audited_with_id_in_txn(
     Ok(audit_id)
 }
 
-fn insert_feedback_quarantine_audited_with_id_in_txn(
+pub(crate) fn insert_feedback_quarantine_audited_with_id_in_txn(
     connection: &DbConnection,
     quarantine_id: &str,
     input: &CreateFeedbackQuarantineInput,
@@ -10606,6 +10858,314 @@ mod tests {
         assert_eq!(repeated.status, "already_reviewed");
         assert!(!repeated.changed);
         assert_eq!(native_rule_feedback_state(&database)?, after);
+        Ok(())
+    }
+
+    fn queue_write_immune_memory_hold(database: &Path) -> Result<StoredFeedbackQuarantine, String> {
+        use crate::core::write_owner::{
+            WRITE_IMMUNE_QUARANTINE_DECISION_SCHEMA_V1, WriteImmuneQuarantineDecision,
+            WriteImmuneQuarantineReason, build_write_immune_quarantine_input,
+        };
+
+        let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
+        let memory = connection
+            .get_memory(OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or("write-immune fixture memory")?;
+        let decision = WriteImmuneQuarantineDecision {
+            schema: WRITE_IMMUNE_QUARANTINE_DECISION_SCHEMA_V1,
+            source_id: "looping-agent".to_owned(),
+            action: "quarantine",
+            whitelisted: false,
+            reasons: vec![WriteImmuneQuarantineReason {
+                code: "writes_per_window_exceeded",
+                observed: 121.0,
+                limit: 120.0,
+            }],
+            write_count: 121,
+            near_duplicate_ratio: 0.0,
+            missing_evidence_ratio: 0.0,
+            high_trust_missing_evidence_ratio: 0.0,
+        };
+        let mut input = build_write_immune_quarantine_input(
+            &decision,
+            &memory.workspace_id,
+            &memory.id,
+            "2026-11-27T01:00:00Z",
+            "blake3:pending",
+            Some(OUTCOME_TEST_SESSION_ID),
+        )
+        .ok_or("write-immune fixture decision")?;
+        input.raw_event_hash = super::write_immune_quarantine_hash(&input);
+        let id = "fq_00000000000000000000000800";
+        connection
+            .insert_feedback_quarantine(id, &input)
+            .map_err(|error| error.to_string())?;
+        connection
+            .get_feedback_quarantine(id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "write-immune fixture hold".to_owned())
+    }
+
+    #[test]
+    fn write_immune_quarantine_release_approves_memory_without_harmful_feedback() -> TestResult {
+        let (dir, database) = seed_outcome_database("ee-write-immune-release")?;
+        let held = queue_write_immune_memory_hold(&database)?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let memory = connection
+            .get_memory(OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?;
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        let mut review = OutcomeQuarantineReviewOptions {
+            workspace_path: dir.path(),
+            database_path: Some(&database),
+            quarantine_id: &held.id,
+            reject: false,
+            actor: Some("hold-reviewer"),
+            dry_run: true,
+        };
+        let preview = review_feedback_quarantine(&review).map_err(|error| error.message())?;
+        assert_eq!(preview.status, "dry_run");
+        assert!(preview.feedback_event_id.is_none());
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            before
+        );
+        review.dry_run = false;
+        let released = review_feedback_quarantine(&review).map_err(|error| error.message())?;
+        assert_eq!(released.status, "released");
+        assert!(released.changed);
+        assert!(released.feedback_event_id.is_none());
+        assert!(released.audit_id.is_some());
+        assert_eq!(
+            connection
+                .get_memory(OUTCOME_TEST_MEMORY_ID)
+                .map_err(|error| error.to_string())?,
+            memory,
+            "approval must not reduce confidence or alter memory content/trust"
+        );
+        assert!(
+            connection
+                .list_feedback_events_for_target("memory", OUTCOME_TEST_MEMORY_ID)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        assert!(
+            connection
+                .pending_feedback_quarantine_fingerprint(Some(OUTCOME_TEST_WORKSPACE_ID))
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            "approval clears the admission hold and changes its cache witness"
+        );
+        let stored = connection
+            .get_feedback_quarantine(&held.id)
+            .map_err(|error| error.to_string())?
+            .ok_or("released memory hold")?;
+        assert_eq!(stored.status, "released");
+        assert_eq!(stored.evidence_json, held.evidence_json);
+        assert!(stored.released_feedback_event_id.is_none());
+        let jobs = connection
+            .list_search_index_jobs(OUTCOME_TEST_WORKSPACE_ID, None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].document_source.as_deref(), Some("memory"));
+        assert_eq!(jobs[0].document_id.as_deref(), Some(OUTCOME_TEST_MEMORY_ID));
+        let after = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        let replay = review_feedback_quarantine(&review).map_err(|error| error.message())?;
+        assert_eq!(replay.status, "already_reviewed");
+        assert!(!replay.changed);
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            after,
+            "review replay cannot add a second audit or feedback event"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn write_immune_quarantine_rejection_tombstones_memory_and_queues_publication() -> TestResult {
+        let (dir, database) = seed_outcome_database("ee-write-immune-reject")?;
+        let held = queue_write_immune_memory_hold(&database)?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let memory = connection
+            .get_memory(OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or("memory before rejection")?;
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        let mut review = OutcomeQuarantineReviewOptions {
+            workspace_path: dir.path(),
+            database_path: Some(&database),
+            quarantine_id: &held.id,
+            reject: true,
+            actor: Some("hold-reviewer"),
+            dry_run: true,
+        };
+        assert_eq!(
+            review_feedback_quarantine(&review)
+                .map_err(|error| error.message())?
+                .status,
+            "dry_run"
+        );
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            before
+        );
+        review.dry_run = false;
+        let rejected = review_feedback_quarantine(&review).map_err(|error| error.message())?;
+        assert_eq!(rejected.status, "rejected");
+        assert!(rejected.feedback_event_id.is_none());
+        let withdrawn = connection
+            .get_memory(OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or("rejection must retain the memory")?;
+        assert!(withdrawn.tombstoned_at.is_some());
+        assert_eq!(withdrawn.content, memory.content);
+        assert_eq!(withdrawn.confidence, memory.confidence);
+        assert_eq!(withdrawn.trust_class, memory.trust_class);
+        assert!(
+            connection
+                .list_feedback_events_for_target("memory", OUTCOME_TEST_MEMORY_ID)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        let jobs = connection
+            .list_search_index_jobs(OUTCOME_TEST_WORKSPACE_ID, None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].document_source.as_deref(), Some("memory"));
+        assert_eq!(jobs[0].document_id.as_deref(), Some(OUTCOME_TEST_MEMORY_ID));
+        assert!(
+            connection
+                .list_audit_by_target("memory", OUTCOME_TEST_MEMORY_ID, None)
+                .map_err(|error| error.to_string())?
+                .iter()
+                .any(|audit| audit.action == crate::db::audit_actions::MEMORY_TOMBSTONE)
+        );
+        let stored = connection
+            .get_feedback_quarantine(&held.id)
+            .map_err(|error| error.to_string())?
+            .ok_or("rejected memory hold")?;
+        assert_eq!(stored.status, "rejected");
+        assert_eq!(stored.evidence_json, held.evidence_json);
+        let after = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            review_feedback_quarantine(&review)
+                .map_err(|error| error.message())?
+                .status,
+            "already_reviewed"
+        );
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            after
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn write_immune_quarantine_review_rolls_back_claim_audit_and_tombstone_on_failure() -> TestResult
+    {
+        for (reject, trigger) in [
+            (
+                false,
+                "CREATE TRIGGER fail_write_immune_review BEFORE INSERT ON audit_log WHEN NEW.action = 'feedback.quarantine.release' BEGIN SELECT RAISE(ABORT, 'write immune review blocked'); END",
+            ),
+            (
+                true,
+                "CREATE TRIGGER fail_write_immune_review BEFORE INSERT ON search_index_jobs BEGIN SELECT RAISE(ABORT, 'write immune index blocked'); END",
+            ),
+            (
+                false,
+                "CREATE TRIGGER fail_write_immune_review AFTER UPDATE OF status ON feedback_quarantine BEGIN UPDATE feedback_quarantine SET evidence_json = '{}' WHERE id = NEW.id; END",
+            ),
+        ] {
+            let (dir, database) = seed_outcome_database("ee-write-immune-atomic-review")?;
+            let held = queue_write_immune_memory_hold(&database)?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            connection
+                .execute_raw(trigger)
+                .map_err(|error| error.to_string())?;
+            let before = connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?;
+            let review = OutcomeQuarantineReviewOptions {
+                workspace_path: dir.path(),
+                database_path: Some(&database),
+                quarantine_id: &held.id,
+                reject,
+                actor: Some("hold-reviewer"),
+                dry_run: false,
+            };
+            assert!(review_feedback_quarantine(&review).is_err());
+            assert_eq!(
+                connection
+                    .logical_table_digests()
+                    .map_err(|error| error.to_string())?,
+                before,
+                "review failure must preserve the pending hold, memory, audit and publication queue"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn write_immune_quarantine_review_refuses_changed_payload_without_harmful_fallback()
+    -> TestResult {
+        for mutation in [
+            "UPDATE feedback_quarantine SET raw_event_hash = 'blake3:changed'",
+            "UPDATE feedback_quarantine SET evidence_json = '{}'",
+            "UPDATE feedback_quarantine SET evidence_json = NULL, reason = 'changed hold'",
+            "UPDATE feedback_quarantine SET source_id = 'another-agent'",
+            "UPDATE feedback_quarantine SET target_id = 'mem_00000000000000000000009999'",
+            "UPDATE feedback_quarantine SET proposed_event_id = 'fb_00000000000000000000000800'",
+        ] {
+            let (dir, database) = seed_outcome_database("ee-write-immune-invalid-review")?;
+            let held = queue_write_immune_memory_hold(&database)?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            connection
+                .execute_raw(mutation)
+                .map_err(|error| error.to_string())?;
+            let before = connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?;
+            for (reject, dry_run) in [(false, true), (false, false), (true, true), (true, false)] {
+                let review = OutcomeQuarantineReviewOptions {
+                    workspace_path: dir.path(),
+                    database_path: Some(&database),
+                    quarantine_id: &held.id,
+                    reject,
+                    actor: Some("hold-reviewer"),
+                    dry_run,
+                };
+                assert!(matches!(
+                    review_feedback_quarantine(&review),
+                    Err(DomainError::PolicyDenied { .. })
+                ));
+                assert_eq!(
+                    connection
+                        .logical_table_digests()
+                        .map_err(|error| error.to_string())?,
+                    before
+                );
+            }
+        }
         Ok(())
     }
 
