@@ -12,7 +12,7 @@
     "description": "Frankensearch neighbor lookup is disabled during remember-time curation proposal, so proposal falls back to tag-overlap clustering.",
     "setup_commands": [
       "ee init --workspace .",
-      "ee remember 'Tagged cluster seed.' --workspace . --tags cluster --no-propose-candidates",
+      "for i in $(seq 1 11); do printf '{\"content\":\"Tagged cluster seed %s.\",\"tags\":[\"cluster\"]}\\n' \"$i\"; done | ee remember --workspace . --batch --stdin --no-auto-link --no-propose-candidates",
       "export EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS=1"
     ],
     "invocation": "EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS=1 ee remember 'Tagged cluster follow-up.' --workspace . --tags cluster --json"

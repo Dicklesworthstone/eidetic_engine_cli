@@ -3076,6 +3076,28 @@ Recovered keys are published with owner-only permissions. Ordinary redacted
 data backups contain neither plaintext keys nor the recovery envelope. Mesh
 enrollment credentials are a separate recovery concern.
 
+#### Recover a legacy database with misordered catalog rows
+
+Some older stores still open in EE but stock SQLite reports
+`malformed database schema (idx_curation_candidates_workspace) - no such table`.
+An index can precede its owning table in the on-disk catalog. The following
+commands use Python 3 and its stock SQLite library (3.38 or newer) to inspect
+the physical row order and recover a separate database file.
+
+```bash
+python3 scripts/recover_sqlite_catalog.py /workspace/.ee/ee.db
+python3 scripts/recover_sqlite_catalog.py /workspace/.ee/ee.db --output /recovery/ee.db
+```
+
+Inspection exits 0 when the catalog has no misplaced indexes, 1 when it finds
+them, and 2 on error. Recovery takes a read-only snapshot including committed
+WAL pages. It moves only misplaced index catalog entries in the copy, then
+reopens that copy with stock SQLite and checks the schema, indexes, data, and
+foreign keys. Success publishes an owner-only file at a new path. Use a
+destination directory on a filesystem that supports hard links. The source
+workspace stays in service. This procedure recovers the database file only;
+workspace signing keys and other assets follow the backup procedures above.
+
 JSONL import and backup restore replay memory relationships with their weights,
 confidence, evidence counts, origin, metadata, and original timestamps. Redacted
 endpoints map to the corresponding restored memories. JSONL reports include

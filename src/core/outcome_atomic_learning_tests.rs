@@ -1146,6 +1146,196 @@ fn anti_pattern_index_job_survives_feedback_coalescer_interleaving() {
 }
 
 #[test]
+fn legacy_quarantine_requires_an_authenticated_event_identity() {
+    let fixture = Fixture::new();
+    let id = fixture.queue_harmful_feedback("outcome_observed");
+    let mut legacy = fixture.db.get_feedback_quarantine(&id).unwrap().unwrap();
+    // Retain the hash made on admission while modeling a row that predates
+    // the stored proposed ID. Guessing a new ID cannot verify that hash.
+    legacy.proposed_event_id = None;
+    assert!(quarantined_feedback_event(&legacy, None).is_err());
+    assert!(quarantined_feedback_event(&legacy, Some(EVENT)).is_err());
+    let (event, input) = quarantined_feedback_event(&legacy, Some(HELD_EVENT)).unwrap();
+    assert_eq!(event, HELD_EVENT);
+    assert!(quarantined_feedback_matches(&legacy, &input));
+    legacy.released_feedback_event_id = Some(HELD_EVENT.to_owned());
+    assert_eq!(
+        quarantined_feedback_event(&legacy, None).unwrap().0,
+        HELD_EVENT
+    );
+}
+
+#[test]
+fn releasing_harmful_quorum_proposes_once_and_replay_repairs_optional_failure() {
+    for inject_failure in [false, true] {
+        let fixture = Fixture::new();
+        let held = fixture.queue_harmful_feedback("outcome_observed");
+        record_outcome(&fixture.anti_pattern_options(3)).unwrap();
+        let candidate = anti_pattern_candidate_id(WORKSPACE, MEMORY);
+        let job = anti_pattern_candidate_index_job_id(HELD_EVENT);
+        let mut review = fixture.release_options(&held);
+        review.dry_run = true;
+        let before = fixture.persisted_feedback_state();
+        assert!(
+            review_feedback_quarantine(&review)
+                .unwrap()
+                .degraded
+                .is_empty()
+        );
+        assert_eq!(fixture.persisted_feedback_state(), before);
+        assert!(
+            fixture
+                .db
+                .get_curation_candidate(WORKSPACE, &candidate)
+                .unwrap()
+                .is_none()
+        );
+
+        if inject_failure {
+            fixture.db.execute_raw(&format!(
+                "CREATE TRIGGER refuse_review_proposal BEFORE INSERT ON search_index_jobs \
+                 WHEN NEW.id = '{job}' BEGIN SELECT RAISE(ABORT, 'optional publication refused'); END;"
+            )).unwrap();
+        }
+        review.dry_run = false;
+        let released = review_feedback_quarantine(&review).unwrap();
+        assert_eq!(released.status, "released");
+        assert!(released.changed);
+        assert!(released.audit_id.is_some());
+        assert_eq!(released.feedback_event_id.as_deref(), Some(HELD_EVENT));
+        let learned = fixture.posterior();
+        assert!(
+            fixture
+                .db
+                .get_feedback_event(HELD_EVENT)
+                .unwrap()
+                .unwrap()
+                .applied_at
+                .is_some()
+        );
+        let proposed = if inject_failure {
+            assert!(
+                released
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "anti_pattern_proposal_failed")
+            );
+            assert!(
+                fixture
+                    .db
+                    .get_curation_candidate(WORKSPACE, &candidate)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(fixture.db.get_search_index_job(&job).unwrap().is_none());
+            fixture
+                .db
+                .execute_raw("DROP TRIGGER refuse_review_proposal")
+                .unwrap();
+            let repaired = review_feedback_quarantine(&review).unwrap();
+            assert_eq!(repaired.status, "already_reviewed");
+            assert!(!repaired.changed);
+            assert!(repaired.audit_id.is_none());
+            repaired
+        } else {
+            released
+        };
+        assert!(
+            proposed
+                .degraded
+                .iter()
+                .any(|entry| entry.code == ANTI_PATTERN_PROPOSED_CODE)
+        );
+        assert_eq!(fixture.posterior(), learned);
+        let stored = fixture
+            .db
+            .get_curation_candidate(WORKSPACE, &candidate)
+            .unwrap()
+            .unwrap();
+        assert!(
+            stored
+                .source_id
+                .unwrap()
+                .split(',')
+                .any(|id| id == HELD_EVENT)
+        );
+        assert_eq!(
+            fixture
+                .db
+                .get_search_index_job(&job)
+                .unwrap()
+                .unwrap()
+                .status,
+            "pending"
+        );
+        let complete = fixture.persisted_feedback_state();
+        let replay = review_feedback_quarantine(&review).unwrap();
+        assert_eq!(replay.status, "already_reviewed");
+        assert!(replay.degraded.is_empty());
+        assert_eq!(fixture.persisted_feedback_state(), complete);
+    }
+}
+
+#[test]
+fn a_second_hold_blocks_a_quorum_proposal_until_release_replay() {
+    let fixture = Fixture::new();
+    let first = fixture.queue_harmful_feedback("outcome_observed");
+    record_outcome(&fixture.anti_pattern_options(3)).unwrap();
+    let mut options = fixture.harmful_options();
+    options.event_id = Some("fb_00000000000000000000000073".to_owned());
+    options.harmful_per_source_per_hour = 1;
+    let other = record_outcome(&options)
+        .unwrap()
+        .quarantine
+        .unwrap()
+        .id
+        .unwrap();
+    let candidate = anti_pattern_candidate_id(WORKSPACE, MEMORY);
+    let release = fixture.release_options(&first);
+    assert!(
+        review_feedback_quarantine(&release)
+            .unwrap()
+            .degraded
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .db
+            .get_curation_candidate(WORKSPACE, &candidate)
+            .unwrap()
+            .is_none()
+    );
+    let mut reject = fixture.release_options(&other);
+    reject.reject = true;
+    assert_eq!(
+        review_feedback_quarantine(&reject).unwrap().status,
+        "rejected"
+    );
+    assert!(
+        fixture
+            .db
+            .get_curation_candidate(WORKSPACE, &candidate)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fixture
+            .db
+            .get_feedback_event(options.event_id.as_deref().unwrap())
+            .unwrap()
+            .is_none()
+    );
+    let replay = review_feedback_quarantine(&release).unwrap();
+    assert_eq!(replay.status, "already_reviewed");
+    assert!(
+        replay
+            .degraded
+            .iter()
+            .any(|entry| entry.code == ANTI_PATTERN_PROPOSED_CODE)
+    );
+}
+
+#[test]
 fn anti_pattern_index_insert_failure_preserves_committed_feedback() {
     let fixture = Fixture::new();
     for ordinal in 1..3 {

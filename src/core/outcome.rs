@@ -675,6 +675,8 @@ pub struct OutcomeQuarantineReviewReport {
     pub dry_run: bool,
     pub feedback_event_id: Option<String>,
     pub audit_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub degraded: Vec<OutcomeDegradation>,
 }
 
 impl OutcomeQuarantineReviewReport {
@@ -690,13 +692,17 @@ impl OutcomeQuarantineReviewReport {
 
     #[must_use]
     pub fn human_summary(&self) -> String {
-        format!(
+        let mut message = format!(
             "Feedback quarantine {}\n  ID: {}\n  Changed: {}\n  Audit: {}\n",
             self.action,
             self.quarantine_id,
             self.changed,
             self.audit_id.as_deref().unwrap_or("none")
-        )
+        );
+        for entry in &self.degraded {
+            message.push_str(&format!("  {}: {}\n", entry.code, entry.message));
+        }
+        message
     }
 }
 
@@ -742,7 +748,7 @@ pub struct OutcomeRecordReport {
 /// `details` payload for structured per-code metadata. Lives next to
 /// `OutcomeRecordReport` rather than at the model layer because the only
 /// emitter today is the outcome write path.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct OutcomeDegradation {
     pub code: String,
     pub severity: String,
@@ -1104,36 +1110,152 @@ fn record_outcome_inner(
                 .is_some_and(|reason| !reason.trim().is_empty());
 
         if options.dry_run {
+            // A preview still requires a live target, even for a durable receipt.
             require_current_memory_outcome_revision(&connection, &target_type, &target_id)?;
+        }
+        let learning_observation = if require_learning_observation
+            && let Some(id) = event_id.as_deref()
+        {
+            Some(
+                crate::core::learn::learning_observation_for_feedback(&feedback_input, id)
+                    .map_err(|error| DomainError::Usage {
+                        message: format!("Invalid learning feedback evidence: {error}"),
+                        repair: Some("Review the learn observe or learn close payload.".to_owned()),
+                    })?
+                    .ok_or_else(|| DomainError::Usage {
+                        message: "Learning feedback requires a matching typed experiment observation or outcome.".to_owned(),
+                        repair: Some("Use ee learn observe or ee learn close.".to_owned()),
+                    })?,
+            )
+        } else {
+            None
+        };
+        let existing = match event_id.as_deref() {
+            Some(id) => existing_feedback_outcome(&connection, id, &feedback_input)?,
+            None => None,
+        };
+        #[cfg(test)]
+        if !options.dry_run {
+            observe_outcome_admission_for_test(
+                OutcomeAdmissionTestStage::AfterEventLookup,
+                &connection,
+            );
+        }
+        if let Some(existing) = existing {
+            let (status, quarantine) = match existing {
+                ExistingFeedbackOutcome::Recorded => (OutcomeRecordStatus::AlreadyRecorded, None),
+                ExistingFeedbackOutcome::Quarantined(summary) => {
+                    (OutcomeRecordStatus::Quarantined, Some(summary))
+                }
+            };
+            if !options.dry_run
+                && status == OutcomeRecordStatus::AlreadyRecorded
+                && let Some((observation_id, observation)) = learning_observation.as_ref()
+            {
+                // Exact feedback equality was proved above under the owner
+                // fence. Repair a legacy partial write without learning twice.
+                let write_operation = crate::core::write_owner::WriteOperation::OutcomeRecord {
+                    workspace_id: target.workspace_id.clone(),
+                    memory_id: target_id.clone(),
+                    outcome_type: signal.clone(),
+                    details: feedback_input.reason.clone(),
+                };
+                crate::core::write_owner::run_one_shot_write_intake(
+                    outcome_write_intake_workspace_path(options.database_path),
+                    &write_operation,
+                    || {
+                        connection
+                            .with_transaction(|| {
+                                connection.insert_learning_observation_exact(observation_id, observation)
+                            })
+                            .map_err(|error| DomainError::Storage {
+                                message: format!("Failed to restore learning observation: {error}"),
+                                repair: Some("Inspect ee learn summary --json before retrying the exact observation.".to_owned()),
+                            })
+                    },
+                )?;
+            }
             let feedback = current_feedback_summary(
                 &connection,
                 &target.workspace_id,
                 &target_type,
                 &target_id,
             )?;
-            trace_sprt_quarantine("dependency_check", 0, &[]);
-            let sprt = sprt_quarantine_decision_preview(
+            trace_sprt_quarantine("response", 0, &[]);
+            return Ok(OutcomeRecordReport {
+                version: env!("CARGO_PKG_VERSION"),
+                status,
+                dry_run: options.dry_run,
+                event_id,
+                audit_id: None,
+                target_type,
+                target_id,
+                workspace_id: target.workspace_id,
+                target_verified: target.verified,
+                signal,
+                weight,
+                source_type,
+                source_id,
+                reason_present: feedback_input.reason.is_some(),
+                evidence_json_present: evidence_json.is_some(),
+                session_id,
+                quarantine,
+                feedback,
+                degraded: Vec::new(),
+                confidence_before: None,
+                confidence_after: None,
+            });
+        }
+
+        // Exact receipts above retain their identity after later retirement
+        // or evidence withdrawal. A new observation still needs current live
+        // admission, under the same writer fence as its ownership and commit.
+        if !options.dry_run && matches!(target_type.as_str(), "rule" | "evidence") {
+            resolve_target_workspace(
                 &connection,
-                &target.workspace_id,
-                &signal,
-                source_id.as_deref(),
+                &target_type,
+                &target_id,
+                Some(&target.workspace_id),
+                options.prompt_injection_guard,
+                OutcomeTargetAdmission::Live,
             )?;
-            let burst_quarantine = harmful_quarantine_preview(
-                &connection,
-                &target.workspace_id,
-                &signal,
-                source_id.as_deref(),
+        }
+        // A retry belongs to its already-recorded observation, even if the
+        // target was revised later. Only new observations require the current
+        // revision; do not redirect feedback to a different memory implicitly.
+        if !options.dry_run {
+            require_current_memory_outcome_revision(&connection, &target_type, &target_id)?;
+        }
+        trace_sprt_quarantine("dependency_check", 0, &[]);
+        let sprt = sprt_quarantine_decision_preview(
+            &connection,
+            &target.workspace_id,
+            &signal,
+            source_id.as_deref(),
+        )?;
+        let burst_quarantine = harmful_quarantine_preview(
+            &connection,
+            &target.workspace_id,
+            &signal,
+            source_id.as_deref(),
+            options.harmful_per_source_per_hour,
+            options.harmful_burst_window_seconds,
+        )?;
+        let sprt_quarantine = sprt.as_ref().and_then(|decision| {
+            sprt_quarantine_summary(
+                decision,
                 options.harmful_per_source_per_hour,
                 options.harmful_burst_window_seconds,
+            )
+        });
+        let quarantine = outcome_quarantine_with_cause(burst_quarantine, sprt_quarantine);
+        if options.dry_run {
+            let feedback = current_feedback_summary(
+                &connection,
+                &target.workspace_id,
+                &target_type,
+                &target_id,
             )?;
-            let sprt_quarantine = sprt.as_ref().and_then(|decision| {
-                sprt_quarantine_summary(
-                    decision,
-                    options.harmful_per_source_per_hour,
-                    options.harmful_burst_window_seconds,
-                )
-            });
-            let quarantine = outcome_quarantine_with_cause(burst_quarantine, sprt_quarantine);
             trace_sprt_quarantine("response", 0, &[]);
             // Dry-run preview surfaces the same degraded code as the persisted
             // path, but without persisted quarantine candidate IDs.
@@ -1173,139 +1295,12 @@ fn record_outcome_inner(
                 repair: Some("ee outcome <target-id> --signal helpful".to_string()),
             });
         };
-        let learning_observation = if require_learning_observation {
-            Some(
-                crate::core::learn::learning_observation_for_feedback(&feedback_input, &event_id)
-                    .map_err(|error| DomainError::Usage {
-                        message: format!("Invalid learning feedback evidence: {error}"),
-                        repair: Some("Review the learn observe or learn close payload.".to_owned()),
-                    })?
-                    .ok_or_else(|| DomainError::Usage {
-                        message: "Learning feedback requires a matching typed experiment observation or outcome.".to_owned(),
-                        repair: Some("Use ee learn observe or ee learn close.".to_owned()),
-                    })?,
-            )
-        } else {
-            None
-        };
-        let existing = existing_feedback_outcome(&connection, &event_id, &feedback_input)?;
-        #[cfg(test)]
-        observe_outcome_admission_for_test(
-            OutcomeAdmissionTestStage::AfterEventLookup,
-            &connection,
-        );
-        if let Some(existing) = existing {
-            let (status, quarantine) = match existing {
-                ExistingFeedbackOutcome::Recorded => (OutcomeRecordStatus::AlreadyRecorded, None),
-                ExistingFeedbackOutcome::Quarantined(summary) => {
-                    (OutcomeRecordStatus::Quarantined, Some(summary))
-                }
-            };
-            if status == OutcomeRecordStatus::AlreadyRecorded
-                && let Some((observation_id, observation)) = learning_observation.as_ref()
-            {
-                // Exact feedback equality was proved above under the owner
-                // fence. Repair a legacy partial write without learning twice.
-                let write_operation = crate::core::write_owner::WriteOperation::OutcomeRecord {
-                    workspace_id: target.workspace_id.clone(),
-                    memory_id: target_id.clone(),
-                    outcome_type: signal.clone(),
-                    details: feedback_input.reason.clone(),
-                };
-                crate::core::write_owner::run_one_shot_write_intake(
-                    outcome_write_intake_workspace_path(options.database_path),
-                    &write_operation,
-                    || {
-                        connection
-                            .with_transaction(|| {
-                                connection.insert_learning_observation_exact(observation_id, observation)
-                            })
-                            .map_err(|error| DomainError::Storage {
-                                message: format!("Failed to restore learning observation: {error}"),
-                                repair: Some("Inspect ee learn summary --json before retrying the exact observation.".to_owned()),
-                            })
-                    },
-                )?;
-            }
-            let feedback = current_feedback_summary(
-                &connection,
-                &target.workspace_id,
-                &target_type,
-                &target_id,
-            )?;
-            trace_sprt_quarantine("response", 0, &[]);
-            return Ok(OutcomeRecordReport {
-                version: env!("CARGO_PKG_VERSION"),
-                status,
-                dry_run: false,
-                event_id: Some(event_id),
-                audit_id: None,
-                target_type,
-                target_id,
-                workspace_id: target.workspace_id,
-                target_verified: target.verified,
-                signal,
-                weight,
-                source_type,
-                source_id,
-                reason_present: feedback_input.reason.is_some(),
-                evidence_json_present: evidence_json.is_some(),
-                session_id,
-                quarantine,
-                feedback,
-                degraded: Vec::new(),
-                confidence_before: None,
-                confidence_after: None,
-            });
-        }
-
-        // Exact receipts above retain their identity after later retirement
-        // or evidence withdrawal. A new observation still needs current live
-        // admission, under the same writer fence as its ownership and commit.
-        if matches!(target_type.as_str(), "rule" | "evidence") {
-            resolve_target_workspace(
-                &connection,
-                &target_type,
-                &target_id,
-                Some(&target.workspace_id),
-                options.prompt_injection_guard,
-                OutcomeTargetAdmission::Live,
-            )?;
-        }
-        // A retry belongs to its already-recorded observation, even if the
-        // target was revised later. Only new observations require the current
-        // revision; do not redirect feedback to a different memory implicitly.
-        require_current_memory_outcome_revision(&connection, &target_type, &target_id)?;
-        trace_sprt_quarantine("dependency_check", 0, &[]);
-        let sprt = sprt_quarantine_decision_preview(
-            &connection,
-            &target.workspace_id,
-            &signal,
-            source_id.as_deref(),
-        )?;
-        let burst_quarantine = harmful_quarantine_preview(
-            &connection,
-            &target.workspace_id,
-            &signal,
-            source_id.as_deref(),
-            options.harmful_per_source_per_hour,
-            options.harmful_burst_window_seconds,
-        )?;
-        let sprt_quarantine = sprt.as_ref().and_then(|decision| {
-            sprt_quarantine_summary(
-                decision,
-                options.harmful_per_source_per_hour,
-                options.harmful_burst_window_seconds,
-            )
-        });
         #[cfg(test)]
         observe_outcome_admission_for_test(
             OutcomeAdmissionTestStage::AfterAdmissionRead,
             &connection,
         );
-        if let Some((quarantine_cause, quarantine)) =
-            outcome_quarantine_with_cause(burst_quarantine, sprt_quarantine)
-        {
+        if let Some((quarantine_cause, quarantine)) = quarantine {
             let quarantine_id = id_source.next_feedback_quarantine_id();
             let raw_event_hash = raw_feedback_event_hash(&event_id, &feedback_input)?;
             let reason = quarantine.reason.clone();
@@ -1569,10 +1564,12 @@ fn record_outcome_inner(
 
     // Candidate proposals are optional postcommit work. They must not extend
     // the owner interval needed for mandatory admission and learning.
-    if matches!(
-        report.status,
-        OutcomeRecordStatus::Recorded | OutcomeRecordStatus::AlreadyRecorded
-    ) && report.target_type == "memory"
+    if !report.dry_run
+        && matches!(
+            report.status,
+            OutcomeRecordStatus::Recorded | OutcomeRecordStatus::AlreadyRecorded
+        )
+        && report.target_type == "memory"
         && is_harmful_signal(&report.signal)
         && report.weight > 0.0
         && let Some(event_id) = report.event_id.as_deref()
@@ -2418,6 +2415,21 @@ fn propose_anti_pattern_candidate_in_transaction(
         return Ok(None);
     }
 
+    // Another source's pending review still holds this memory, even if the
+    // just-released observation itself helped establish a valid quorum.
+    let pending = connection
+        .query(
+            "SELECT 1 FROM feedback_quarantine WHERE workspace_id = ?1 AND target_type = 'memory' AND target_id = ?2 AND status = 'pending' LIMIT 1",
+            &[
+                sqlmodel_core::Value::Text(workspace_id.to_owned()),
+                sqlmodel_core::Value::Text(target_id.to_owned()),
+            ],
+        )
+        .map_err(anti_pattern_feedback_storage_error)?;
+    if !pending.is_empty() {
+        return Ok(None);
+    }
+
     let candidate_id = anti_pattern_candidate_id(workspace_id, target_id);
     if connection
         .get_curation_candidate(workspace_id, &candidate_id)
@@ -2804,7 +2816,7 @@ pub fn review_feedback_quarantine(
 
     let action = if options.reject { "reject" } else { "release" };
     if row.status != "pending" {
-        return Ok(outcome_quarantine_review_report(
+        let mut report = outcome_quarantine_review_report(
             &prepared,
             &quarantine_id,
             QuarantineReviewSummary {
@@ -2812,10 +2824,14 @@ pub fn review_feedback_quarantine(
                 status: "already_reviewed",
                 changed: false,
                 dry_run: options.dry_run,
-                feedback_event_id: row.released_feedback_event_id,
+                feedback_event_id: row.released_feedback_event_id.clone(),
                 audit_id: None,
             },
-        ));
+        );
+        if row.status == "released" && !options.reject && !options.dry_run {
+            complete_released_feedback_proposal(&connection, &row, options.actor, &mut report);
+        }
+        return Ok(report);
     }
     if is_write_immune_quarantine(&row) {
         let summary = review_write_immune_quarantine(&connection, &row, options)?;
@@ -2827,7 +2843,7 @@ pub fn review_feedback_quarantine(
     }
     if options.dry_run {
         if !options.reject {
-            let (event_id, feedback_input) = quarantined_feedback_event(&row)?;
+            let (event_id, feedback_input) = quarantined_feedback_event(&row, None)?;
             validate_quarantined_feedback_target(&connection, &feedback_input, &event_id)?;
         }
         return Ok(outcome_quarantine_review_report(
@@ -2853,7 +2869,7 @@ pub fn review_feedback_quarantine(
         ));
     }
 
-    let (event_id, feedback_input) = quarantined_feedback_event(&row)?;
+    let (event_id, feedback_input) = quarantined_feedback_event(&row, None)?;
     let summary = release_feedback_quarantine_audited(
         &connection,
         &row,
@@ -2861,11 +2877,60 @@ pub fn review_feedback_quarantine(
         &feedback_input,
         options.actor,
     )?;
-    Ok(outcome_quarantine_review_report(
-        &prepared,
-        &quarantine_id,
-        summary,
-    ))
+    let mut report = outcome_quarantine_review_report(&prepared, &quarantine_id, summary);
+    complete_released_feedback_proposal(&connection, &row, options.actor, &mut report);
+    Ok(report)
+}
+
+// A release commits the original observation and its learning first. Its
+// optional proposal can then fail independently and be repaired on exact
+// review replay, just as it can for an ordinary feedback receipt.
+fn complete_released_feedback_proposal(
+    connection: &DbConnection,
+    row: &StoredFeedbackQuarantine,
+    actor: Option<&str>,
+    report: &mut OutcomeQuarantineReviewReport,
+) {
+    if row.target_type != "memory"
+        || !is_harmful_signal(&row.signal)
+        || row.weight <= 0.0
+        || is_write_immune_quarantine(row)
+    {
+        return;
+    }
+    let Some(event_id) = report.feedback_event_id.as_deref() else {
+        return;
+    };
+    let proposed = (|| {
+        let (held_event_id, input) = quarantined_feedback_event(row, Some(event_id))?;
+        if held_event_id != event_id
+            || !matches!(
+                existing_feedback_outcome(connection, event_id, &input)?,
+                Some(ExistingFeedbackOutcome::Recorded)
+            )
+        {
+            return Err(DomainError::Storage {
+                message: "Quarantine release lacks a matching accepted feedback receipt."
+                    .to_owned(),
+                repair: Some("ee doctor".to_owned()),
+            });
+        }
+        maybe_propose_anti_pattern_candidate(
+            connection,
+            &row.workspace_id,
+            &row.target_id,
+            event_id,
+            actor,
+            &mut OutcomeIdSource::Ambient,
+        )
+    })();
+    match proposed {
+        Ok(Some(entry)) => report.degraded.push(entry),
+        Ok(None) => {}
+        Err(error) => report
+            .degraded
+            .push(anti_pattern_proposal_failed_degradation(&error)),
+    }
 }
 
 const WRITE_IMMUNE_QUARANTINE_HASH_PREFIX: &str = "blake3:write-immune-v1:";
@@ -3271,6 +3336,7 @@ fn outcome_quarantine_review_report(
         dry_run: summary.dry_run,
         feedback_event_id: summary.feedback_event_id,
         audit_id: summary.audit_id,
+        degraded: Vec::new(),
     }
 }
 
@@ -3377,11 +3443,20 @@ fn reject_feedback_quarantine_audited(
 
 fn quarantined_feedback_event(
     row: &StoredFeedbackQuarantine,
+    accepted_event_id: Option<&str>,
 ) -> Result<(String, CreateFeedbackEventInput), DomainError> {
+    // The v1 payload hash commits to eventId. Only a stored proposal or an
+    // accepted release receipt can supply the original identity.
     let event_id = row
         .proposed_event_id
-        .clone()
-        .unwrap_or_else(generate_feedback_event_id);
+        .as_deref()
+        .or(row.released_feedback_event_id.as_deref())
+        .or(accepted_event_id)
+        .ok_or_else(|| DomainError::PolicyDenied {
+            message: format!("Quarantined feedback {} lacks the event ID needed to verify its payload.", row.id),
+            repair: Some(format!("ee outcome quarantine release {} --reject", row.id)),
+        })?
+        .to_owned();
     let feedback_input = CreateFeedbackEventInput {
         workspace_id: row.workspace_id.clone(),
         target_type: row.target_type.clone(),
@@ -9815,6 +9890,58 @@ mod tests {
     }
 
     #[test]
+    fn outcome_preview_checks_live_and_pending_receipts_before_predicting_admission() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-preview-receipts")?;
+        let mut first = anti_pattern_outcome_options(&database, 881, "preview-source");
+        first.harmful_per_source_per_hour = 1;
+        let mut second = first.clone();
+        second.event_id = Some("fb_00000000000000000000000882".to_owned());
+        let live = record_outcome(&first).map_err(|error| error.message())?;
+        let held = record_outcome(&second).map_err(|error| error.message())?;
+        assert_eq!(live.status, OutcomeRecordStatus::Recorded);
+        assert_eq!(held.status, OutcomeRecordStatus::Quarantined);
+        let held_id = held.quarantine.and_then(|summary| summary.id);
+        assert!(held_id.is_some());
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        for (mut options, status) in [
+            (first, OutcomeRecordStatus::AlreadyRecorded),
+            (second, OutcomeRecordStatus::Quarantined),
+        ] {
+            // Changing the source limit cannot change the observed receipt.
+            options.harmful_per_source_per_hour = 10;
+            options.dry_run = true;
+            let preview = record_outcome(&options).map_err(|error| error.message())?;
+            assert!(preview.dry_run);
+            assert_eq!(preview.status, status);
+            assert_eq!(preview.event_id, options.event_id);
+            assert!(preview.audit_id.is_none());
+            assert!(preview.degraded.is_empty());
+            if status == OutcomeRecordStatus::Quarantined {
+                let summary = preview.quarantine.ok_or("missing held receipt")?;
+                assert!(summary.replayed);
+                assert_eq!(summary.id, held_id);
+            } else {
+                assert!(preview.quarantine.is_none());
+            }
+            options.reason = Some("Changed payload under the reserved ID".to_owned());
+            assert!(matches!(
+                record_outcome(&options),
+                Err(DomainError::Usage { .. })
+            ));
+        }
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            before
+        );
+        Ok(())
+    }
+
+    #[test]
     fn harmful_feedback_over_source_rate_limit_is_quarantined() -> TestResult {
         let (_dir, database) = seed_outcome_database("ee-outcome-rate-limit")?;
         for index in 0..DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR {
@@ -10293,6 +10420,33 @@ mod tests {
             &Some("fb_00000000000000000000000884".to_string()),
             "dry-run event id is reported",
         )?;
+
+        let existing_line = serde_json::json!({
+            "target": OUTCOME_TEST_MEMORY_ID,
+            "signal": "harmful",
+            "sourceType": "automated_check",
+            "sourceId": "batch-dry-run-source",
+            "reason": "First event establishes the source bucket.",
+            "eventId": "fb_00000000000000000000000883",
+        });
+        let mut changed_line = existing_line.clone();
+        changed_line["reason"] = serde_json::json!("different observation");
+        let receipts = super::record_outcome_batch_stdin(
+            &super::OutcomeBatchOptions {
+                database_path: &database,
+                actor: Some("test".to_owned()),
+                agent_name: None,
+                dry_run: true,
+                harmful_per_source_per_hour: 1,
+                harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+                prompt_injection_guard: true,
+            },
+            &format!("{existing_line}\n{changed_line}"),
+        )
+        .map_err(|error| error.message())?;
+        assert_eq!(receipts.results[0].status, "already_recorded");
+        assert_eq!(receipts.results[1].status, "failed");
+        assert_eq!(receipts.failed_count, 1);
 
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
         let live_events = connection
@@ -11922,14 +12076,13 @@ fn record_outcome_batch_stdin_inner(
                 }
                 results.push(OutcomeBatchLineResult {
                     line: line_number,
-                    status: if options.dry_run && quarantined {
-                        "would_quarantine"
-                    } else if options.dry_run {
-                        "would_record"
-                    } else if quarantined {
-                        "quarantined"
-                    } else {
-                        "recorded"
+                    status: match (options.dry_run, report.status, quarantined) {
+                        (true, OutcomeRecordStatus::AlreadyRecorded, _) => "already_recorded",
+                        (true, OutcomeRecordStatus::Quarantined, _) => "already_quarantined",
+                        (true, _, true) => "would_quarantine",
+                        (true, _, false) => "would_record",
+                        (false, _, true) => "quarantined",
+                        (false, _, false) => "recorded",
                     },
                     event_id: report.event_id.clone(),
                     target_id: Some(draft.target),

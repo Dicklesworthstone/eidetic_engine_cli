@@ -1837,14 +1837,14 @@ run_fixture_scenario() {
             local auto_propose_neighbor_workspace
             auto_propose_neighbor_workspace="$EPIC_WORKSPACE/j6-auto-propose-neighbor-unavailable"
             ee_global init --workspace "$auto_propose_neighbor_workspace" --json >/dev/null
-            ee_global remember "J6 auto propose neighbor seed." \
+            # With the trigger, twelve matching rows exceed the eleven-member
+            # cluster limit and require search to choose the retained neighbors.
+            local seed
+            for seed in {1..11}; do
+                printf '{"content":"J6 auto proposal neighbor seed %s.","level":"semantic","kind":"fact","tags":["j6-auto-propose-neighbor"]}\n' "$seed"
+            done | ee_global remember --batch --stdin \
                 --workspace "$auto_propose_neighbor_workspace" \
-                --level semantic \
-                --kind fact \
-                --tags j6-auto-propose-neighbor \
-                --no-auto-link \
-                --no-propose-candidates \
-                --json >/dev/null 2>&1 || true
+                --no-auto-link --no-propose-candidates --json >/dev/null || return 1
             SCENARIO_OUTPUT=$(EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS=1 \
                 ee_global remember "J6 auto propose neighbor triggering memory." \
                     --workspace "$auto_propose_neighbor_workspace" \
