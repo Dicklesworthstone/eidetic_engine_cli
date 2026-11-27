@@ -4909,6 +4909,20 @@ impl ManualRunner {
         )
     }
 
+    /// The `[graph.memory]` caps and `EE_GRAPH_MEMORY_*` overrides, as
+    /// `ee graph centrality-refresh` applies them. Without a workspace path
+    /// only the environment overrides apply.
+    fn graph_memory_budget_policy(&self) -> crate::core::graph_memory_budget::MemoryBudgetPolicy {
+        use crate::core::graph_memory_budget::{
+            MemoryBudgetEnv, MemoryBudgetPolicy, workspace_memory_budget_policy,
+        };
+
+        self.options.workspace_path.as_deref().map_or_else(
+            || MemoryBudgetPolicy::from_config(&Default::default(), MemoryBudgetEnv::current()),
+            workspace_memory_budget_policy,
+        )
+    }
+
     fn execute_graph_centrality_refresh(
         &self,
         budget: &mut JobBudgetState,
@@ -4997,7 +5011,7 @@ impl ManualRunner {
             min_weight: None,
             min_confidence: None,
             link_limit,
-            memory_budget_policy: crate::core::graph_memory_budget::MemoryBudgetPolicy::defaults(),
+            memory_budget_policy: self.graph_memory_budget_policy(),
             cooperative: false,
         };
         let preflight = match crate::graph::refresh_graph_snapshot(
@@ -14735,6 +14749,27 @@ mod tests {
             ManualRunner::new(RunnerOptions::new()).database_path(),
             None,
             "no workspace and no database",
+        )
+    }
+
+    #[test]
+    fn manual_runner_graph_refresh_applies_the_workspace_graph_memory_caps() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        std::fs::write(
+            temp.path().join(".ee").join("config.toml"),
+            "[graph.memory]\nsnapshot_cap_mb = 1\nper_algorithm_cap_mb = 2\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let runner = ManualRunner::new(RunnerOptions::new().with_workspace_path(temp.path()));
+        let policy = runner.graph_memory_budget_policy();
+        // The steward used MemoryBudgetPolicy::defaults() here, 250 MB and
+        // 100 MB, so `ee job run centrality_refresh` ignored these caps.
+        ensure(policy.snapshot_cap_bytes, 1024 * 1024, "snapshot cap")?;
+        ensure(
+            policy.per_algorithm_cap_bytes,
+            2 * 1024 * 1024,
+            "per-algorithm cap",
         )
     }
 
