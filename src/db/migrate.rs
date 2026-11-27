@@ -417,7 +417,7 @@ fn domain_error_for_preserve_failure(
 enum CopyScope {
     WorkspaceRegistry,
     WorkspaceColumn,
-    MemoryTags,
+    MemoryChild,
     RuleSourceMemories,
     RuleTags,
     PackItems,
@@ -1231,6 +1231,9 @@ fn ordered_copy_tables(
         "memories",
         "audit_log",
         "memory_tags",
+        "memory_seals",
+        "memory_anchors",
+        "memory_code_anchor_sources",
         "curation_candidates",
         "procedural_rules",
         "rule_source_memories",
@@ -1297,7 +1300,9 @@ fn copy_scope_for_table(table: &str, columns: &[String]) -> CopyScope {
     match table {
         "ee_schema_migrations" | "ee_advisory_locks" => CopyScope::Skip,
         "workspaces" => CopyScope::WorkspaceRegistry,
-        "memory_tags" => CopyScope::MemoryTags,
+        "memory_tags" | "memory_seals" | "memory_anchors" | "memory_code_anchor_sources" => {
+            CopyScope::MemoryChild
+        }
         "rule_source_memories" => CopyScope::RuleSourceMemories,
         "rule_tags" => CopyScope::RuleTags,
         "pack_items" => CopyScope::PackItems,
@@ -1326,7 +1331,7 @@ fn workspace_predicate(
     match scope {
         CopyScope::WorkspaceRegistry => Some(format!("row.\"id\" = {workspace}")),
         CopyScope::WorkspaceColumn => Some(format!("row.\"workspace_id\" = {workspace}")),
-        CopyScope::MemoryTags => Some(format!(
+        CopyScope::MemoryChild => Some(format!(
             "EXISTS (SELECT 1 FROM {memories} AS m WHERE m.\"id\" = row.\"memory_id\" AND m.\"workspace_id\" = {workspace})"
         )),
         CopyScope::RuleSourceMemories => Some(format!(
@@ -1643,6 +1648,33 @@ mod tests {
         let source = DbConnection::open_file(&source_path).map_err(|error| error.to_string())?;
         apply_schema_migrations_deterministically(&source).map_err(|error| error.to_string())?;
         seed_two_workspace_source(&source)?;
+        let surface = crate::models::CreateMemoryAnchorInput::from_stored_code_surface(
+            MEM_A,
+            crate::models::MemoryAnchorKind::Path,
+            "src/alpha.rs",
+            crate::models::MemoryAnchorSource::Explicit,
+            "memory.anchors",
+        )
+        .ok_or_else(|| "invalid test locator".to_owned())?;
+        source
+            .with_transaction(|| source.attach_memory_code_anchor_sources(WSP_A, MEM_A, &[surface]))
+            .map_err(|error| error.to_string())?;
+        source
+            .execute_raw(&format!(
+                "UPDATE memories SET content = '{}' WHERE id = '{MEM_B}'",
+                crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+            ))
+            .map_err(|error| error.to_string())?;
+        let seal = crate::models::MemorySeal {
+            memory_id: MEM_B.to_owned(),
+            content_commitment: crate::models::memory_seal_commitment(b"unrevealed beta"),
+            sealed_at: "2026-01-01T00:00:00Z".to_owned(),
+            revealed_at: None,
+            reveal_verified: None,
+        };
+        source
+            .insert_memory_seal_for_recovery(&seal)
+            .map_err(|error| error.to_string())?;
         drop(source);
 
         let plan = plan_shard_fanout_migration_from_database(
@@ -1666,6 +1698,10 @@ mod tests {
                 .get("agent_context_profiles"),
             Some(&1)
         );
+
+        for table in ["memory_anchors", "memory_code_anchor_sources"] {
+            assert_eq!(workspace_a.row_counts_by_table.get(table), Some(&1));
+        }
 
         let first = apply_shard_fanout_migration(&plan).map_err(|error| error.to_string())?;
         assert_eq!(first.outcome, ShardFanoutMigrationOutcome::Applied);
@@ -1706,6 +1742,27 @@ mod tests {
             1
         );
         assert_eq!(scalar_count(&shard_b, "SELECT COUNT(*) FROM memories")?, 1);
+        let anchors = shard_a
+            .list_memory_code_anchor_sources(MEM_A)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].normalized_value, "src/alpha.rs");
+        for table in ["memory_anchors", "memory_code_anchor_sources"] {
+            assert_eq!(
+                scalar_count(&shard_b, &format!("SELECT COUNT(*) FROM {table}"))?,
+                0
+            );
+        }
+        assert_eq!(
+            scalar_count(&shard_a, "SELECT COUNT(*) FROM memory_seals")?,
+            0
+        );
+        assert_eq!(
+            shard_b
+                .get_effective_memory_seal(MEM_B)
+                .map_err(|error| error.to_string())?,
+            Some(seal)
+        );
         assert_shard_audit_chain(&shard_a, WSP_A, MEM_A)?;
         assert_shard_audit_chain(&shard_b, WSP_B, MEM_B)?;
         drop(shard_a);
