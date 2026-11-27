@@ -6536,18 +6536,22 @@ struct ParsedIndexMetadata {
     stored_dimension: Option<u32>,
 }
 
-/// Generation stamped in `meta.json`, when that file parses and the warm
-/// lease would accept it.
+/// Generation stamped in structurally compatible `meta.json`.
 ///
 /// Pack SLO actuals still leave `index_generation` unset. Prefetch must use
 /// this published value rather than inventing generation zero: the lexical
 /// warm lease rejects any other generation, and a missing or incompatible
 /// file stays `None` so the caller can fail closed.
+///
+/// This is an unleased watermark, not permission to read vector bytes. A
+/// different workspace's process-default embedder cannot erase it from a
+/// daemon request's single-flight key. Readers still acquire their generation
+/// lease and validate the producer actually selected for that request.
 pub(crate) fn published_index_generation(index_dir: &Path) -> Option<u64> {
     let metadata = parse_index_metadata(index_dir).ok().flatten()?;
     let generation = metadata.generation?;
     let metadata_path = index_dir.join(INDEX_METADATA_FILE);
-    if index_metadata_compatibility_error(&metadata_path, &metadata).is_some() {
+    if index_metadata_compatibility_error_with_identity(&metadata_path, &metadata, None).is_some() {
         return None;
     }
     Some(generation)
@@ -6729,20 +6733,6 @@ fn embedding_space_compatibility_error(
         ));
     }
     None
-}
-
-fn index_metadata_compatibility_error(
-    metadata_path: &Path,
-    metadata: &ParsedIndexMetadata,
-) -> Option<String> {
-    let active_identity = active_semantic_identity();
-    index_metadata_compatibility_error_with_identity(
-        metadata_path,
-        metadata,
-        active_identity
-            .as_ref()
-            .map(|(model_id, dimension)| (model_id.as_str(), *dimension)),
-    )
 }
 
 fn index_metadata_compatibility_error_with_identity(
