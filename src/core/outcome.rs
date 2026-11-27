@@ -1105,7 +1105,12 @@ fn record_outcome_inner(
 
         if options.dry_run {
             require_current_memory_outcome_revision(&connection, &target_type, &target_id)?;
-            let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+            let feedback = current_feedback_summary(
+                &connection,
+                &target.workspace_id,
+                &target_type,
+                &target_id,
+            )?;
             trace_sprt_quarantine("dependency_check", 0, &[]);
             let sprt = sprt_quarantine_decision_preview(
                 &connection,
@@ -1222,7 +1227,12 @@ fn record_outcome_inner(
                     },
                 )?;
             }
-            let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+            let feedback = current_feedback_summary(
+                &connection,
+                &target.workspace_id,
+                &target_type,
+                &target_id,
+            )?;
             trace_sprt_quarantine("response", 0, &[]);
             return Ok(OutcomeRecordReport {
                 version: env!("CARGO_PKG_VERSION"),
@@ -1353,7 +1363,12 @@ fn record_outcome_inner(
                         })
                 },
             )?;
-            let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+            let feedback = current_feedback_summary(
+                &connection,
+                &target.workspace_id,
+                &target_type,
+                &target_id,
+            )?;
             trace_sprt_quarantine("response", 0, &[]);
             let final_quarantine = OutcomeQuarantineSummary {
                 id: Some(quarantine_id.clone()),
@@ -1503,7 +1518,12 @@ fn record_outcome_inner(
         let (confidence_before, confidence_after) =
             confidence.map_or((None, None), |(before, after)| (Some(before), Some(after)));
 
-        let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+        let feedback = current_feedback_summary(
+            &connection,
+            &target.workspace_id,
+            &target_type,
+            &target_id,
+        )?;
 
         trace_sprt_quarantine("response", 0, &[]);
         Ok(OutcomeRecordReport {
@@ -3829,11 +3849,12 @@ fn outcome_instruction_policy_denied_error(
 
 fn current_feedback_summary(
     connection: &DbConnection,
+    workspace_id: &str,
     target_type: &str,
     target_id: &str,
 ) -> Result<OutcomeFeedbackSummary, DomainError> {
     connection
-        .count_feedback_by_signal(target_type, target_id)
+        .count_feedback_by_signal_in_scope(target_type, target_id, Some(workspace_id))
         .map(|counts| OutcomeFeedbackSummary::from_counts(&counts))
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to summarize feedback: {error}"),
@@ -6992,6 +7013,53 @@ mod tests {
         assert!(accepted.target_verified);
         assert_eq!(accepted.workspace_id, OUTCOME_TEST_WORKSPACE_ID);
         connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn external_target_feedback_summary_is_workspace_scoped_on_every_receipt() -> TestResult {
+        let (dir, database) = seed_outcome_database("ee-outcome-summary-scope")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                OUTCOME_OTHER_WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: dir.path().join("other").to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let mut options =
+            native_rule_outcome_options(&database, "helpful", "fb_00000000000000000000000722");
+        options.target_type = "source".to_owned();
+        options.target_id = "shared-build-runner".to_owned();
+        options.workspace_id = Some(OUTCOME_TEST_WORKSPACE_ID.to_owned());
+        let first = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(first.feedback.positive_count, 1);
+
+        options.workspace_id = Some(OUTCOME_OTHER_WORKSPACE_ID.to_owned());
+        options.event_id = Some("fb_00000000000000000000000723".to_owned());
+        options.signal = "harmful".to_owned();
+        options.harmful_per_source_per_hour = 1;
+        options.dry_run = true;
+        let preview = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(preview.feedback.total_count, 0);
+
+        options.dry_run = false;
+        let recorded = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(recorded.status, OutcomeRecordStatus::Recorded);
+        assert_eq!(recorded.feedback.total_count, 1);
+        assert_eq!(recorded.feedback.negative_count, 1);
+        let replay = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(replay.status, OutcomeRecordStatus::AlreadyRecorded);
+        assert_eq!(replay.feedback, recorded.feedback);
+
+        options.event_id = Some("fb_00000000000000000000000724".to_owned());
+        let held = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(held.status, OutcomeRecordStatus::Quarantined);
+        assert_eq!(held.feedback, recorded.feedback);
+        Ok(())
     }
 
     #[test]

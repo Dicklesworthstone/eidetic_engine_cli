@@ -24640,12 +24640,24 @@ impl DbConnection {
         target_type: &str,
         target_id: &str,
     ) -> Result<FeedbackCounts> {
+        self.count_feedback_by_signal_in_scope(target_type, target_id, None)
+    }
+
+    /// Restrict an outcome receipt to its addressed workspace. External target
+    /// IDs (such as experiment names) can recur in a shared database.
+    pub(crate) fn count_feedback_by_signal_in_scope(
+        &self,
+        target_type: &str,
+        target_id: &str,
+        workspace_id: Option<&str>,
+    ) -> Result<FeedbackCounts> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT signal, SUM(weight) as total_weight, COUNT(*) as count FROM feedback_events WHERE target_type = ?1 AND target_id = ?2 GROUP BY signal",
+            "SELECT signal, SUM(weight) as total_weight, COUNT(*) as count FROM feedback_events WHERE target_type = ?1 AND target_id = ?2 AND (?3 IS NULL OR workspace_id = ?3) GROUP BY signal",
             &[
                 Value::Text(target_type.to_string()),
                 Value::Text(target_id.to_string()),
+                workspace_id.map_or(Value::Null, |id| Value::Text(id.to_owned())),
             ],
         )?;
 
