@@ -1560,16 +1560,26 @@ fn embedding_search_publishes_first_generation_from_deferred_remember() {
     });
 }
 
-/// What the pre-read repair's own processor says about an unpublished delta.
+/// Why the pre-read repair left a delta unpublished, as far as a test can see.
 ///
-/// Reconciliation only logs why a delta did not publish, and that log is not
-/// captured here, so a red could not name its cause (bd-q1e4y: C75z5 at
-/// 3ed75b4a1 showed the delta embedded once, the index one generation behind,
-/// and nothing else). This renders the job rows, then runs the same bounded
-/// coalesced processor the repair runs, on the same store, with the same
-/// one-job limit (both callers queue exactly one delta), and renders its
-/// result. Call it only from a failing assertion's message: it can publish,
-/// and by then the observation it would change has already been made.
+/// The repair can stop at three stages, and it reports none of them to the
+/// caller, only to tracing, which is not captured here. So a red could not
+/// name its cause (bd-q1e4y: C75z5 at 3ed75b4a1 showed one embed call since
+/// the remember, the index one generation behind, and nothing else). That
+/// one call fits the query alone, so the delta may never have been embedded.
+/// This renders the job rows and re-evaluates each stage in the search's
+/// order, on the same store:
+/// 1. the source upper bound against the full-rebuild ceiling, where `Some(false)`
+///    selects the bounded path;
+/// 2. the bounded generation gap, where `Ok(None)` skips the repair;
+/// 3. the bounded coalesced processor, with the same one-job limit, since both
+///    callers queue exactly one delta. A job reported skipped as "deferred"
+///    means the streamed delta was declined. The census beside it shows the
+///    index directory against that path's generation limits: 512 entries,
+///    64 MiB, depth 16, regular files only, and no symlinked component.
+///
+/// Call it only from a failing assertion's message. The processor can
+/// publish, and by then the observation it would change has been made.
 #[cfg(unix)]
 fn delta_publication_probe(fixture: &Fixture, options: &SearchOptions) -> String {
     let jobs = fixture
@@ -1580,23 +1590,48 @@ fn delta_publication_probe(fixture: &Fixture, options: &SearchOptions) -> String
                 .map(|job| format!("{}={}:{:?}", job.id, job.status, job.error_message))
                 .collect::<Vec<_>>()
         });
+    let index_dir = options.resolve_index_dir();
+    let census = index_dir_census(&index_dir);
+    let symlink_free = crate::core::index::ensure_index_path_has_no_symlinks(
+        &index_dir,
+        "probe the index directory",
+    );
+    let status_options = IndexStatusOptions {
+        workspace_path: options.workspace_path.clone(),
+        database_path: options.database_path.clone(),
+        index_dir: Some(index_dir.clone()),
+    };
+    let upper_bound_fits = crate::core::index::index_source_upper_bound_fits(
+        &status_options,
+        u32::try_from(super::SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS).unwrap_or(u32::MAX),
+    );
     let processing = crate::core::index::IndexProcessingOptions {
         workspace_path: options.workspace_path.clone(),
         database_path: options.database_path.clone(),
-        index_dir: Some(options.resolve_index_dir()),
+        index_dir: Some(index_dir),
         dry_run: false,
         job_limit: Some(1),
     };
-    let processed = crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
-        crate::core::index::process_index_jobs_coalesced_with_cx_bounded(
+    let staged = crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+        let gap = crate::core::index::bounded_index_delta_generation_gap(
+            &cx,
+            &status_options,
+            super::SEARCH_INDEX_LARGE_GAP_THRESHOLD,
+        );
+        let processed = crate::core::index::process_index_jobs_coalesced_with_cx_bounded(
             &cx,
             &processing,
             u32::try_from(super::SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS).unwrap_or(u32::MAX),
         )
-        .await
+        .await;
+        (gap, processed)
     });
+    let (gap, processed) = match staged {
+        Ok((gap, processed)) => (format!("{gap:?}"), processed),
+        Err(error) => return format!("jobs before probe {jobs:?}; runtime error: {error:?}"),
+    };
     let processed = match processed {
-        Ok(Ok(report)) => format!(
+        Ok(report) => format!(
             "status {} pending {} completed {} failed {} jobs {:?}",
             report.status.as_str(),
             report.pending_jobs,
@@ -1615,10 +1650,41 @@ fn delta_publication_probe(fixture: &Fixture, options: &SearchOptions) -> String
                 })
                 .collect::<Vec<_>>()
         ),
-        Ok(Err(error)) => format!("processor error: {error:?}"),
-        Err(error) => format!("runtime error: {error:?}"),
+        Err(error) => format!("error: {error:?}"),
     };
-    format!("jobs before probe {jobs:?}; probe {processed}")
+    format!(
+        "jobs before probe {jobs:?}; 1. upper bound fits {upper_bound_fits:?}; \
+         2. bounded gap {gap}; 3. processor {processed}; \
+         index dir {census}, symlink-free {symlink_free:?}"
+    )
+}
+
+/// The index directory as the streamed-delta path measures it: entries,
+/// regular-file bytes and depth below the root, plus anything that is neither
+/// a regular file nor a directory, which that path refuses outright.
+#[cfg(unix)]
+fn index_dir_census(index_dir: &std::path::Path) -> String {
+    let mut pending = vec![(index_dir.to_path_buf(), 0_usize)];
+    let (mut entries, mut bytes, mut depth_seen) = (0_usize, 0_u64, 0_usize);
+    let mut irregular = Vec::new();
+    while let Some((directory, depth)) = pending.pop() {
+        let listing = match std::fs::read_dir(&directory) {
+            Ok(listing) => listing,
+            Err(error) => return format!("unreadable at {}: {error}", directory.display()),
+        };
+        for entry in listing.flatten() {
+            entries += 1;
+            match std::fs::symlink_metadata(entry.path()) {
+                Ok(metadata) if metadata.is_dir() => {
+                    depth_seen = depth_seen.max(depth + 1);
+                    pending.push((entry.path(), depth + 1));
+                }
+                Ok(metadata) if metadata.is_file() => bytes += metadata.len(),
+                _ => irregular.push(entry.file_name()),
+            }
+        }
+    }
+    format!("{entries} entries, {bytes} bytes, depth {depth_seen}, irregular {irregular:?}")
 }
 
 #[cfg(unix)]
