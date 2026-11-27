@@ -9245,14 +9245,7 @@ async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
         // unset would consult the process default, which can select another
         // producer or initialize a lazy downloader on this read-only path.
         && (retrieval_only
-            || (index_dir.exists()
-                // Validate corpus/security before model acquisition, without
-                // comparing against an unrelated warmed process default.
-                // The selected workspace producer is checked before retrieval.
-                && crate::core::index::validate_index_corpus_compatibility_for_lexical_search(
-                    &index_dir,
-                )
-                .is_ok()))
+            || index_admits_workspace_model(cx, options, &database_path, &index_dir).await?)
     {
         let preparation = if retrieval_only {
             crate::core::index::prepare_read_only_search_embedder_for_workspace(
@@ -9486,6 +9479,69 @@ fn finish_search_snapshot<T>(
             }
             Err(error)
         }
+    }
+}
+
+/// Check that model preparation has an admissible corpus to serve. In
+/// particular, a damaged or missing live directory can have a complete
+/// retained generation built by the workspace's selected producer. Release
+/// these inspection handles before model I/O. Retrieval repeats selection
+/// with its own source snapshot, lease and the actual query embedder.
+async fn index_admits_workspace_model(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    database_path: &Path,
+    index_dir: &Path,
+) -> Result<bool, SearchError> {
+    search_checkpoint(cx)?;
+    if index_dir.exists()
+        && crate::core::index::validate_index_corpus_compatibility_for_lexical_search(index_dir)
+            .is_ok()
+    {
+        return Ok(true);
+    }
+    #[cfg(unix)]
+    {
+        if !database_path.exists() {
+            return Ok(false);
+        }
+        let lease = match pin_search_generation(cx, index_dir).await {
+            Ok(lease) => lease,
+            Err(SearchError::NoIndex) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if !lease
+            .has_retained_generation_directory(cx, index_dir)
+            .map_err(map_index_generation_error)?
+        {
+            return Ok(false);
+        }
+        let db = DbConnection::open_file_read_only(database_path)
+            .map_err(|error| SearchError::Index(error.to_string()))?;
+        let Some(workspace) = crate::core::workspace::addressed_workspace_row(
+            &db,
+            &options.workspace_path,
+            database_path,
+        )
+        .map_err(|error| SearchError::WorkspaceBinding(Box::new(error)))?
+        else {
+            return Ok(false);
+        };
+        let Some(generation) = db
+            .get_workspace_generation(&workspace.id)
+            .map_err(|error| SearchError::Index(error.to_string()))?
+        else {
+            return Ok(false);
+        };
+        lease
+            .index_for_snapshot_with_identity(cx, index_dir, generation, None)
+            .map_err(map_index_generation_error)?;
+        Ok(true)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (options, database_path);
+        Ok(false)
     }
 }
 
@@ -12513,11 +12569,7 @@ pub async fn run_diag_search_with_cx(
         finish_search_snapshot(snapshot, Ok(()), &database_path)?;
     }
     let fast_embedder = if options.execution_source_mode().uses_embeddings()
-        && index_dir.exists()
-        // Producer admission follows workspace model selection. A warmed
-        // process default must not prevent selecting the workspace's model.
-        && crate::core::index::validate_index_corpus_compatibility_for_lexical_search(&index_dir)
-            .is_ok()
+        && index_admits_workspace_model(cx, options, &database_path, &index_dir).await?
     {
         Some(
             prepare_search_embedder_for_workspace(
@@ -20023,6 +20075,34 @@ mod tests {
                 before,
                 "producer recovery must remain read-only"
             );
+
+            // The ordinary search and diagnostic entry points used to prepare
+            // the workspace producer only if the live directory was readable.
+            // Force selection from the retained snapshot in both recovery states.
+            let live_index = fixture.index();
+            let saved_live = live_index.with_file_name("damaged-live-fixture");
+            std::fs::rename(live_index, &saved_live).expect("simulate interrupted publication");
+            for missing in [true, false] {
+                if !missing {
+                    std::fs::create_dir(live_index).expect("make incomplete live generation");
+                    std::fs::write(live_index.join("meta.json"), b"{")
+                        .expect("invalid live metadata");
+                }
+                let calls = selected.calls.load(Ordering::Relaxed);
+                let ordinary = run_search(&fixture.options).expect("retained workspace search");
+                assert_hybrid(&ordinary);
+                let diagnostic =
+                    run_diag_search(&fixture.options).expect("retained workspace diagnostics");
+                assert_hybrid(&diagnostic.final_report);
+                assert!(selected.calls.load(Ordering::Relaxed) >= calls + 2);
+                assert_eq!(foreign.calls.load(Ordering::Relaxed), foreign_calls);
+            }
+            std::fs::rename(
+                live_index,
+                live_index.with_file_name("incomplete-generation-fixture"),
+            )
+            .expect("save incomplete generation");
+            std::fs::rename(&saved_live, live_index).expect("restore live generation");
 
             let index = fixture.index();
             let producer = selected.clone();
