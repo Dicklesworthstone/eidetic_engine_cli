@@ -1234,14 +1234,13 @@ fn anti_pattern_index_insert_failure_preserves_committed_feedback() {
         .execute_raw("DROP TRIGGER reject_anti_pattern_index")
         .unwrap();
     cleanup.close().unwrap();
-    assert_eq!(
-        record_outcome(&options).unwrap().status,
-        OutcomeRecordStatus::AlreadyRecorded
-    );
-    assert_eq!(fixture.feedback_state(), committed);
 
     // A later observation may retry the optional proposal under its own job
-    // identity, while replaying the committed event never learns it twice.
+    // identity, while replaying a committed event never learns it twice. The
+    // observation goes first: since bc47f86a8 an exact replay of event 3
+    // repairs the failed proposal under event 3's job identity, which
+    // anti_pattern_failed_postcommit_proposal_is_repaired_by_exact_outcome_replay
+    // covers.
     let next_options = fixture.anti_pattern_options(4);
     let next = record_outcome(&next_options).unwrap();
     assert_eq!(next.status, OutcomeRecordStatus::Recorded);
@@ -1272,12 +1271,15 @@ fn anti_pattern_index_insert_failure_preserves_committed_feedback() {
     assert_eq!(job.status, "pending");
     assert_eq!(job.document_id.as_deref(), Some(MEMORY));
     fixture.assert_pending_memory_jobs(5);
+    // With the candidate in place, neither replay proposes or learns again.
     let retried = fixture.feedback_state();
-    assert_eq!(
-        record_outcome(&next_options).unwrap().status,
-        OutcomeRecordStatus::AlreadyRecorded
-    );
-    assert_eq!(fixture.feedback_state(), retried);
+    for replay in [&options, &next_options] {
+        assert_eq!(
+            record_outcome(replay).unwrap().status,
+            OutcomeRecordStatus::AlreadyRecorded
+        );
+        assert_eq!(fixture.feedback_state(), retried);
+    }
 }
 
 #[test]
