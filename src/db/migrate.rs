@@ -593,6 +593,22 @@ fn copy_workspace_to_shard(
     let target_tables = source_user_tables(&target)?;
     attach_source_database(&target, &preserved_source.preserved_path)?;
     let copy_result = target.with_transaction_error(|| {
+        // Counts below are scoped to the requested workspace. An unregistered
+        // destination can satisfy all those counts while retaining a second
+        // workspace's memories. Reject it before copying or issuing a receipt.
+        let foreign_workspace = target.query(
+            "SELECT 1 FROM main.workspaces WHERE id IS NULL OR id <> ?1 LIMIT 1",
+            &[Value::Text(workspace.workspace_id.clone())],
+        )?;
+        if !foreign_workspace.is_empty() {
+            return Err(ShardCopyError::Verification(storage_error(
+                format!(
+                    "Shard {} already contains a different workspace.",
+                    shard_path.display()
+                ),
+                Some("Inspect the existing shard and choose a clean shard directory.".to_owned()),
+            )));
+        }
         let counts = || {
             workspace_row_counts_excluding_migration_audit(
                 &target,
@@ -1757,6 +1773,52 @@ mod tests {
         assert_eq!(
             blake3_file_hash(&image.preserved_path).map_err(|error| error.to_string())?,
             (image.preserved_hash, image.preserved_size_bytes)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fanout_refuses_to_register_a_shard_containing_another_workspace() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let source_path = temp.path().join("ee.db");
+        let shard_root = temp.path().join("shards");
+        let source = DbConnection::open_file(&source_path).map_err(|error| error.to_string())?;
+        apply_schema_migrations_deterministically(&source).map_err(|error| error.to_string())?;
+        seed_two_workspace_source(&source)?;
+        source
+            .wal_checkpoint(WalCheckpointMode::Truncate)
+            .map_err(|error| error.to_string())?;
+        drop(source);
+
+        let plan = plan_shard_fanout_migration_from_database(source_path.clone(), Some(shard_root))
+            .map_err(|error| error.to_string())?;
+        let first = plan.workspaces.first().ok_or("missing workspace")?;
+        let target_path = first.shard_path.as_ref().ok_or("missing shard")?;
+        create_dir_all(target_path.parent().ok_or("missing parent")?)
+            .map_err(|error| error.to_string())?;
+        // Every planned row is present, as are the rows of a second workspace.
+        // There is no catalog receipt to detect this destination by file hash.
+        fs::copy(&source_path, target_path).map_err(|error| error.to_string())?;
+        let error = apply_shard_fanout_migration(&plan).expect_err("mixed workspace shard");
+        assert!(error.to_string().contains("contains a different workspace"));
+        let target = DbConnection::open_file_read_only(target_path)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(scalar_count(&target, "SELECT COUNT(*) FROM workspaces")?, 2);
+        assert_eq!(scalar_count(&target, "SELECT COUNT(*) FROM memories")?, 2);
+        assert_eq!(
+            scalar_count(
+                &target,
+                "SELECT COUNT(*) FROM audit_log WHERE action = 'migration.shard_fanout'",
+            )?,
+            0
+        );
+        let catalog_path = plan.catalog_path.as_ref().ok_or("missing catalog")?;
+        let catalog = DbConnection::open_file_read_only(catalog_path)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            catalog_target_hash(&catalog, &first.workspace_id)
+                .map_err(|error| error.to_string())?
+                .is_none()
         );
         Ok(())
     }
