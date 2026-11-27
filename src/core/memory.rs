@@ -292,6 +292,47 @@ pub struct RememberMemoryReport {
     pub curation_candidate_degradations: Vec<RememberSuggestedLinkDegradation>,
     /// Near-duplicate memories surfaced for explicit agent review.
     pub near_duplicates: Vec<RememberNearDuplicate>,
+    /// Set when this write was held as part of a flood from its agent (ADR
+    /// 0059). The memory is stored, but search, packs and curation withhold
+    /// it until `ee outcome quarantine release` or `--reject` reviews the hold.
+    pub write_immune_hold: Option<RememberWriteImmuneHold>,
+}
+
+/// Degraded code reported when `ee remember` holds a write for review.
+pub const REMEMBER_WRITE_IMMUNE_HELD_CODE: &str = "write_immune_quarantined";
+
+/// The pending review hold a flooding `ee remember` wrote beside its memory.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RememberWriteImmuneHold {
+    /// The pending `feedback_quarantine` row that withholds the memory.
+    pub quarantine_id: String,
+    /// The agent whose write window tripped the check.
+    pub source_id: String,
+    /// The thresholds it exceeded, such as `near_duplicate_ratio_exceeded`.
+    pub reason_codes: Vec<String>,
+}
+
+impl RememberWriteImmuneHold {
+    /// Severity of the degraded entry, as for the outcome quarantine codes:
+    /// the write landed, but retrieval withholds it.
+    pub const SEVERITY: &'static str = "warning";
+
+    #[must_use]
+    pub fn degraded_message(&self) -> String {
+        format!(
+            "Stored, but held for review as part of a write flood from agent {} ({}). Search, context packs and curation withhold it until the hold is reviewed.",
+            self.source_id,
+            self.reason_codes.join(", ")
+        )
+    }
+
+    #[must_use]
+    pub fn degraded_repair(&self) -> String {
+        format!(
+            "ee outcome quarantine release {} keeps the memory; add --reject to tombstone it",
+            self.quarantine_id
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1720,6 +1761,8 @@ fn remember_memory_outcome_inner_with_store_and_batch_session(
             curation_candidate_status: "dry_run_not_evaluated".to_owned(),
             curation_candidate_degradations: Vec::new(),
             near_duplicates: Vec::new(),
+            // A dry run reads no write window, so it cannot predict a hold.
+            write_immune_hold: None,
         })));
     }
 
@@ -1849,9 +1892,10 @@ fn remember_memory_outcome_inner_with_store_and_batch_session(
         // capability existed everywhere except at the one call site that feeds it.
         //
         // Necessary, not sufficient: this operation goes to
-        // run_one_shot_write_intake below, which never records a write-stream
-        // observation. Only the WriteOwner actor does, so the layer still sees no
-        // `ee remember` (bd-write-immune-inert-in-production-qnc87).
+        // run_one_shot_write_intake below, which records no write-stream
+        // observation, and each `ee remember` is its own process. So
+        // remember_write_immune_hold rebuilds the window from stored rows
+        // (bd-write-immune-inert-in-production-qnc87).
         //
         // The agent identity is the same snapshot used for trust above.
         // Sandbox imports without an agent still have an external source;
@@ -1868,11 +1912,20 @@ fn remember_memory_outcome_inner_with_store_and_batch_session(
         provenance_uri: prepared.provenance_uri.clone(),
         observed_at_ms: u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
     };
+    let is_batch_session = owned_session.is_none();
+    // Outside the workspace lock, like the embedding work above: a concurrent
+    // write still in flight is missed, which can only withhold a hold.
+    let write_immune_hold = remember_write_immune_hold(
+        &connection,
+        &write_operation,
+        origin,
+        is_batch_session,
+        &memory_id,
+    )?;
     // Serialize only source-of-truth mutations. Expensive embedding
     // preparation above and derived index publication below have their own
     // consistency boundaries and must not consume another writer's
     // workspace-lock budget.
-    let is_batch_session = owned_session.is_none();
     let workspace_write_lock =
         acquire_remember_workspace_lock(&connection, &prepared.workspace_id, &memory_id)?;
     let embed_dedup_decision = remember_embed_dedup_decision_from_probe_with_batch_session(
@@ -1907,6 +1960,7 @@ fn remember_memory_outcome_inner_with_store_and_batch_session(
                 audit_lane,
                 idempotency,
                 &prepared.creation_companions,
+                write_immune_hold.as_ref(),
             )
         },
     )?;
@@ -2186,6 +2240,7 @@ fn remember_memory_outcome_inner_with_store_and_batch_session(
         curation_candidate_status,
         curation_candidate_degradations,
         near_duplicates,
+        write_immune_hold: write_immune_hold.map(|hold| hold.report),
     };
     if let Some(owned) = owned_session
         && let Err(error) = owned.connection.close()
@@ -5314,6 +5369,7 @@ pub(crate) fn record_prepared_remember_txn_write_in_txn(
         None,
         None,
         &write.finish.prepared.creation_companions,
+        None,
     )
 }
 
@@ -5337,6 +5393,7 @@ fn record_remembered_memory_in_txn(
     audit_lane: Option<&AuditLaneHandle>,
     idempotency: Option<RememberIdempotencyRequest<'_>>,
     creation_companions: &PreparedRememberCreationCompanions,
+    write_immune_hold: Option<&PreparedRememberWriteImmuneHold>,
 ) -> crate::db::Result<()> {
     match embed_dedup_decision.content_simhash {
         Some(content_simhash) => connection.insert_memory_with_content_simhash(
@@ -5390,7 +5447,163 @@ fn record_remembered_memory_in_txn(
             memory_id: memory_id.to_owned(),
         })?;
     }
+    if let Some(hold) = write_immune_hold {
+        crate::core::outcome::insert_feedback_quarantine_audited_with_id_in_txn(
+            connection,
+            &hold.report.quarantine_id,
+            &hold.input,
+            Some("ee remember"),
+            hold.audit_id.clone(),
+        )?;
+    }
     creation_companions.persist_in_txn(connection)
+}
+
+/// The `mem_*` id at the edge of millisecond `ms`: below every UUIDv7 minted
+/// in it, or with `upper` above every one.
+fn memory_id_bound_at_ms(ms: u64, upper: bool) -> String {
+    let mut bytes = [if upper { u8::MAX } else { 0 }; 16];
+    bytes[..6].copy_from_slice(&ms.to_be_bytes()[2..]);
+    crate::models::MemoryId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+}
+
+/// A write-immune hold decided before the remember transaction and written
+/// inside it, so the memory never exists without its hold.
+struct PreparedRememberWriteImmuneHold {
+    report: RememberWriteImmuneHold,
+    input: crate::db::CreateFeedbackQuarantineInput,
+    audit_id: String,
+}
+
+/// Decide whether this `ee remember` belongs to a write flood from its agent
+/// (ADR 0059).
+///
+/// Each `ee remember` is its own process, so an in-memory window would only
+/// ever see one write. The window is rebuilt instead from this workspace's
+/// rows that the same agent wrote in the last hour. Only manual writes from a
+/// named agent are evaluated. An anonymous capture names no source to
+/// attribute a flood to, and a sandbox import is bulk by design. A
+/// `--batch` session is bulk capture too, so in one only the near-duplicate
+/// ratio can trip, never the write ceiling.
+fn remember_write_immune_hold(
+    connection: &DbConnection,
+    write_operation: &crate::core::write_owner::WriteOperation,
+    origin: RememberWriteOrigin,
+    is_batch_session: bool,
+    memory_id: &str,
+) -> Result<Option<PreparedRememberWriteImmuneHold>, DomainError> {
+    use crate::core::write_owner::{
+        DEFAULT_WRITE_STREAM_NEAR_DUPLICATE_HAMMING, DEFAULT_WRITE_STREAM_WINDOW_MS,
+        REMEMBER_WRITE_IMMUNE_MIN_WRITES, REMEMBER_WRITE_IMMUNE_WRITES_PER_WINDOW, WriteOperation,
+        WriteStreamObservation, WriteStreamStatsConfig, build_write_immune_quarantine_input,
+        compute_source_write_stats, evaluate_write_immune_quarantine, remember_write_immune_config,
+    };
+
+    if origin != RememberWriteOrigin::Manual {
+        return Ok(None);
+    }
+    let WriteOperation::MemoryCreate { workspace_id, .. } = write_operation else {
+        return Ok(None);
+    };
+    let Some(current) = write_operation.write_stream_observation() else {
+        return Ok(None);
+    };
+    let window_end_ms = current.observed_at_ms;
+    let window_start_ms = window_end_ms.saturating_sub(DEFAULT_WRITE_STREAM_WINDOW_MS);
+    // The newest rows from every agent, as many as the write ceiling, plus
+    // this write are enough to exceed it. A workspace busier than that across
+    // agents undercounts, which can only withhold a hold, never add one.
+    let rows = connection
+        .list_memories_with_ids_between(
+            workspace_id,
+            &memory_id_bound_at_ms(window_start_ms, false),
+            &memory_id_bound_at_ms(window_end_ms, true),
+            REMEMBER_WRITE_IMMUNE_WRITES_PER_WINDOW,
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to read the write-immune window: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    // Oldest first, as near-duplicate counting compares each write with the
+    // ones before it.
+    let prior = rows
+        .iter()
+        .rev()
+        .filter(|row| row.id != memory_id)
+        .filter(|row| {
+            super::memory_scope::memory_producer_agent(row).as_deref()
+                == Some(current.source_id.as_str())
+        })
+        .filter_map(|row| {
+            let created_ms = chrono::DateTime::parse_from_rfc3339(&row.created_at)
+                .ok()
+                .and_then(|created| u64::try_from(created.timestamp_millis()).ok())?;
+            (window_start_ms..=window_end_ms)
+                .contains(&created_ms)
+                .then_some((row, created_ms))
+        })
+        .collect::<Vec<_>>();
+    // Most writes stop here, before any content is hashed or embedded.
+    if prior.len() < REMEMBER_WRITE_IMMUNE_MIN_WRITES.saturating_sub(1) as usize {
+        return Ok(None);
+    }
+    let mut observations = prior
+        .into_iter()
+        .map(|(row, created_ms)| {
+            WriteStreamObservation::memory_create(
+                current.source_id.clone(),
+                &row.content,
+                &row.trust_class,
+                row.provenance_uri.as_deref(),
+                created_ms,
+            )
+        })
+        .collect::<Vec<_>>();
+    observations.push(current.clone());
+    let config = WriteStreamStatsConfig::new(
+        window_start_ms,
+        window_end_ms,
+        DEFAULT_WRITE_STREAM_NEAR_DUPLICATE_HAMMING,
+    );
+    let Some(stats) = compute_source_write_stats(&observations, config)
+        .into_iter()
+        .find(|stats| stats.source_id == current.source_id)
+    else {
+        return Ok(None);
+    };
+    if stats.write_count < REMEMBER_WRITE_IMMUNE_MIN_WRITES {
+        return Ok(None);
+    }
+    let mut thresholds = remember_write_immune_config();
+    if is_batch_session {
+        thresholds.max_writes_per_window = u32::MAX;
+    }
+    let decision = evaluate_write_immune_quarantine(&stats, &thresholds);
+    let recorded_at = Utc::now().to_rfc3339();
+    let Some(mut input) = build_write_immune_quarantine_input(
+        &decision,
+        workspace_id,
+        memory_id,
+        &recorded_at,
+        "",
+        None,
+    ) else {
+        return Ok(None);
+    };
+    input.raw_event_hash = crate::core::outcome::write_immune_quarantine_hash(&input);
+    Ok(Some(PreparedRememberWriteImmuneHold {
+        report: RememberWriteImmuneHold {
+            quarantine_id: crate::core::outcome::generate_feedback_quarantine_id(),
+            source_id: decision.source_id.clone(),
+            reason_codes: decision
+                .reasons
+                .iter()
+                .map(|reason| reason.code.to_owned())
+                .collect(),
+        },
+        input,
+        audit_id: crate::db::generate_audit_id(),
+    }))
 }
 
 #[derive(Clone, Copy)]
@@ -5427,6 +5640,7 @@ fn store_remembered_memory_with_retry(
     audit_lane: Option<&AuditLaneHandle>,
     idempotency: Option<RememberIdempotencyRequest<'_>>,
     creation_companions: &PreparedRememberCreationCompanions,
+    write_immune_hold: Option<&PreparedRememberWriteImmuneHold>,
 ) -> Result<RememberPrimaryWriteOutcome, DomainError> {
     for attempt in 0..REMEMBER_CONTENTION_MAX_ATTEMPTS {
         match connection.with_transaction(|| {
@@ -5455,6 +5669,7 @@ fn store_remembered_memory_with_retry(
                 audit_lane,
                 idempotency,
                 creation_companions,
+                write_immune_hold,
             )?;
             Ok(RememberPrimaryWriteOutcome::Created)
         }) {
@@ -5797,6 +6012,9 @@ fn finish_remember_memory_after_primary_commit(
         curation_candidate_status,
         curation_candidate_degradations,
         near_duplicates,
+        // `ee decide` and daemon transactional writes do not run the
+        // write-immune check; only `ee remember` does (ADR 0059).
+        write_immune_hold: None,
     })
 }
 
@@ -15805,6 +16023,7 @@ mod tests {
             Some(&handle),
             None,
             &PreparedRememberCreationCompanions::default(),
+            None,
         )
         .map_err(|error| error.to_string())?;
 
@@ -16070,6 +16289,7 @@ mod tests {
             None,
             None,
             &PreparedRememberCreationCompanions::default(),
+            None,
         )
         .map_err(|error| error.to_string())?;
 
@@ -24725,6 +24945,156 @@ mod tests {
         }
     }
 
+    /// Remember `content` as `agent`, deferring index work so a burst stays cheap.
+    fn remember_as(
+        workspace: &Path,
+        content: &str,
+        agent: Option<&str>,
+    ) -> Result<Box<RememberMemoryReport>, String> {
+        let controls = RememberWriteControls {
+            defer_index_processing: true,
+            ..RememberWriteControls::default()
+        };
+        let options = upgrade_remember_options(workspace, content, 0.8, None, false);
+        upgrade_created_report(
+            remember_memory_with_controls_for_agent(&options, &controls, agent)
+                .map_err(|error| error.message())?,
+            "write-immune burst",
+        )
+    }
+
+    #[test]
+    fn remember_holds_a_named_agents_repeated_write_once_its_window_has_twenty() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let content = "Retry the flaky upload step.";
+        for index in 1..crate::core::write_owner::REMEMBER_WRITE_IMMUNE_MIN_WRITES {
+            let report = remember_as(temp.path(), content, Some("flood-agent"))?;
+            ensure(
+                report.write_immune_hold.is_none(),
+                true,
+                &format!("write {index} is below the minimum sample"),
+            )?;
+        }
+
+        let held = remember_as(temp.path(), content, Some("flood-agent"))?;
+        let hold = held
+            .write_immune_hold
+            .clone()
+            .ok_or("the twentieth identical write is held")?;
+        ensure(
+            hold.source_id.as_str(),
+            "flood-agent",
+            "hold names the agent",
+        )?;
+        ensure(
+            hold.reason_codes,
+            vec!["near_duplicate_ratio_exceeded".to_owned()],
+            "only the near-duplicate ratio trips; evidence ratios are off for remember",
+        )?;
+
+        let connection = open_upgrade_test_db(temp.path())?;
+        let pending = connection
+            .list_feedback_quarantine(&held.workspace_id, Some("pending"))
+            .map_err(|error| error.to_string())?;
+        ensure(pending.len(), 1, "exactly one pending hold")?;
+        ensure(
+            pending[0].id.as_str(),
+            hold.quarantine_id.as_str(),
+            "the report names the stored hold",
+        )?;
+        ensure(
+            pending[0].target_type.as_str(),
+            "memory",
+            "hold targets a memory",
+        )?;
+        ensure(
+            pending[0].target_id.clone(),
+            held.memory_id.to_string(),
+            "hold targets the write that tripped it",
+        )?;
+        ensure(
+            connection
+                .get_memory(&held.memory_id.to_string())
+                .map_err(|error| error.to_string())?
+                .is_some(),
+            true,
+            "a held write is stored, not dropped",
+        )?;
+
+        // The repair the response names must accept the hold remember wrote:
+        // review re-derives its payload hash and refuses any mismatch.
+        let released = crate::core::outcome::review_feedback_quarantine(
+            &crate::core::outcome::OutcomeQuarantineReviewOptions {
+                workspace_path: temp.path(),
+                database_path: None,
+                quarantine_id: &hold.quarantine_id,
+                reject: false,
+                actor: Some("hold-reviewer"),
+                dry_run: false,
+            },
+        )
+        .map_err(|error| error.message())?;
+        ensure(
+            released.status.as_str(),
+            "released",
+            "the hold is reviewable",
+        )
+    }
+
+    #[test]
+    fn remember_never_holds_anonymous_writes_or_an_agents_distinct_writes() -> TestResult {
+        let writes = crate::core::write_owner::REMEMBER_WRITE_IMMUNE_MIN_WRITES + 5;
+
+        let anonymous = upgrade_test_workspace()?;
+        for index in 0..writes {
+            let report = remember_as(anonymous.path(), "Retry the flaky upload step.", None)?;
+            ensure(
+                report.write_immune_hold.is_none(),
+                true,
+                &format!("anonymous write {index} names no source to hold"),
+            )?;
+        }
+
+        let distinct = upgrade_test_workspace()?;
+        for index in 0..writes {
+            // No token is shared between writes, so none is a near-duplicate.
+            let content = (0..8)
+                .map(|word| format!("q{index}z{word}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let report = remember_as(distinct.path(), &content, Some("busy-agent"))?;
+            ensure(
+                report.write_immune_hold.is_none(),
+                true,
+                &format!("distinct write {index} is ordinary bulk capture"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn memory_id_bounds_bracket_every_id_minted_in_their_millisecond() -> TestResult {
+        let minted = MemoryId::now();
+        let ms = u64::from_str_radix(&minted.as_uuid().simple().to_string()[..12], 16)
+            .map_err(|error| error.to_string())?;
+        let minted = minted.to_string();
+        ensure(
+            memory_id_bound_at_ms(ms, false) <= minted,
+            true,
+            "the lower bound sorts at or below the id",
+        )?;
+        ensure(
+            minted <= memory_id_bound_at_ms(ms, true),
+            true,
+            "the upper bound sorts at or above the id",
+        )?;
+        ensure(
+            memory_id_bound_at_ms(ms, true) < memory_id_bound_at_ms(ms + 1, false),
+            true,
+            "consecutive milliseconds do not overlap",
+        )
+    }
+
     #[test]
     fn controlled_remember_uses_caller_attribution_and_retains_receipt_on_replay() -> TestResult {
         for caller in [Some("remote-remember-caller"), None] {
@@ -25335,6 +25705,7 @@ mod tests {
                     creation_companions: RememberCreationCompanions::default(),
                 }),
                 &PreparedRememberCreationCompanions::default(),
+                None,
             );
             ensure(
                 result.is_err(),
@@ -25401,6 +25772,7 @@ mod tests {
                     creation_companions: RememberCreationCompanions::default(),
                 }),
                 &PreparedRememberCreationCompanions::default(),
+                None,
             )
             .map_err(|error| error.message())?;
             ensure(

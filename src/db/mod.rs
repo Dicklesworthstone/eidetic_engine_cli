@@ -29885,6 +29885,37 @@ impl DbConnection {
             .collect()
     }
 
+    /// A workspace's memories whose ids fall in `min_id..=max_id`, highest id
+    /// first, at most `limit`. Tombstoned and superseded rows are included,
+    /// because a write-rate window counts writes rather than live memories.
+    ///
+    /// Ids minted by `MemoryId::now` are UUIDv7 in an order-preserving
+    /// encoding, so an id range is a creation-time range read from the
+    /// primary key. `memories` has no `created_at` index. Ids derived from a
+    /// hash (team inbound) fall outside a narrow range almost surely; the
+    /// caller still checks `created_at` itself.
+    pub(crate) fn list_memories_with_ids_between(
+        &self,
+        workspace_id: &str,
+        min_id: &str,
+        max_id: &str,
+        limit: u32,
+    ) -> Result<Vec<StoredMemory>> {
+        self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE id >= ?2 AND id <= ?3 AND workspace_id = ?1 ORDER BY id DESC LIMIT ?4",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(min_id.to_owned()),
+                Value::Text(max_id.to_owned()),
+                Value::BigInt(i64::from(limit)),
+            ],
+        )?
+        .iter()
+        .map(stored_memory_from_row)
+        .collect()
+    }
+
     /// Test conflicting lineage inside a bounded source set without loading
     /// every incident edge or traversing the graph.
     pub(crate) fn summary_sources_have_conflict(&self, memory_ids: &[&str]) -> Result<bool> {

@@ -242,6 +242,39 @@ pub const DEFAULT_WRITE_IMMUNE_HIGH_TRUST_MISSING_EVIDENCE_RATIO: f32 = 0.20;
 /// Maximum write observations retained by the in-process write-owner diagnostics.
 pub const DEFAULT_WRITE_STREAM_OBSERVATION_CAPACITY: usize = 4_096;
 
+/// `ee remember` evaluates a named agent's window only once it holds this many
+/// writes, so a handful of repeated captures can never trip a ratio.
+pub const REMEMBER_WRITE_IMMUNE_MIN_WRITES: u32 = 20;
+
+/// `ee remember`'s per-agent write ceiling for one window. Legitimate bulk
+/// capture is bursty, so rate alone trips only far above ordinary use; the
+/// near-duplicate ratio is what identifies a flood.
+pub const REMEMBER_WRITE_IMMUNE_WRITES_PER_WINDOW: u32 = 500;
+
+/// `ee remember`'s near-duplicate ratio limit: more than half of an agent's
+/// window repeating earlier writes is a loop, not capture.
+pub const REMEMBER_WRITE_IMMUNE_NEAR_DUPLICATE_RATIO: f32 = 0.5;
+
+/// Thresholds for the write-immune check on `ee remember` (ADR 0059).
+///
+/// The write ceiling is [`REMEMBER_WRITE_IMMUNE_WRITES_PER_WINDOW`], not the
+/// harmful-feedback rate, and the near-duplicate limit is
+/// [`REMEMBER_WRITE_IMMUNE_NEAR_DUPLICATE_RATIO`]. Both evidence ratios are
+/// off. A remember without `--source` records no provenance, which is the
+/// ordinary case, and a named agent's manual remember is stored as
+/// `human_explicit`, one of the default high-trust classes. Either ratio
+/// would hold every agent's twentieth ordinary write in an hour.
+#[must_use]
+pub fn remember_write_immune_config() -> WriteImmuneQuarantineConfig {
+    WriteImmuneQuarantineConfig {
+        max_writes_per_window: REMEMBER_WRITE_IMMUNE_WRITES_PER_WINDOW,
+        max_near_duplicate_ratio: REMEMBER_WRITE_IMMUNE_NEAR_DUPLICATE_RATIO,
+        max_missing_evidence_ratio: 1.0,
+        max_high_trust_missing_evidence_ratio: 1.0,
+        ..WriteImmuneQuarantineConfig::default()
+    }
+}
+
 /// Default wait-free write-hot-path enqueue capacity.
 pub const DEFAULT_WRITE_HOT_PATH_V2_QUEUE_CAPACITY: usize = DEFAULT_SPOOL_MAX_PENDING;
 

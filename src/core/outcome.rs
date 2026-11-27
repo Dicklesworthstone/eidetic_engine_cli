@@ -4650,7 +4650,7 @@ fn generate_feedback_event_id_seeded(determinism: &mut Deterministic<Seed>) -> S
     format!("fb_{payload}")
 }
 
-fn generate_feedback_quarantine_id() -> String {
+pub(crate) fn generate_feedback_quarantine_id() -> String {
     let mut payload = uuid::Uuid::now_v7().simple().to_string();
     payload.truncate(26);
     format!("fq_{payload}")

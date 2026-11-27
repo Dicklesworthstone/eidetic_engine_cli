@@ -59754,6 +59754,13 @@ impl RememberMemoryReport {
             line.push_str(")\n");
             output.push_str(&line);
         }
+        if let Some(hold) = &self.write_immune_hold {
+            output.push_str(&format!(
+                "  Held for review ({}): run `ee outcome quarantine release {}` to keep it or add `--reject` to tombstone it\n",
+                hold.reason_codes.join(", "),
+                hold.quarantine_id
+            ));
+        }
         if !self.dry_run && !self.auto_links.is_empty() {
             output.push_str(&format!("  Auto links: {}\n", self.auto_links.len()));
         }
@@ -59955,8 +59962,12 @@ impl RememberMemoryReport {
             .field_raw("near_duplicates", &near_duplicates_json)
             .field_str("redaction_status", &self.redaction_status)
             .field_bool("policy_bypass_used", self.policy_bypass.is_some())
-            .field_raw("policy_bypass", &policy_bypass_json)
-            .field_raw("degraded", &degraded_json);
+            .field_raw("policy_bypass", &policy_bypass_json);
+        // Present only on a held write, so every other remember is unchanged.
+        if let Some(hold) = &self.write_immune_hold {
+            data.field_raw("write_immune_hold", &Self::write_immune_hold_json(hold));
+        }
+        data.field_raw("degraded", &degraded_json);
 
         let mut envelope = crate::output::JsonBuilder::new();
         envelope
@@ -60188,26 +60199,49 @@ impl RememberMemoryReport {
     }
 
     fn remember_degraded_json(&self) -> String {
-        self.policy_bypass.as_ref().map_or_else(
-            || "[]".to_owned(),
-            |bypass| format!("[{}]", self.policy_bypass_json_for_degraded(bypass)),
-        )
+        let mut entries = Vec::new();
+        if let Some(bypass) = &self.policy_bypass {
+            entries.push(self.policy_bypass_json_for_degraded(bypass));
+        }
+        if let Some(hold) = &self.write_immune_hold {
+            entries.push(write_immune_hold_degraded_json(hold));
+        }
+        format!("[{}]", entries.join(","))
     }
 
     fn remember_response_degraded_json(&self) -> String {
-        self.policy_bypass.as_ref().map_or_else(
-            || "[]".to_owned(),
-            |bypass| {
-                use crate::output::escape_json_string;
+        use crate::output::escape_json_string;
 
-                format!(
-                    r#"[{{"code":"{}","severity":"{}","message":"{}","repair":"{}"}}]"#,
-                    escape_json_string(&bypass.code),
-                    escape_json_string(&bypass.severity),
-                    escape_json_string(&bypass.message),
-                    escape_json_string(&bypass.repair),
-                )
-            },
+        let mut entries = Vec::new();
+        if let Some(bypass) = &self.policy_bypass {
+            entries.push(format!(
+                r#"{{"code":"{}","severity":"{}","message":"{}","repair":"{}"}}"#,
+                escape_json_string(&bypass.code),
+                escape_json_string(&bypass.severity),
+                escape_json_string(&bypass.message),
+                escape_json_string(&bypass.repair),
+            ));
+        }
+        if let Some(hold) = &self.write_immune_hold {
+            entries.push(write_immune_hold_degraded_json(hold));
+        }
+        format!("[{}]", entries.join(","))
+    }
+
+    fn write_immune_hold_json(hold: &crate::core::memory::RememberWriteImmuneHold) -> String {
+        use crate::output::escape_json_string;
+
+        let reason_codes = hold
+            .reason_codes
+            .iter()
+            .map(|code| format!("\"{}\"", escape_json_string(code)))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{"quarantine_id":"{}","source_id":"{}","reason_codes":[{}]}}"#,
+            escape_json_string(&hold.quarantine_id),
+            escape_json_string(&hold.source_id),
+            reason_codes
         )
     }
 
@@ -60226,6 +60260,18 @@ impl RememberMemoryReport {
             escape_json_string(&bypass.kind)
         )
     }
+}
+
+fn write_immune_hold_degraded_json(hold: &crate::core::memory::RememberWriteImmuneHold) -> String {
+    use crate::output::escape_json_string;
+
+    format!(
+        r#"{{"code":"{}","severity":"{}","message":"{}","repair":"{}"}}"#,
+        crate::core::memory::REMEMBER_WRITE_IMMUNE_HELD_CODE,
+        crate::core::memory::RememberWriteImmuneHold::SEVERITY,
+        escape_json_string(&hold.degraded_message()),
+        escape_json_string(&hold.degraded_repair()),
+    )
 }
 
 impl WorkflowCloseReport {
@@ -76225,6 +76271,7 @@ mod tests {
             curation_candidate_status: "sentinel-curation-candidate-status".to_owned(),
             curation_candidate_degradations: Vec::new(),
             near_duplicates: Vec::new(),
+            write_immune_hold: None,
         };
 
         let rendered = report.json_output();
@@ -76423,6 +76470,7 @@ mod tests {
                 source: format!("dupsource {nasty}"),
                 next_actions: vec![format!("action {nasty}")],
             }],
+            write_immune_hold: None,
         };
 
         let rendered = report.json_output();
@@ -76540,6 +76588,7 @@ mod tests {
             curation_candidate_status: "not_requested".to_owned(),
             curation_candidate_degradations: Vec::new(),
             near_duplicates: Vec::new(),
+            write_immune_hold: None,
         };
 
         let rendered = report.json_output();
@@ -76680,6 +76729,7 @@ mod tests {
                     "link_or_keep_both".to_owned(),
                 ],
             }],
+            write_immune_hold: None,
         };
 
         let human = report.human_output();

@@ -50,6 +50,31 @@ never a global write stall**, with an orchestrator whitelist for prolific legit
 agents. v1 needs no outcome data; a v2 folds in outcome-weighted reputation once
 the harvester (ADR 0055) exists.
 
+**B, as built (bd-write-immune-inert-in-production-qnc87).** `ee remember` does
+not pass through the write-owner actor, and each invocation is its own process,
+so an in-memory window would only ever hold one write. The check therefore runs
+inside `ee remember`, just before the workspace write lock, over a window rebuilt
+from the stored rows the same agent wrote in the last hour. A concurrent write
+still in flight is missed, which can only withhold a hold. Three things differ
+from the design above:
+
+- **Scope.** Only manual writes from a named agent are evaluated. An anonymous
+  write names no source to hold, and a sandbox import is bulk by design. Inside
+  `ee remember --batch` only the near-duplicate ratio can trip.
+- **Thresholds.** Nothing trips until the window holds 20 writes. Then a write is
+  held when more than half of the window repeats earlier writes, or when the
+  window exceeds 500 writes. Both evidence ratios are off for remember: a
+  remember without `--source` records no provenance, and a named agent's manual
+  remember is stored as `human_explicit`, so either ratio would hold every
+  agent's twentieth ordinary write. No whitelist is configured yet.
+- **The hold.** The memory is stored unchanged, and a pending
+  `feedback_quarantine` row targeting it is written in the same transaction.
+  Search, context packs and curation already withhold a memory with a pending
+  hold. Its trust class is left alone. The response carries
+  `write_immune_quarantined` in `degraded[]` and a `write_immune_hold` object.
+  Review is `ee outcome quarantine release <id>`, which keeps the memory, or
+  with `--reject`, which tombstones it. There is no `ee curate quarantine`.
+
 ## Consequences
 
 - **Easier**: any context-producing command can state "coherent as of generation

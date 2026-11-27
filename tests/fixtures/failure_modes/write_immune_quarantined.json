@@ -1,0 +1,24 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "write_immune_quarantined",
+  "introduced_by": {
+    "bead": "bd-write-immune-inert-in-production-qnc87"
+  },
+  "surfaces": ["remember"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A named agent's ee remember lands in an hour where that agent has already written at least 19 memories in the workspace, and more than half of the window repeats earlier writes (or it exceeds 500 writes). The memory is stored with a pending feedback quarantine hold, so search, context packs and curation withhold it until the hold is reviewed.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "for i in $(seq 1 19); do EE_AGENT_NAME=flood-agent ee remember 'Retry the flaky upload step.' --workspace . --json; done"
+    ],
+    "invocation": "EE_AGENT_NAME=flood-agent ee remember 'Retry the flaky upload step.' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "write_immune_quarantined",
+    "severity": "warning",
+    "message_contains": ["held for review", "write flood from agent flood-agent"],
+    "repair_contains": "ee outcome quarantine release"
+  }
+}

@@ -2335,6 +2335,14 @@ fn remember_report_degraded_entries_json(report: &RememberMemoryReport) -> Vec<J
             "kind": &bypass.kind
         }));
     }
+    if let Some(hold) = &report.write_immune_hold {
+        degraded.push(json!({
+            "code": crate::core::memory::REMEMBER_WRITE_IMMUNE_HELD_CODE,
+            "severity": crate::core::memory::RememberWriteImmuneHold::SEVERITY,
+            "message": hold.degraded_message(),
+            "repair": hold.degraded_repair()
+        }));
+    }
     degraded.extend(
         report
             .suggested_link_degradations

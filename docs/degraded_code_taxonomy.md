@@ -790,7 +790,7 @@ that helper is the thing to change.
 | `cursor_stale` | low | bd-7lvbg.2 — ADR 0063 §5: cursor `dbGeneration` < current workspace generation; honest pagination requires partitioning one generation's result set; repair: re-run without `--cursor`. Wired (bd-7lvbg.3) on schema list, search, memory list, insights, curate candidates, pack, and audit timeline; a rejected cursor yields an empty page plus this entry, never a restarted page |
 | `cursor_invalid` | low | bd-7lvbg.2 — ADR 0063 §5: cursor MAC failure, `paramsHash` mismatch, future generation, dishonest `positionKey`/`droppedCount`, or legacy format (including pre-migration bespoke audit-timeline offset cursors); repair: re-run without `--cursor`. Wired (bd-7lvbg.3) on schema list, search, memory list, insights, curate candidates, pack, and audit timeline; a rejected cursor yields an empty page plus this entry, never a restarted page |
 
-#### Feedback (6)
+#### Feedback (7)
 | Code | Severity | Bead |
 |------|----------|------|
 | `anti_pattern_proposed` | info | bd-17c65.14.12 (N12) |
@@ -799,6 +799,7 @@ that helper is the thing to change.
 | `feedback_quarantine_unavailable` | medium | bd-17c65.10.6 (J6) |
 | `harmful_burst_quarantine` | warning | bd-3qs2i.3.1 (F3) |
 | `sprt_quarantine` | warning | bd-3qs2i.3.1 (F3) |
+| `write_immune_quarantined` | warning | bd-write-immune-inert-in-production-qnc87: a named agent's `ee remember` was held as part of a write flood (ADR 0059); the memory is stored and withheld until `ee outcome quarantine release` reviews it |
 
 #### Why / pack inspection and proof verification (7)
 | Code | Severity | Bead |
