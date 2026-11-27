@@ -675,6 +675,8 @@ pub struct OutcomeQuarantineReviewReport {
     pub dry_run: bool,
     pub feedback_event_id: Option<String>,
     pub audit_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub degraded: Vec<OutcomeDegradation>,
 }
 
 impl OutcomeQuarantineReviewReport {
@@ -690,13 +692,17 @@ impl OutcomeQuarantineReviewReport {
 
     #[must_use]
     pub fn human_summary(&self) -> String {
-        format!(
+        let mut message = format!(
             "Feedback quarantine {}\n  ID: {}\n  Changed: {}\n  Audit: {}\n",
             self.action,
             self.quarantine_id,
             self.changed,
             self.audit_id.as_deref().unwrap_or("none")
-        )
+        );
+        for entry in &self.degraded {
+            message.push_str(&format!("  {}: {}\n", entry.code, entry.message));
+        }
+        message
     }
 }
 
@@ -742,7 +748,7 @@ pub struct OutcomeRecordReport {
 /// `details` payload for structured per-code metadata. Lives next to
 /// `OutcomeRecordReport` rather than at the model layer because the only
 /// emitter today is the outcome write path.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct OutcomeDegradation {
     pub code: String,
     pub severity: String,
@@ -2409,6 +2415,21 @@ fn propose_anti_pattern_candidate_in_transaction(
         return Ok(None);
     }
 
+    // Another source's pending review still holds this memory, even if the
+    // just-released observation itself helped establish a valid quorum.
+    let pending = connection
+        .query(
+            "SELECT 1 FROM feedback_quarantine WHERE workspace_id = ?1 AND target_type = 'memory' AND target_id = ?2 AND status = 'pending' LIMIT 1",
+            &[
+                sqlmodel_core::Value::Text(workspace_id.to_owned()),
+                sqlmodel_core::Value::Text(target_id.to_owned()),
+            ],
+        )
+        .map_err(anti_pattern_feedback_storage_error)?;
+    if !pending.is_empty() {
+        return Ok(None);
+    }
+
     let candidate_id = anti_pattern_candidate_id(workspace_id, target_id);
     if connection
         .get_curation_candidate(workspace_id, &candidate_id)
@@ -2795,7 +2816,7 @@ pub fn review_feedback_quarantine(
 
     let action = if options.reject { "reject" } else { "release" };
     if row.status != "pending" {
-        return Ok(outcome_quarantine_review_report(
+        let mut report = outcome_quarantine_review_report(
             &prepared,
             &quarantine_id,
             QuarantineReviewSummary {
@@ -2803,10 +2824,14 @@ pub fn review_feedback_quarantine(
                 status: "already_reviewed",
                 changed: false,
                 dry_run: options.dry_run,
-                feedback_event_id: row.released_feedback_event_id,
+                feedback_event_id: row.released_feedback_event_id.clone(),
                 audit_id: None,
             },
-        ));
+        );
+        if row.status == "released" && !options.reject && !options.dry_run {
+            complete_released_feedback_proposal(&connection, &row, options.actor, &mut report);
+        }
+        return Ok(report);
     }
     if is_write_immune_quarantine(&row) {
         let summary = review_write_immune_quarantine(&connection, &row, options)?;
@@ -2818,7 +2843,7 @@ pub fn review_feedback_quarantine(
     }
     if options.dry_run {
         if !options.reject {
-            let (event_id, feedback_input) = quarantined_feedback_event(&row)?;
+            let (event_id, feedback_input) = quarantined_feedback_event(&row, None)?;
             validate_quarantined_feedback_target(&connection, &feedback_input, &event_id)?;
         }
         return Ok(outcome_quarantine_review_report(
@@ -2844,7 +2869,7 @@ pub fn review_feedback_quarantine(
         ));
     }
 
-    let (event_id, feedback_input) = quarantined_feedback_event(&row)?;
+    let (event_id, feedback_input) = quarantined_feedback_event(&row, None)?;
     let summary = release_feedback_quarantine_audited(
         &connection,
         &row,
@@ -2852,11 +2877,60 @@ pub fn review_feedback_quarantine(
         &feedback_input,
         options.actor,
     )?;
-    Ok(outcome_quarantine_review_report(
-        &prepared,
-        &quarantine_id,
-        summary,
-    ))
+    let mut report = outcome_quarantine_review_report(&prepared, &quarantine_id, summary);
+    complete_released_feedback_proposal(&connection, &row, options.actor, &mut report);
+    Ok(report)
+}
+
+// A release commits the original observation and its learning first. Its
+// optional proposal can then fail independently and be repaired on exact
+// review replay, just as it can for an ordinary feedback receipt.
+fn complete_released_feedback_proposal(
+    connection: &DbConnection,
+    row: &StoredFeedbackQuarantine,
+    actor: Option<&str>,
+    report: &mut OutcomeQuarantineReviewReport,
+) {
+    if row.target_type != "memory"
+        || !is_harmful_signal(&row.signal)
+        || row.weight <= 0.0
+        || is_write_immune_quarantine(row)
+    {
+        return;
+    }
+    let Some(event_id) = report.feedback_event_id.as_deref() else {
+        return;
+    };
+    let proposed = (|| {
+        let (held_event_id, input) = quarantined_feedback_event(row, Some(event_id))?;
+        if held_event_id != event_id
+            || !matches!(
+                existing_feedback_outcome(connection, event_id, &input)?,
+                Some(ExistingFeedbackOutcome::Recorded)
+            )
+        {
+            return Err(DomainError::Storage {
+                message: "Quarantine release lacks a matching accepted feedback receipt."
+                    .to_owned(),
+                repair: Some("ee doctor".to_owned()),
+            });
+        }
+        maybe_propose_anti_pattern_candidate(
+            connection,
+            &row.workspace_id,
+            &row.target_id,
+            event_id,
+            actor,
+            &mut OutcomeIdSource::Ambient,
+        )
+    })();
+    match proposed {
+        Ok(Some(entry)) => report.degraded.push(entry),
+        Ok(None) => {}
+        Err(error) => report
+            .degraded
+            .push(anti_pattern_proposal_failed_degradation(&error)),
+    }
 }
 
 const WRITE_IMMUNE_QUARANTINE_HASH_PREFIX: &str = "blake3:write-immune-v1:";
@@ -3262,6 +3336,7 @@ fn outcome_quarantine_review_report(
         dry_run: summary.dry_run,
         feedback_event_id: summary.feedback_event_id,
         audit_id: summary.audit_id,
+        degraded: Vec::new(),
     }
 }
 
@@ -3368,11 +3443,20 @@ fn reject_feedback_quarantine_audited(
 
 fn quarantined_feedback_event(
     row: &StoredFeedbackQuarantine,
+    accepted_event_id: Option<&str>,
 ) -> Result<(String, CreateFeedbackEventInput), DomainError> {
+    // The v1 payload hash commits to eventId. Only a stored proposal or an
+    // accepted release receipt can supply the original identity.
     let event_id = row
         .proposed_event_id
-        .clone()
-        .unwrap_or_else(generate_feedback_event_id);
+        .as_deref()
+        .or(row.released_feedback_event_id.as_deref())
+        .or(accepted_event_id)
+        .ok_or_else(|| DomainError::PolicyDenied {
+            message: format!("Quarantined feedback {} lacks the event ID needed to verify its payload.", row.id),
+            repair: Some(format!("ee outcome quarantine release {} --reject", row.id)),
+        })?
+        .to_owned();
     let feedback_input = CreateFeedbackEventInput {
         workspace_id: row.workspace_id.clone(),
         target_type: row.target_type.clone(),
