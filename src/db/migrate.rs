@@ -418,6 +418,7 @@ enum CopyScope {
     WorkspaceRegistry,
     WorkspaceColumn,
     MemoryChild,
+    SentinelResult,
     RuleSourceMemories,
     RuleTags,
     PackItems,
@@ -1234,6 +1235,8 @@ fn ordered_copy_tables(
         "memory_seals",
         "memory_anchors",
         "memory_code_anchor_sources",
+        "memory_sentinel_specs",
+        "memory_sentinel_results",
         "curation_candidates",
         "procedural_rules",
         "rule_source_memories",
@@ -1300,9 +1303,12 @@ fn copy_scope_for_table(table: &str, columns: &[String]) -> CopyScope {
     match table {
         "ee_schema_migrations" | "ee_advisory_locks" => CopyScope::Skip,
         "workspaces" => CopyScope::WorkspaceRegistry,
-        "memory_tags" | "memory_seals" | "memory_anchors" | "memory_code_anchor_sources" => {
-            CopyScope::MemoryChild
-        }
+        "memory_tags"
+        | "memory_seals"
+        | "memory_anchors"
+        | "memory_code_anchor_sources"
+        | "memory_sentinel_specs" => CopyScope::MemoryChild,
+        "memory_sentinel_results" => CopyScope::SentinelResult,
         "rule_source_memories" => CopyScope::RuleSourceMemories,
         "rule_tags" => CopyScope::RuleTags,
         "pack_items" => CopyScope::PackItems,
@@ -1334,6 +1340,12 @@ fn workspace_predicate(
         CopyScope::MemoryChild => Some(format!(
             "EXISTS (SELECT 1 FROM {memories} AS m WHERE m.\"id\" = row.\"memory_id\" AND m.\"workspace_id\" = {workspace})"
         )),
+        CopyScope::SentinelResult => {
+            let specs = table_ref(schema, "memory_sentinel_specs");
+            Some(format!(
+                "row.spec_hash IN (SELECT spec_hash FROM {specs} WHERE memory_id IN (SELECT id FROM {memories} WHERE workspace_id = {workspace}))"
+            ))
+        }
         CopyScope::RuleSourceMemories => Some(format!(
             "EXISTS (SELECT 1 FROM {rules} AS r WHERE r.\"id\" = row.\"rule_id\" AND r.\"workspace_id\" = {workspace}) AND EXISTS (SELECT 1 FROM {memories} AS m WHERE m.\"id\" = row.\"memory_id\" AND m.\"workspace_id\" = {workspace})"
         )),
@@ -1763,6 +1775,20 @@ mod tests {
                 .map_err(|error| error.to_string())?,
             Some(seal)
         );
+        for (shard, spec_hash, status) in [(&shard_a, HASH_A, "fail"), (&shard_b, HASH_B, "pass")] {
+            for table in ["memory_sentinel_specs", "memory_sentinel_results"] {
+                assert_eq!(workspace_a.row_counts_by_table.get(table), Some(&1));
+                assert_eq!(
+                    scalar_count(shard, &format!("SELECT COUNT(*) FROM {table}"))?,
+                    1
+                );
+            }
+            let result = shard
+                .latest_memory_sentinel_result(spec_hash)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "shard lost sentinel result".to_owned())?;
+            assert_eq!(result.status.as_str(), status);
+        }
         assert_shard_audit_chain(&shard_a, WSP_A, MEM_A)?;
         assert_shard_audit_chain(&shard_b, WSP_B, MEM_B)?;
         drop(shard_a);
@@ -1828,6 +1854,18 @@ mod tests {
              ('{MEM_B}', '{WSP_B}', 'semantic', 'fact', 'beta fact', 0.9, 0.8, 0.7, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
         ))
         .map_err(|error| error.to_string())?;
+        for (memory, hash, status) in [(MEM_A, HASH_A, "fail"), (MEM_B, HASH_B, "pass")] {
+            conn.execute_raw(&format!(
+                "INSERT INTO memory_sentinel_specs (spec_hash, memory_id, sentinel_kind, target, expected_predicate, safety_class, provenance, created_at, updated_at) VALUES \
+                 ('{hash}', '{memory}', 'path_exists', 'src/lib.rs', 'exists', 'pure_predicate', 'migration test', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+            ))
+            .map_err(|error| error.to_string())?;
+            conn.execute_raw(&format!(
+                "INSERT INTO memory_sentinel_results (result_hash, spec_hash, status, checked_at, evidence_summary, created_at) VALUES \
+                 ('{hash}', '{hash}', '{status}', '2026-01-01T00:00:00Z', 'checked path', '2026-01-01T00:00:00Z')"
+            ))
+            .map_err(|error| error.to_string())?;
+        }
         conn.execute_raw(&format!(
             "INSERT INTO audit_log (id, workspace_id, timestamp, actor, action, target_type, target_id, details) VALUES \
              ('audit_aaaaaaaaaaaaaaaaaaaaaaaaaa', '{WSP_A}', '2026-01-01T00:00:00Z', 'tester', 'memory.create', 'memory', '{MEM_A}', '{{\"ok\":true}}'), \
