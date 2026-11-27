@@ -393,7 +393,9 @@ mod tests;
 
 #[cfg(test)]
 mod seal_tests {
-    use super::super::super::{ScoreSource, SearchDedupMode, SearchSourceMode, SpeedMode};
+    use super::super::super::{
+        ScoreSource, SearchDedupMode, SearchSourceMode, SpeedMode, simulate_ddl,
+    };
     use super::*;
     use crate::db::{CreateMemoryInput, CreateWorkspaceInput, StoredFeedbackQuarantine};
     use crate::models::MemoryScope;
@@ -480,35 +482,6 @@ mod seal_tests {
             strict_scope: false,
         };
         Ok((temp, options, db))
-    }
-
-    /// One DDL statement of the unavailable-authority simulation, retried on
-    /// the transient contention every product write retries (bd-obslc).
-    ///
-    /// On some workers the rename back, after admit_hits, fails with `database
-    /// is busy (snapshot conflict on pages: )`. At the pinned fsqlite (0.4.10)
-    /// an empty page list is raised only for a commit refused because another
-    /// commit landed after its snapshot or write-generation sample. fsqlite
-    /// expects callers to retry that, and ee classifies it as retryable
-    /// (`sqlite_contention_message_is_retryable`). `execute_raw` is the one
-    /// path that does not retry, because a batch could partially apply; a
-    /// single RENAME cannot. Each retry is printed, so a lane log shows
-    /// whether a green needed one.
-    fn simulate_ddl(db: &DbConnection, sql: &str, step: &str) -> TestResult {
-        const ATTEMPTS: u64 = 5;
-        for attempt in 1..=ATTEMPTS {
-            match db.execute_raw(sql) {
-                Ok(()) => return Ok(()),
-                Err(error)
-                    if attempt < ATTEMPTS && error.to_string().contains("snapshot conflict") =>
-                {
-                    eprintln!("bd-obslc: {step}: attempt {attempt} refused, retrying: {error}");
-                    std::thread::sleep(std::time::Duration::from_millis(20 * attempt));
-                }
-                Err(error) => return Err(format!("{step} (attempt {attempt}): {error}")),
-            }
-        }
-        Err(format!("{step}: no attempt ran"))
     }
 
     fn seal(db: &DbConnection, id: &str) -> TestResult {

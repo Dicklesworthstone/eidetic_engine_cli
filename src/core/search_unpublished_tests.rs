@@ -1560,6 +1560,67 @@ fn embedding_search_publishes_first_generation_from_deferred_remember() {
     });
 }
 
+/// What the pre-read repair's own processor says about an unpublished delta.
+///
+/// Reconciliation only logs why a delta did not publish, and that log is not
+/// captured here, so a red could not name its cause (bd-q1e4y: C75z5 at
+/// 3ed75b4a1 showed the delta embedded once, the index one generation behind,
+/// and nothing else). This renders the job rows, then runs the same bounded
+/// coalesced processor the repair runs, on the same store, with the same
+/// one-job limit (both callers queue exactly one delta), and renders its
+/// result. Call it only from a failing assertion's message: it can publish,
+/// and by then the observation it would change has already been made.
+#[cfg(unix)]
+fn delta_publication_probe(fixture: &Fixture, options: &SearchOptions) -> String {
+    let jobs = fixture
+        .db
+        .list_search_index_jobs(&fixture.workspace, None)
+        .map(|jobs| {
+            jobs.iter()
+                .map(|job| format!("{}={}:{:?}", job.id, job.status, job.error_message))
+                .collect::<Vec<_>>()
+        });
+    let processing = crate::core::index::IndexProcessingOptions {
+        workspace_path: options.workspace_path.clone(),
+        database_path: options.database_path.clone(),
+        index_dir: Some(options.resolve_index_dir()),
+        dry_run: false,
+        job_limit: Some(1),
+    };
+    let processed = crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+        crate::core::index::process_index_jobs_coalesced_with_cx_bounded(
+            &cx,
+            &processing,
+            u32::try_from(super::SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS).unwrap_or(u32::MAX),
+        )
+        .await
+    });
+    let processed = match processed {
+        Ok(Ok(report)) => format!(
+            "status {} pending {} completed {} failed {} jobs {:?}",
+            report.status.as_str(),
+            report.pending_jobs,
+            report.completed_jobs,
+            report.failed_jobs,
+            report
+                .jobs
+                .iter()
+                .map(|job| {
+                    (
+                        job.outcome.as_str(),
+                        job.processing_mode.as_str(),
+                        job.fallback_to_full.as_deref(),
+                        job.error.as_deref(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        ),
+        Ok(Err(error)) => format!("processor error: {error:?}"),
+        Err(error) => format!("runtime error: {error:?}"),
+    };
+    format!("jobs before probe {jobs:?}; probe {processed}")
+}
+
 #[cfg(unix)]
 #[test]
 fn strict_semantic_search_publishes_a_small_delta_without_reembedding_a_larger_corpus() {
@@ -1618,14 +1679,15 @@ fn strict_semantic_search_publishes_a_small_delta_without_reembedding_a_larger_c
         assert_eq!(
             run.report.results[0].doc_id,
             remembered.memory_id.to_string(),
-            "delta not ranked first; embedder calls since remember: {}; index_freshness: {:?}; degraded: {:?}",
+            "delta not ranked first; embedder calls since remember: {}; index_freshness: {:?}; degraded: {:?}; {}",
             embedder.calls.load(Ordering::Relaxed) - calls_before,
             run.report.index_freshness,
             run.report
                 .degraded
                 .iter()
                 .map(|entry| entry.code.as_str())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            delta_publication_probe(&fixture, &options)
         );
         assert!(run.report.results[0].fast_score.is_some());
         assert_eq!(
@@ -1761,7 +1823,16 @@ fn strict_semantic_search_reports_a_stale_generation_when_delta_publication_is_c
         let retried = run_search_with_performance(&options).unwrap();
         assert_eq!(
             retried.report.results[0].doc_id,
-            remembered.memory_id.to_string()
+            remembered.memory_id.to_string(),
+            "the retry did not publish the interrupted delta; index_freshness: {:?}; degraded: {:?}; {}",
+            retried.report.index_freshness,
+            retried
+                .report
+                .degraded
+                .iter()
+                .map(|entry| entry.code.as_str())
+                .collect::<Vec<_>>(),
+            delta_publication_probe(&fixture, &options)
         );
         assert!(!retried.report.source_mode_fallback);
         assert!(retried.report.index_freshness.is_none());
@@ -2777,10 +2848,12 @@ fn calibration_review_authority_borrows_snapshots_without_losing_feedback() {
     reader.rollback_read_snapshot().unwrap();
     assert_eq!(load(Some(&reader)).input_identity(), fresh.input_identity());
 
-    fixture
-        .db
-        .execute_raw("ALTER TABLE feedback_quarantine RENAME TO withheld_review_holds")
-        .unwrap();
+    simulate_ddl(
+        &fixture.db,
+        "ALTER TABLE feedback_quarantine RENAME TO withheld_review_holds",
+        "rename feedback_quarantine away",
+    )
+    .unwrap();
     for connection in [Some(&reader), None] {
         let unavailable = load(connection);
         assert!(

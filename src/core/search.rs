@@ -174,6 +174,40 @@ impl Drop for TestSearchIndexAutoReconcileTimeoutGuard {
     }
 }
 
+/// One DDL statement of a test's damage simulation, retried on the transient
+/// contention every product write retries (bd-obslc, bd-9zzf9).
+///
+/// Tests rename an authority table away and back to simulate it being
+/// unreadable. On some workers such a rename fails with `database is busy
+/// (snapshot conflict on pages: )`. At the pinned fsqlite (0.4.10) an empty
+/// page list is raised only for a commit refused because another commit
+/// landed after its snapshot or write-generation sample, and these renames
+/// meet it with no peer writer (bd-calibration-ddl-snapshot-flake-9zzf9).
+/// fsqlite expects callers to retry that, and ee classifies it as retryable
+/// (`sqlite_contention_message_is_retryable`). `execute_raw` is the one path
+/// that does not retry, because a batch could partially apply; a single
+/// RENAME cannot. Each retry is printed, so a lane log shows whether a green
+/// needed one.
+#[cfg(test)]
+pub(in crate::core::search) fn simulate_ddl(
+    db: &DbConnection,
+    sql: &str,
+    step: &str,
+) -> Result<(), String> {
+    const ATTEMPTS: u64 = 5;
+    for attempt in 1..=ATTEMPTS {
+        match db.execute_raw(sql) {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < ATTEMPTS && error.to_string().contains("snapshot conflict") => {
+                eprintln!("fixture DDL {step}: attempt {attempt} refused, retrying: {error}");
+                std::thread::sleep(Duration::from_millis(20 * attempt));
+            }
+            Err(error) => return Err(format!("{step} (attempt {attempt}): {error}")),
+        }
+    }
+    Err(format!("{step}: no attempt ran"))
+}
+
 #[cfg(test)]
 pub(crate) fn with_test_search_timeouts<T>(timeout: Duration, run: impl FnOnce() -> T) -> T {
     let previous_reconcile =
