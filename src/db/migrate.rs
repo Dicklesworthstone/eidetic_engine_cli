@@ -1801,8 +1801,8 @@ mod tests {
         fs::copy(&source_path, target_path).map_err(|error| error.to_string())?;
         let error = apply_shard_fanout_migration(&plan).expect_err("mixed workspace shard");
         assert!(error.to_string().contains("contains a different workspace"));
-        let target = DbConnection::open_file_read_only(target_path)
-            .map_err(|error| error.to_string())?;
+        let target =
+            DbConnection::open_file_read_only(target_path).map_err(|error| error.to_string())?;
         assert_eq!(scalar_count(&target, "SELECT COUNT(*) FROM workspaces")?, 2);
         assert_eq!(scalar_count(&target, "SELECT COUNT(*) FROM memories")?, 2);
         assert_eq!(
@@ -1813,8 +1813,8 @@ mod tests {
             0
         );
         let catalog_path = plan.catalog_path.as_ref().ok_or("missing catalog")?;
-        let catalog = DbConnection::open_file_read_only(catalog_path)
-            .map_err(|error| error.to_string())?;
+        let catalog =
+            DbConnection::open_file_read_only(catalog_path).map_err(|error| error.to_string())?;
         assert!(
             catalog_target_hash(&catalog, &first.workspace_id)
                 .map_err(|error| error.to_string())?
@@ -2050,10 +2050,16 @@ mod tests {
             .first_mut()
             .ok_or("missing planned workspace")?;
         let shard_path = workspace.shard_path.clone().ok_or("missing shard path")?;
-        workspace.row_counts_by_table.insert("memories".to_owned(), 2);
+        workspace
+            .row_counts_by_table
+            .insert("memories".to_owned(), 2);
         let error = apply_shard_fanout_migration(&inconsistent)
             .expect_err("the source contains only one memory per workspace");
-        assert!(error.to_string().contains("Shard row-count verification failed"));
+        assert!(
+            error
+                .to_string()
+                .contains("Shard row-count verification failed")
+        );
         let shard = DbConnection::open(DatabaseConfig::read_only_file(shard_path))
             .map_err(|error| error.to_string())?;
         for table in ["workspaces", "memories", "pack_items", "audit_log"] {

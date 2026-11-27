@@ -3453,7 +3453,10 @@ fn quarantined_feedback_event(
         .or(row.released_feedback_event_id.as_deref())
         .or(accepted_event_id)
         .ok_or_else(|| DomainError::PolicyDenied {
-            message: format!("Quarantined feedback {} lacks the event ID needed to verify its payload.", row.id),
+            message: format!(
+                "Quarantined feedback {} lacks the event ID needed to verify its payload.",
+                row.id
+            ),
             repair: Some(format!("ee outcome quarantine release {} --reject", row.id)),
         })?
         .to_owned();
@@ -9890,7 +9893,8 @@ mod tests {
     }
 
     #[test]
-    fn outcome_preview_checks_live_and_pending_receipts_before_predicting_admission() -> TestResult {
+    fn outcome_preview_checks_live_and_pending_receipts_before_predicting_admission() -> TestResult
+    {
         let (_dir, database) = seed_outcome_database("ee-outcome-preview-receipts")?;
         let mut first = anti_pattern_outcome_options(&database, 881, "preview-source");
         first.harmful_per_source_per_hour = 1;
