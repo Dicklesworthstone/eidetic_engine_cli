@@ -202,8 +202,34 @@ pub fn plan_shard_fanout_migration_from_database(
 ) -> Result<ShardFanoutMigrationPlan, DomainError> {
     let mut workspaces = Vec::new();
     let source_exists = source_database_path.exists();
+    // Keep the workspace inventory, row counts and physical digest on the
+    // same side of any ee writer's commit.
+    let plan_guard = if source_exists {
+        Some(
+            super::lock_file_write_owner_gate(&super::DatabaseLocation::File(
+                source_database_path.clone(),
+            ))
+            .map_err(|error| {
+                storage_error(
+                    format!("Failed to fence source migration inventory: {error}"),
+                    None,
+                )
+            })?,
+        )
+    } else {
+        None
+    };
     let source = if source_exists {
-        let conn = DbConnection::open_file(&source_database_path).map_err(|error| {
+        shard::ensure_standalone_database(&source_database_path).map_err(|error| {
+            storage_error(
+                error.to_string(),
+                Some(
+                    "Recover the source database and checkpoint its WAL before replanning."
+                        .to_owned(),
+                ),
+            )
+        })?;
+        let conn = DbConnection::open_file_read_only(&source_database_path).map_err(|error| {
             storage_error(
                 format!("Failed to open source database: {error}"),
                 Some("ee doctor".to_owned()),
@@ -237,6 +263,7 @@ pub fn plan_shard_fanout_migration_from_database(
     if let Some(source) = source.as_ref() {
         annotate_workspace_row_counts(source, &mut plan)?;
     }
+    drop(plan_guard);
     annotate_catalog_hash_mismatch_blockers(&mut plan)?;
 
     Ok(plan)
@@ -330,15 +357,19 @@ pub fn apply_shard_fanout_migration(
         }
     };
 
-    let source = DbConnection::open_file(&plan.source_database_path).map_err(|error| {
-        storage_error(
+    // A later commit to the legacy database must not change the source of a
+    // partially completed fan-out. Both discovery and ATTACH use the verified
+    // rollback image named by the preservation receipt.
+    let source =
+        DbConnection::open_file_read_only(&preserved_source.preserved_path).map_err(|error| {
+            storage_error(
             format!("Failed to open source database for shard fan-out copy: {error}"),
             Some(
                 "Inspect the source database and rerun `ee migrate shard-fanout --dry-run --json`."
                     .to_owned(),
             ),
         )
-    })?;
+        })?;
     let source_tables = source_user_tables(&source)?;
 
     let catalog =
@@ -358,7 +389,7 @@ pub fn apply_shard_fanout_migration(
         outcomes.push(copy_workspace_to_shard(
             plan,
             workspace,
-            &source,
+            &preserved_source,
             &source_tables,
             &catalog,
         )?);
@@ -452,7 +483,7 @@ fn annotate_catalog_hash_mismatch_blockers(
     if !catalog_path.exists() {
         return Ok(());
     }
-    let catalog = DbConnection::open_file(catalog_path).map_err(|error| {
+    let catalog = DbConnection::open_file_read_only(catalog_path).map_err(|error| {
         storage_error(
             format!(
                 "Failed to open shard fan-out catalog {}: {error}",
@@ -515,7 +546,7 @@ impl From<DbError> for ShardCopyError {
 fn copy_workspace_to_shard(
     plan: &ShardFanoutMigrationPlan,
     workspace: &ShardFanoutMigrationWorkspacePlan,
-    _source: &DbConnection,
+    preserved_source: &ShardFanoutPreservedSourceReport,
     source_tables: &BTreeSet<String>,
     catalog: &DbConnection,
 ) -> Result<ShardFanoutMigrationWorkspaceOutcome, DomainError> {
@@ -560,7 +591,7 @@ fn copy_workspace_to_shard(
     apply_schema_migrations_deterministically(&target)?;
 
     let target_tables = source_user_tables(&target)?;
-    attach_source_database(&target, &plan.source_database_path)?;
+    attach_source_database(&target, &preserved_source.preserved_path)?;
     let copy_result = target.with_transaction_error(|| {
         let counts = || {
             workspace_row_counts_excluding_migration_audit(
@@ -1657,6 +1688,77 @@ mod tests {
 
         let json = serde_json::to_value(ShardFanoutMigrationOutcome::Applied).expect("serialize");
         assert_eq!(json, serde_json::json!("applied"));
+    }
+
+    #[test]
+    fn shard_copy_reads_preserved_content_after_live_source_changes() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = temp.path().join("ee.db");
+        let source = DbConnection::open_file(&path).map_err(|error| error.to_string())?;
+        apply_schema_migrations_deterministically(&source).map_err(|error| error.to_string())?;
+        seed_two_workspace_source(&source)?;
+        source
+            .wal_checkpoint(WalCheckpointMode::Truncate)
+            .map_err(|error| error.to_string())?;
+        drop(source);
+
+        let plan = plan_shard_fanout_migration_from_database(
+            path.clone(),
+            Some(temp.path().join("shards")),
+        )
+        .map_err(|error| error.to_string())?;
+        let image = shard::preserve_shard_fanout_source_database(&plan)
+            .map_err(|error| error.to_string())?;
+        let workspace = plan
+            .workspaces
+            .iter()
+            .find(|row| row.workspace_id == WSP_A)
+            .ok_or("missing workspace A")?;
+        let current = DbConnection::open_file(&path).map_err(|error| error.to_string())?;
+        current
+            .execute_raw(&format!(
+                "UPDATE memories SET content = 'later rule' WHERE id = '{MEM_A}'"
+            ))
+            .map_err(|error| error.to_string())?;
+        let later = format!(
+            "SELECT COUNT(*) FROM memories WHERE id = '{MEM_A}' AND content = 'later rule'"
+        );
+        assert_eq!(scalar_count(&current, &later)?, 1);
+        current
+            .wal_checkpoint(WalCheckpointMode::Truncate)
+            .map_err(|error| error.to_string())?;
+        drop(current);
+
+        let preserved = DbConnection::open_file_read_only(&image.preserved_path)
+            .map_err(|error| error.to_string())?;
+        let tables = source_user_tables(&preserved).map_err(|error| error.to_string())?;
+        drop(preserved);
+        let catalog = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        ensure_catalog_schema(&catalog).map_err(|error| error.to_string())?;
+        copy_workspace_to_shard(&plan, workspace, &image, &tables, &catalog)
+            .map_err(|error| error.to_string())?;
+
+        let target = DbConnection::open_file_read_only(
+            workspace.shard_path.as_ref().ok_or("missing shard path")?,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(scalar_count(&target, &later)?, 0);
+        assert_eq!(
+            scalar_count(
+                &target,
+                &format!(
+                    "SELECT COUNT(*) FROM memories WHERE id = '{MEM_A}' AND content = 'alpha rule'"
+                )
+            )?,
+            1
+        );
+        shard::ensure_standalone_database(&image.preserved_path)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            blake3_file_hash(&image.preserved_path).map_err(|error| error.to_string())?,
+            (image.preserved_hash, image.preserved_size_bytes)
+        );
+        Ok(())
     }
 
     #[test]

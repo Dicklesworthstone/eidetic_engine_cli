@@ -810,7 +810,20 @@ pub fn preserve_shard_fanout_source_database(
             message: "source path is not a regular file".to_owned(),
         });
     }
+    super::validate_file_database_open_path(source_path, super::DbOperation::OpenReadOnly)
+        .map_err(|error| ShardFanoutPreserveSourceError::SourceRead {
+            path: source_path.clone(),
+            message: error.to_string(),
+        })?;
 
+    let _source_guard =
+        super::lock_file_write_owner_gate(&super::DatabaseLocation::File(source_path.clone()))
+            .map_err(|error| ShardFanoutPreserveSourceError::SourceRead {
+                path: source_path.clone(),
+                message: error.to_string(),
+            })?;
+    ensure_standalone_database(source_path)?;
+    ensure_standalone_database(preserved_path)?;
     let (source_hash, source_size_bytes) = blake3_file_hash(source_path).map_err(|error| {
         ShardFanoutPreserveSourceError::SourceRead {
             path: source_path.clone(),
@@ -818,6 +831,18 @@ pub fn preserve_shard_fanout_source_database(
         }
     })?;
 
+    if plan.source_database_hash.as_ref() != Some(&source_hash) {
+        return Err(ShardFanoutPreserveSourceError::SourceRead {
+            path: source_path.clone(),
+            message: "the source no longer matches the plan digest; rerun the migration plan"
+                .to_owned(),
+        });
+    }
+
+    let write_error = |error: io::Error| ShardFanoutPreserveSourceError::PreserveWrite {
+        path: preserved_path.clone(),
+        message: error.to_string(),
+    };
     let copied = match fs::symlink_metadata(preserved_path) {
         Ok(metadata) => {
             if !metadata.is_file() {
@@ -829,12 +854,34 @@ pub fn preserve_shard_fanout_source_database(
             false
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::copy(source_path, preserved_path).map_err(|error| {
-                ShardFanoutPreserveSourceError::PreserveWrite {
-                    path: preserved_path.clone(),
-                    message: error.to_string(),
-                }
-            })?;
+            // Only expose a complete, verified image at the permanent name.
+            // An interrupted copy leaves the name available for a clean retry.
+            let parent = preserved_path
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(write_error)?;
+            let mut source = File::open(source_path).map_err(write_error)?;
+            io::copy(&mut source, staged.as_file_mut()).map_err(write_error)?;
+            staged.as_file().sync_all().map_err(write_error)?;
+            let (staged_hash, staged_bytes) =
+                blake3_file_hash(staged.path()).map_err(write_error)?;
+            if staged_hash != source_hash || staged_bytes != source_size_bytes {
+                return Err(ShardFanoutPreserveSourceError::PreservedSourceMismatch {
+                    source_path: source_path.clone(),
+                    preserved_path: preserved_path.clone(),
+                    source_hash,
+                    preserved_hash: staged_hash,
+                });
+            }
+            ensure_standalone_database(source_path)?;
+            staged
+                .persist_noclobber(preserved_path)
+                .map_err(|error| write_error(error.error))?;
+            #[cfg(unix)]
+            File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(write_error)?;
             true
         }
         Err(error) => {
@@ -872,6 +919,32 @@ pub fn preserve_shard_fanout_source_database(
         preserved_size_bytes,
         rollback_ready: true,
     })
+}
+
+// A main-file hash cannot bind committed pages living in a WAL, nor prove
+// that a rollback journal need not be replayed. Preserve these files in place
+// for the database engine and require a clean checkpoint before fan-out.
+pub(super) fn ensure_standalone_database(
+    database: &Path,
+) -> Result<(), ShardFanoutPreserveSourceError> {
+    for suffix in ["-wal", "-journal"] {
+        let mut sidecar = database.as_os_str().to_owned();
+        sidecar.push(suffix);
+        let path = PathBuf::from(sidecar);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() && meta.len() == 0 => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Ok(_) => return Err(ShardFanoutPreserveSourceError::SourceRead {
+                path,
+                message: "database sidecar is not empty or is not a regular file; close writers, recover the database and run ee maintenance wal-checkpoint --mode truncate before retrying".to_owned(),
+            }),
+            Err(error) => return Err(ShardFanoutPreserveSourceError::SourceRead {
+                path,
+                message: error.to_string(),
+            }),
+        }
+    }
+    Ok(())
 }
 
 #[must_use]
@@ -1753,6 +1826,52 @@ mod tests {
         assert!(!second.copied);
         assert_eq!(second.source_hash, first.source_hash);
         assert_eq!(second.preserved_hash, first.preserved_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn preserve_refuses_changed_source_and_live_journals_before_publishing() -> TestResult {
+        let temp = temp_root("ee-shard-preserve-fence")?;
+        let source = temp.path().join("ee.db");
+        let original = b"original";
+        std::fs::write(&source, original).map_err(|error| error.to_string())?;
+        let plan = plan_shard_fanout_migration(ShardFanoutMigrationPlanInput {
+            source_database_path: source.clone(),
+            shards_dir_override: Some(temp.path().join("shards")),
+            workspaces: Vec::new(),
+        });
+        std::fs::write(&source, b"modified").map_err(|error| error.to_string())?;
+        let error = preserve_shard_fanout_source_database(&plan).expect_err("stale source digest");
+        assert!(
+            error
+                .to_string()
+                .contains("no longer matches the plan digest")
+        );
+        assert!(!plan.preserved_source_database_path.exists());
+        std::fs::write(&source, original).map_err(|error| error.to_string())?;
+
+        for suffix in ["-wal", "-journal"] {
+            let sidecar = temp.path().join(format!("ee.db{suffix}"));
+            std::fs::write(&sidecar, b"uncheckpointed").map_err(|error| error.to_string())?;
+            let error = preserve_shard_fanout_source_database(&plan).expect_err("live sidecar");
+            assert!(error.to_string().contains("sidecar"));
+            assert!(!plan.preserved_source_database_path.exists());
+            assert_eq!(
+                std::fs::read(&sidecar).map_err(|error| error.to_string())?,
+                b"uncheckpointed"
+            );
+            assert_eq!(
+                std::fs::read(&source).map_err(|error| error.to_string())?,
+                original
+            );
+            std::fs::write(&sidecar, []).map_err(|error| error.to_string())?;
+        }
+        let report =
+            preserve_shard_fanout_source_database(&plan).map_err(|error| error.to_string())?;
+        assert_eq!(
+            std::fs::read(report.preserved_path).map_err(|error| error.to_string())?,
+            original
+        );
         Ok(())
     }
 
