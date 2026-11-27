@@ -1552,6 +1552,24 @@ because the lib target carries known pre-existing failures (baseline 9795
 passed / 11 failed / 4 ignored of 9810). Both the exit status and the last
 summary line are unreliable there; the announced denominator is what is left.
 
+**FOUR TESTS FAIL ON EVERY RCH RAIL BY CONSTRUCTION, because rch never ships
+`.beads/`.** It is in rch's default excludes, and a project override would
+have to replace that whole list, secret exclusions included, so none is set
+(bd-pinned-bundle-drops-beads-9wg57, deferred upstream). These four read the
+repository's own `.beads/issues.jsonl` and cannot pass remotely. A red in one of
+them on the lane is not a regression, and nothing in it should be "fixed". Each
+one's verdict comes from its local mirror:
+
+| test | local mirror |
+|---|---|
+| `fleet_identifier_guard::no_private_fleet_identifiers_are_published` (fails closed) | `scripts/check-fleet-identifier-census.py` |
+| `readme_invariant_manifest_schema_is_pinned` | `scripts/check-readme-invariants.py` |
+| `bridge_staleness_gate::bridge_completion_validator_inspects_live_repository_read_only` | `scripts/bridge-staleness.sh` |
+| `swarm_schema_lifecycle::swarm_schema_availability_matches_bead_state` | none |
+
+`vision_coverage_gate` also reads the path, but it writes a one-bead fixture
+when the file is absent, so it is not one of them.
+
 **The defence is an assertion inside the job, not a habit.** All three traps are
 invisible for as long as the dispatch takes, so have the job grade itself and
 exit nonzero:
