@@ -1192,10 +1192,15 @@ fn releasing_harmful_quorum_proposes_once_and_replay_repairs_optional_failure() 
         );
 
         if inject_failure {
-            fixture.db.execute_raw(&format!(
-                "CREATE TRIGGER refuse_review_proposal BEFORE INSERT ON search_index_jobs \
-                 WHEN NEW.id = '{job}' BEGIN SELECT RAISE(ABORT, 'optional publication refused'); END;"
-            )).unwrap();
+            simulate_ddl(
+                &fixture.db,
+                &format!(
+                    "CREATE TRIGGER refuse_review_proposal BEFORE INSERT ON search_index_jobs \
+                     WHEN NEW.id = '{job}' BEGIN SELECT RAISE(ABORT, 'optional publication refused'); END;"
+                ),
+                "create the review proposal trigger",
+            )
+            .unwrap();
         }
         review.dry_run = false;
         let released = review_feedback_quarantine(&review).unwrap();
@@ -1228,10 +1233,12 @@ fn releasing_harmful_quorum_proposes_once_and_replay_repairs_optional_failure() 
                     .is_none()
             );
             assert!(fixture.db.get_search_index_job(&job).unwrap().is_none());
-            fixture
-                .db
-                .execute_raw("DROP TRIGGER refuse_review_proposal")
-                .unwrap();
+            simulate_ddl(
+                &fixture.db,
+                "DROP TRIGGER refuse_review_proposal",
+                "drop the review proposal trigger",
+            )
+            .unwrap();
             let repaired = review_feedback_quarantine(&review).unwrap();
             assert_eq!(repaired.status, "already_reviewed");
             assert!(!repaired.changed);
