@@ -3454,16 +3454,18 @@ fn release_feedback_quarantine_audited(
             }
             // Evidence admission and native target ownership can change while
             // feedback is held. Recheck authoritative rows after writer
-            // acquisition; failure must also roll back the review claim.
-            let not_admitted = || crate::db::DbError::MalformedRow {
-                operation: crate::db::DbOperation::Execute,
-                message:
-                    "Quarantined feedback target is no longer admitted in its original workspace."
-                        .to_owned(),
-            };
+            // acquisition; failure must also roll back the review claim. Keep
+            // the validator's reason, as the dry-run preview does: a
+            // superseded memory or withdrawn evidence is not a workspace move.
             let learning_observation =
                 validate_quarantined_feedback_target(connection, feedback_input, event_id)
-                    .map_err(|_| not_admitted())?;
+                    .map_err(|error| crate::db::DbError::MalformedRow {
+                        operation: crate::db::DbOperation::Execute,
+                        message: format!(
+                            "Quarantined feedback target is no longer admitted: {}",
+                            error.message()
+                        ),
+                    })?;
             connection.insert_feedback_event(event_id, feedback_input)?;
             apply_native_rule_outcome_in_txn(connection, feedback_input, event_id, actor)?;
             // Admission releases the original observation; it does not grant

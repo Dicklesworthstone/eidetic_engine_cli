@@ -622,8 +622,12 @@ fn superseded_quarantine_release_rolls_back_but_receipt_replay_and_rejection_wor
     assert!(matches!(&error, DomainError::Storage { .. }));
     // Since 43e0f8114 the release rechecks target admission after its claim,
     // before learning, so a superseded memory is refused there rather than
-    // at the learning step's "no longer live" check.
-    assert!(error.message().contains("no longer admitted"), "{error:?}");
+    // at the learning step's "no longer live" check. The refusal keeps the
+    // revision check's reason instead of blaming the workspace.
+    assert!(
+        error.message().contains("no longer admitted") && error.message().contains("superseded"),
+        "{error:?}"
+    );
     assert_eq!(
         fixture.persisted_feedback_state(),
         before,
