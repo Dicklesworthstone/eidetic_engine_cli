@@ -62,7 +62,7 @@ fn concurrent_outcome_results(
                                 connection, WORKSPACE, "harmful", Some(&source), limit, window,
                             ).unwrap().is_some(), already_at_cap);
                             let sprt = sprt_quarantine_decision_preview(
-                                connection, WORKSPACE, "harmful", Some(&source),
+                                connection, WORKSPACE, "harmful", 1.0, Some(&source),
                             ).unwrap().unwrap();
                             assert!(sprt_quarantine_summary(&sprt, limit, window).is_none());
                             ready_tx.send(()).unwrap();

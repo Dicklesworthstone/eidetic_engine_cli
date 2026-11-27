@@ -1231,6 +1231,7 @@ fn record_outcome_inner(
             &connection,
             &target.workspace_id,
             &signal,
+            weight,
             source_id.as_deref(),
         )?;
         let burst_quarantine = harmful_quarantine_preview(
@@ -4222,12 +4223,19 @@ struct OutcomeSprtDecision {
     evaluation: SprtEvaluation,
 }
 
+/// Like learning and the anti-pattern quorum, the source test counts only
+/// nonzero observations. A zero-weight event stays in the ledger and its
+/// audit, but it is no evidence against its source, now or in a later stream.
 fn sprt_quarantine_decision_preview(
     connection: &DbConnection,
     workspace_id: &str,
     signal: &str,
+    weight: f32,
     source_id: Option<&str>,
 ) -> Result<Option<OutcomeSprtDecision>, DomainError> {
+    if weight <= 0.0 {
+        return Ok(None);
+    }
     let Some(current_observation) = sprt_observation_for_signal(signal) else {
         return Ok(None);
     };
@@ -4244,6 +4252,7 @@ fn sprt_quarantine_decision_preview(
         })?
     {
         if row.source_id.as_deref() == Some(source_id)
+            && row.weight > 0.0
             && let Some(observation) = sprt_observation_for_signal(&row.signal)
         {
             stream.push((row.created_at, row.id, observation));
@@ -4257,6 +4266,7 @@ fn sprt_quarantine_decision_preview(
         })?
     {
         if row.source_id == source_id
+            && row.weight > 0.0
             && let Some(observation) = sprt_observation_for_signal(&row.signal)
         {
             stream.push((row.recorded_at, row.id, observation));
@@ -10211,6 +10221,66 @@ mod tests {
             &details["sprt_beta"],
             &serde_json::json!(0.05),
             "SPRT audit beta",
+        )
+    }
+
+    #[test]
+    fn sprt_ignores_zero_weight_harmful_events_from_a_source() -> TestResult {
+        // The stream of sprt_quarantine_triggers_before_burst_limit_and_audits_decision,
+        // whose fourth harmful event is quarantined, except that the first
+        // three carry zero weight. They are recorded and audited, but they are
+        // no evidence against their source, so the fourth starts its stream.
+        let (_dir, database) = seed_outcome_database("ee-outcome-sprt-zero-weight")?;
+        let options = |index: u32, weight: f32| OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "harmful".to_string(),
+            weight: Some(weight),
+            source_type: "outcome_observed".to_string(),
+            source_id: Some("sprt-source".to_string()),
+            reason: Some("Zero-weight harmful event before a weighted one.".to_string()),
+            evidence_json: None,
+            session_id: None,
+            event_id: Some(format!("fb_{:026}", 5_200 + index)),
+            actor: Some("test".to_string()),
+            agent_name: None,
+            dry_run: false,
+            harmful_per_source_per_hour: 100,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
+        };
+        for index in 0..3_u32 {
+            let report = record_outcome(&options(index, 0.0)).map_err(|error| error.message())?;
+            ensure_equal(
+                &report.status,
+                &OutcomeRecordStatus::Recorded,
+                "zero-weight harmful event records",
+            )?;
+        }
+        let fourth = record_outcome(&options(3, 1.0)).map_err(|error| error.message())?;
+        ensure_equal(
+            &fourth.status,
+            &OutcomeRecordStatus::Recorded,
+            "zero-weight events do not count toward SPRT quarantine",
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let decisions = connection
+            .list_audit_by_action("quarantine.sprt.decision", None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &decisions.len(),
+            &1_usize,
+            "only the weighted event gets an SPRT decision",
+        )?;
+        let decision = decisions.first().ok_or("SPRT decision audit missing")?;
+        let weighted_event = format!("fb_{:026}", 5_203);
+        ensure_equal(
+            &decision.target_id.as_deref(),
+            &Some(weighted_event.as_str()),
+            "the SPRT decision belongs to the weighted event",
         )
     }
 
