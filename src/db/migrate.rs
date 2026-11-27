@@ -501,6 +501,17 @@ fn annotate_catalog_hash_mismatch_blockers(
     Ok(())
 }
 
+enum ShardCopyError {
+    Database(DbError),
+    Verification(DomainError),
+}
+
+impl From<DbError> for ShardCopyError {
+    fn from(error: DbError) -> Self {
+        Self::Database(error)
+    }
+}
+
 fn copy_workspace_to_shard(
     plan: &ShardFanoutMigrationPlan,
     workspace: &ShardFanoutMigrationWorkspacePlan,
@@ -549,14 +560,18 @@ fn copy_workspace_to_shard(
     apply_schema_migrations_deterministically(&target)?;
 
     let target_tables = source_user_tables(&target)?;
-    let before_counts = workspace_row_counts_excluding_migration_audit(
-        &target,
-        &target_tables,
-        &workspace.workspace_id,
-        None,
-    )?;
     attach_source_database(&target, &plan.source_database_path)?;
-    let copy_result = target.with_transaction(|| {
+    let copy_result = target.with_transaction_error(|| {
+        let counts = || {
+            workspace_row_counts_excluding_migration_audit(
+                &target,
+                &target_tables,
+                &workspace.workspace_id,
+                Some("main"),
+            )
+            .map_err(ShardCopyError::Verification)
+        };
+        let before_counts = counts()?;
         for table in ordered_copy_tables(source_tables, &target_tables) {
             if table == "audit_log" {
                 continue;
@@ -577,14 +592,17 @@ fn copy_workspace_to_shard(
             source_tables,
             &target_tables,
         )?;
-        Ok(())
+        let after_counts = counts()?;
+        verify_workspace_counts(workspace, &after_counts).map_err(ShardCopyError::Verification)?;
+        diff_counts(&before_counts, &after_counts).map_err(ShardCopyError::Verification)
     });
     let detach_result = target.execute_raw("DETACH DATABASE \"source\"");
-    copy_result.map_err(|error| {
-        storage_error(
+    let copied_row_counts_by_table = copy_result.map_err(|error| match error {
+        ShardCopyError::Verification(error) => error,
+        ShardCopyError::Database(error) => storage_error(
             format!("Failed to copy workspace {} into shard: {error}", workspace.workspace_id),
             Some("Inspect the source and shard databases, then rerun `ee migrate shard-fanout --dry-run --json`.".to_owned()),
-        )
+        ),
     })?;
     detach_result.map_err(|error| {
         storage_error(
@@ -593,13 +611,6 @@ fn copy_workspace_to_shard(
         )
     })?;
 
-    let after_counts = workspace_row_counts_excluding_migration_audit(
-        &target,
-        &target_tables,
-        &workspace.workspace_id,
-        None,
-    )?;
-    verify_workspace_counts(workspace, &after_counts)?;
     target
         .wal_checkpoint(WalCheckpointMode::Truncate)
         .map_err(|error| {
@@ -623,7 +634,6 @@ fn copy_workspace_to_shard(
 
     write_catalog_row(catalog, plan, workspace, shard_id, shard_path, &target_hash)?;
 
-    let copied_row_counts_by_table = diff_counts(&before_counts, &after_counts)?;
     let copied_row_count = copied_row_counts_by_table.values().copied().sum();
 
     Ok(ShardFanoutMigrationWorkspaceOutcome {
@@ -1722,6 +1732,7 @@ mod tests {
             assert_eq!(workspace_a.row_counts_by_table.get(table), Some(&1));
         }
 
+        assert_unverified_shard_is_rolled_back(&plan)?;
         let first = apply_shard_fanout_migration(&plan).map_err(|error| error.to_string())?;
         assert_eq!(first.outcome, ShardFanoutMigrationOutcome::Applied);
         assert_eq!(first.catalog_rows_written, 2);
@@ -1865,6 +1876,29 @@ mod tests {
             "apply report must surface SHARD_FANOUT_TARGET_HASH_MISMATCH_CODE in degraded[]"
         );
 
+        Ok(())
+    }
+
+    fn assert_unverified_shard_is_rolled_back(plan: &ShardFanoutMigrationPlan) -> TestResult {
+        let mut inconsistent = plan.clone();
+        let workspace = inconsistent
+            .workspaces
+            .first_mut()
+            .ok_or("missing planned workspace")?;
+        let shard_path = workspace.shard_path.clone().ok_or("missing shard path")?;
+        workspace.row_counts_by_table.insert("memories".to_owned(), 2);
+        let error = apply_shard_fanout_migration(&inconsistent)
+            .expect_err("the source contains only one memory per workspace");
+        assert!(error.to_string().contains("Shard row-count verification failed"));
+        let shard = DbConnection::open(DatabaseConfig::read_only_file(shard_path))
+            .map_err(|error| error.to_string())?;
+        for table in ["workspaces", "memories", "pack_items", "audit_log"] {
+            assert_eq!(
+                scalar_count(&shard, &format!("SELECT COUNT(*) FROM {table}"))?,
+                0,
+                "failed verification committed rows in {table}"
+            );
+        }
         Ok(())
     }
 
