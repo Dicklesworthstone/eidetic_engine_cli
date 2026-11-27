@@ -5520,6 +5520,7 @@ mod tests {
     use asupersync::types::{CancelKind, CancelReason, PanicPayload, RegionId, Time};
 
     use crate::core::bayes::{TrustClassTransition, TrustClassTransitionDirection};
+    use crate::core::search::simulate_ddl;
     use crate::db::{
         CreateFeedbackEventInput, CreateFeedbackQuarantineInput, CreateMemoryInput,
         CreateSessionInput, CreateWorkspaceInput, DbConnection, StoredFeedbackQuarantine,
@@ -8336,11 +8337,17 @@ mod tests {
                 DbConnection::open_file(&database).map_err(|error| error.to_string())?;
             seed_native_outcome_rule(&connection, OUTCOME_TEST_WORKSPACE_ID)?;
             match failure {
-                Some("audit") => connection.execute_raw("CREATE TRIGGER fail_native_rule_audit BEFORE INSERT ON audit_log WHEN NEW.action = 'rule.mark' BEGIN SELECT RAISE(ABORT, 'native rule audit blocked'); END")
-                    .map_err(|error| error.to_string())?,
-                Some("index") => connection.execute_raw("CREATE TRIGGER fail_native_rule_index BEFORE INSERT ON search_index_jobs WHEN NEW.document_source = 'rule' BEGIN SELECT RAISE(ABORT, 'native rule index blocked'); END")
-                    .map_err(|error| error.to_string())?,
-                None => {},
+                Some("audit") => simulate_ddl(
+                    &connection,
+                    "CREATE TRIGGER fail_native_rule_audit BEFORE INSERT ON audit_log WHEN NEW.action = 'rule.mark' BEGIN SELECT RAISE(ABORT, 'native rule audit blocked'); END",
+                    "create the native rule audit trigger",
+                )?,
+                Some("index") => simulate_ddl(
+                    &connection,
+                    "CREATE TRIGGER fail_native_rule_index BEFORE INSERT ON search_index_jobs WHEN NEW.document_source = 'rule' BEGIN SELECT RAISE(ABORT, 'native rule index blocked'); END",
+                    "create the native rule index trigger",
+                )?,
+                None => {}
                 _ => return Err("unknown native-rule failure fixture".to_owned()),
             }
             let before = native_rule_feedback_state(&database)?;
@@ -9177,9 +9184,11 @@ mod tests {
         let events = connection
             .list_feedback_events_for_target("memory", OUTCOME_TEST_MEMORY_ID)
             .map_err(|error| error.to_string())?;
-        connection
-            .execute_raw("DROP TRIGGER fail_anti_pattern_proposal")
-            .map_err(|error| error.to_string())?;
+        simulate_ddl(
+            &connection,
+            "DROP TRIGGER fail_anti_pattern_proposal",
+            "drop the anti-pattern proposal trigger",
+        )?;
         let repaired = record_outcome(&options).map_err(|error| error.message())?;
         assert_eq!(repaired.status, OutcomeRecordStatus::AlreadyRecorded);
         assert!(
@@ -10611,12 +10620,14 @@ mod tests {
         let held = queue_native_feedback_quarantine(&database, "evidence", &evidence_id, None)?;
         // Revoke admission at the claim boundary. Only an authoritative read
         // inside that transaction can see it, and refusal must undo both writes.
-        connection
-            .execute_raw(&format!(
+        simulate_ddl(
+            &connection,
+            &format!(
                 "CREATE TRIGGER withdraw_evidence_on_review AFTER UPDATE OF status ON feedback_quarantine WHEN NEW.id = '{}' AND NEW.status = 'released' BEGIN UPDATE evidence_spans SET pack_eligibility = 'denied' WHERE id = '{evidence_id}'; END",
                 held.id
-            ))
-            .map_err(|error| error.to_string())?;
+            ),
+            "create the evidence withdrawal trigger",
+        )?;
         let review = OutcomeQuarantineReviewOptions {
             workspace_path: dir.path(),
             database_path: Some(&database),
@@ -10636,9 +10647,11 @@ mod tests {
             before,
             "a failed admission check rolls back the claim, feedback and source change"
         );
-        connection
-            .execute_raw("DROP TRIGGER withdraw_evidence_on_review")
-            .map_err(|error| error.to_string())?;
+        simulate_ddl(
+            &connection,
+            "DROP TRIGGER withdraw_evidence_on_review",
+            "drop the evidence withdrawal trigger",
+        )?;
         let released = review_feedback_quarantine(&review).map_err(|error| error.message())?;
         assert_eq!(released.status, "released");
         assert!(released.changed);
@@ -10824,8 +10837,11 @@ mod tests {
             .get_feedback_quarantine(&quarantine_id)
             .map_err(|error| error.to_string())?
             .ok_or("pending native feedback")?;
-        connection.execute_raw("CREATE TRIGGER fail_native_rule_release BEFORE INSERT ON search_index_jobs WHEN NEW.document_source = 'rule' BEGIN SELECT RAISE(ABORT, 'native rule release blocked'); END")
-            .map_err(|error| error.to_string())?;
+        simulate_ddl(
+            &connection,
+            "CREATE TRIGGER fail_native_rule_release BEFORE INSERT ON search_index_jobs WHEN NEW.document_source = 'rule' BEGIN SELECT RAISE(ABORT, 'native rule release blocked'); END",
+            "create the native rule release trigger",
+        )?;
         connection.close().map_err(|error| error.to_string())?;
         review.dry_run = false;
         let error = super::review_feedback_quarantine(&review)
@@ -10851,9 +10867,11 @@ mod tests {
             pending, pending_before,
             "failed release must roll back its initial review claim"
         );
-        connection
-            .execute_raw("DROP TRIGGER fail_native_rule_release")
-            .map_err(|error| error.to_string())?;
+        simulate_ddl(
+            &connection,
+            "DROP TRIGGER fail_native_rule_release",
+            "drop the native rule release trigger",
+        )?;
         connection.close().map_err(|error| error.to_string())?;
 
         let released =

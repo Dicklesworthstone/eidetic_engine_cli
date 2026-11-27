@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use super::*;
+use crate::core::search::simulate_ddl;
 use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
 use std::path::PathBuf;
 
@@ -1162,14 +1163,16 @@ fn anti_pattern_index_insert_failure_preserves_committed_feedback() {
     let options = fixture.anti_pattern_options(3);
     let candidate_id = anti_pattern_candidate_id(WORKSPACE, MEMORY);
     let index_job_id = anti_pattern_candidate_index_job_id(options.event_id.as_deref().unwrap());
-    fixture
-        .db
-        .execute_raw(&format!(
+    simulate_ddl(
+        &fixture.db,
+        &format!(
             "CREATE TRIGGER reject_anti_pattern_index BEFORE INSERT ON search_index_jobs \
          WHEN NEW.id = '{index_job_id}' \
          BEGIN SELECT RAISE(ABORT, 'anti-pattern index failure'); END;"
-        ))
-        .unwrap();
+        ),
+        "create the anti-pattern index trigger",
+    )
+    .unwrap();
     let committed_feedback = std::rc::Rc::new(std::cell::RefCell::new(None));
     let observed_feedback = committed_feedback.clone();
     let report = with_admission_observer(
@@ -1290,10 +1293,13 @@ fn memory_index_insert_failure_rolls_back_event_trust_generation_and_retry() {
     let mut options = fixture.options();
     options.source_type = "human_explicit".to_owned();
     let before = fixture.feedback_state();
-    fixture.db.execute_raw(
+    simulate_ddl(
+        &fixture.db,
         "CREATE TRIGGER reject_memory_index BEFORE INSERT ON search_index_jobs \
-         WHEN NEW.document_source = 'memory' BEGIN SELECT RAISE(ABORT, 'memory index failure'); END;"
-    ).unwrap();
+         WHEN NEW.document_source = 'memory' BEGIN SELECT RAISE(ABORT, 'memory index failure'); END;",
+        "create the memory index trigger",
+    )
+    .unwrap();
     let result = record_outcome(&options);
     assert!(matches!(result, Err(DomainError::Storage { .. })));
     assert_eq!(
@@ -1491,14 +1497,16 @@ fn agent_profile_audit_failure_rolls_back_all_learning_and_same_id_retry_applies
     let memory_before = fixture.db.get_memory(MEMORY).unwrap();
     let generation_before = fixture.db.get_workspace_generation(WORKSPACE).unwrap();
     let audits = fixture.audit_count();
-    fixture
-        .db
-        .execute_raw(&format!(
+    simulate_ddl(
+        &fixture.db,
+        &format!(
             "CREATE TRIGGER reject_agent_profile_audit BEFORE INSERT ON audit_log \
              WHEN NEW.action = '{}' BEGIN SELECT RAISE(ABORT, 'profile audit failure'); END;",
             audit_actions::AGENT_PROFILE_UPDATE
-        ))
-        .unwrap();
+        ),
+        "create the agent profile audit trigger",
+    )
+    .unwrap();
     let mut options = fixture.options();
     options.source_type = "human_explicit".to_owned();
     options.agent_name = Some(format!("  {agent}  "));
@@ -2227,14 +2235,16 @@ fn failed_memory_release_rolls_back_learning_and_retry_cannot_grant_human_promot
     let jobs = fixture.assert_pending_memory_jobs(1);
     let generation = fixture.db.get_workspace_generation(WORKSPACE).unwrap();
     let before = fixture.persisted_feedback_state();
-    fixture
-        .db
-        .execute_raw(&format!(
+    simulate_ddl(
+        &fixture.db,
+        &format!(
             "CREATE TRIGGER reject_memory_release_audit BEFORE INSERT ON audit_log \
              WHEN NEW.action = '{}' BEGIN SELECT RAISE(ABORT, 'release audit failure'); END;",
             audit_actions::FEEDBACK_QUARANTINE_RELEASE
-        ))
-        .unwrap();
+        ),
+        "create the release audit trigger",
+    )
+    .unwrap();
     let release = fixture.release_options(&quarantine_id);
     let error = review_feedback_quarantine(&release)
         .expect_err("the injected release audit failure must abort review");
@@ -2319,10 +2329,13 @@ fn memory_index_insert_failure_leaves_quarantine_pending_until_retry() {
     let quarantine_id = fixture.queue_harmful_feedback("outcome_observed");
     fixture.seed_verified_provenance();
     let before = fixture.feedback_state();
-    fixture.db.execute_raw(
+    simulate_ddl(
+        &fixture.db,
         "CREATE TRIGGER reject_released_memory_index BEFORE INSERT ON search_index_jobs \
-         WHEN NEW.document_source = 'memory' BEGIN SELECT RAISE(ABORT, 'released memory index failure'); END;"
-    ).unwrap();
+         WHEN NEW.document_source = 'memory' BEGIN SELECT RAISE(ABORT, 'released memory index failure'); END;",
+        "create the released memory index trigger",
+    )
+    .unwrap();
     let release = fixture.release_options(&quarantine_id);
     let error = review_feedback_quarantine(&release)
         .expect_err("the injected index failure must abort review");

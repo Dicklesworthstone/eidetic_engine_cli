@@ -185,15 +185,13 @@ impl Drop for TestSearchIndexAutoReconcileTimeoutGuard {
 /// meet it with no peer writer (bd-calibration-ddl-snapshot-flake-9zzf9).
 /// fsqlite expects callers to retry that, and ee classifies it as retryable
 /// (`sqlite_contention_message_is_retryable`). `execute_raw` is the one path
-/// that does not retry, because a batch could partially apply; a single
-/// RENAME cannot. Each retry is printed, so a lane log shows whether a green
-/// needed one.
+/// that does not retry, because a batch could partially apply; a single DDL
+/// statement cannot. Each retry is printed, so a lane log shows whether a
+/// green needed one. The outcome tests' fault triggers use it too: on
+/// 2026-11-27 a fixture `CREATE TRIGGER` there failed with the same empty page
+/// list, on a connection that had already written.
 #[cfg(test)]
-pub(in crate::core::search) fn simulate_ddl(
-    db: &DbConnection,
-    sql: &str,
-    step: &str,
-) -> Result<(), String> {
+pub(crate) fn simulate_ddl(db: &DbConnection, sql: &str, step: &str) -> Result<(), String> {
     const ATTEMPTS: u64 = 5;
     for attempt in 1..=ATTEMPTS {
         match db.execute_raw(sql) {
