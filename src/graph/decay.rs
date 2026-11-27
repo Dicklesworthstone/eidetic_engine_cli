@@ -140,13 +140,21 @@ pub fn compute_structural_decay_index(graph: &Graph) -> StructuralDecayIndex {
 /// Build authoritative structural protection for lifecycle mutations. A failed
 /// graph analysis must not be interpreted as evidence that no bridge exists.
 pub fn try_compute_structural_decay_index(graph: &Graph) -> GraphResult<StructuralDecayIndex> {
+    try_compute_structural_decay_index_with_policy(graph, StructuralDecayPolicy::default())
+}
+
+/// [`try_compute_structural_decay_index`] with `[graph.curate]` tuning.
+pub fn try_compute_structural_decay_index_with_policy(
+    graph: &Graph,
+    policy: StructuralDecayPolicy,
+) -> GraphResult<StructuralDecayIndex> {
     Ok(StructuralDecayIndex {
         onion: try_compute_onion_layers(graph)?,
         articulation_points: try_compute_articulation_points(graph)?
             .memory_ids
             .into_iter()
             .collect(),
-        policy: StructuralDecayPolicy::default(),
+        policy,
     })
 }
 

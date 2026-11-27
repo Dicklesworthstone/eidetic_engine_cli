@@ -43,7 +43,7 @@ use crate::db::{
     generate_audit_id,
 };
 use crate::graph::decay::{
-    StructuralDecayIndex, StructuralDecayMultiplier, try_compute_structural_decay_index,
+    StructuralDecayIndex, StructuralDecayMultiplier, try_compute_structural_decay_index_with_policy,
 };
 use crate::models::RedactionLevel;
 use crate::policy::{
@@ -2052,6 +2052,8 @@ pub struct ScoreDecayJobOptions {
     pub structural_decay: bool,
     pub decay_thresholds: MemoryDecayThresholds,
     pub decay_half_lives: MemoryDecayHalfLives,
+    /// `[graph.curate]` tuning for the structural protection index.
+    pub structural_decay_policy: crate::graph::decay::StructuralDecayPolicy,
     pub dry_run: bool,
     pub actor: Option<String>,
     pub cancellation_flag: Option<Arc<AtomicBool>>,
@@ -2072,6 +2074,7 @@ impl ScoreDecayJobOptions {
             structural_decay: true,
             decay_thresholds: MemoryDecayThresholds::default(),
             decay_half_lives: MemoryDecayHalfLives::default(),
+            structural_decay_policy: crate::graph::decay::StructuralDecayPolicy::default(),
             dry_run: false,
             actor: None,
             cancellation_flag: None,
@@ -2312,7 +2315,9 @@ pub fn run_score_decay_job(
     conn: &DbConnection,
     options: &ScoreDecayJobOptions,
 ) -> Result<ScoreDecayJobReport, String> {
-    run_score_decay_job_with_structural_index(conn, options, try_compute_structural_decay_index)
+    run_score_decay_job_with_structural_index(conn, options, |graph| {
+        try_compute_structural_decay_index_with_policy(graph, options.structural_decay_policy)
+    })
 }
 
 fn run_score_decay_job_with_structural_index(
@@ -4669,6 +4674,10 @@ impl ManualRunner {
         options.structural_decay = self.options.structural_decay;
         options.decay_thresholds = self.options.decay_settings.thresholds;
         options.decay_half_lives = self.options.decay_settings.half_lives;
+        if let Some(workspace_path) = self.options.workspace_path.as_deref() {
+            options.structural_decay_policy =
+                crate::core::curate::workspace_structural_decay_policy(workspace_path);
+        }
         options.actor = self
             .options
             .actor
@@ -13127,7 +13136,7 @@ mod tests {
         let builds = std::cell::Cell::new(0);
         let complete = run_score_decay_job_with_structural_index(&connection, &options, |graph| {
             builds.set(builds.get() + 1);
-            try_compute_structural_decay_index(graph)
+            crate::graph::decay::try_compute_structural_decay_index(graph)
         })?;
         assert_eq!(builds.get(), 1, "one graph analysis for all four memories");
         assert_eq!(complete.scanned_count, 4);
@@ -13254,7 +13263,7 @@ mod tests {
                         timeout_ms: 2_000,
                     })
                 } else {
-                    try_compute_structural_decay_index(graph)
+                    crate::graph::decay::try_compute_structural_decay_index(graph)
                 };
                 cancelled.store(true, Ordering::SeqCst);
                 result

@@ -52,8 +52,8 @@ use crate::db::{
     default_curation_ttl_policy_id_for_review_state, generate_audit_id,
 };
 use crate::graph::decay::{
-    StructuralDecayMultiplier, compute_structural_decay_connectivity,
-    compute_structural_decay_index,
+    StructuralDecayMultiplier, StructuralDecayPolicy, compute_structural_decay_connectivity,
+    compute_structural_decay_index_with_policy,
 };
 use crate::models::degradation::GRAPH_CURATE_DISCONNECTED_GRAPH_CODE;
 use crate::models::{
@@ -7324,24 +7324,24 @@ pub fn run_curation_disposition(
         .map(|policy| (policy.id.as_str(), policy))
         .collect::<BTreeMap<_, _>>();
     let mut degraded = Vec::new();
-    let runtime_structural_decay_enabled = if options.structural_decay {
-        structural_decay_feature_enabled(&prepared.workspace_path)?
+    let structural_decay_policy = if options.structural_decay {
+        structural_decay_feature_policy(&prepared.workspace_path)?
     } else {
-        false
+        None
     };
-    if options.structural_decay && !runtime_structural_decay_enabled {
+    if options.structural_decay && structural_decay_policy.is_none() {
         push_structural_decay_feature_disabled_degradation(&mut degraded);
     }
-    let structural_adjustments = if options.structural_decay && runtime_structural_decay_enabled {
-        curate_structural_decay_adjustments(
+    let structural_adjustments = match structural_decay_policy {
+        Some(structural_decay_policy) => curate_structural_decay_adjustments(
             &connection,
             &candidates,
             &policy_map,
             &now,
+            structural_decay_policy,
             &mut degraded,
-        )?
-    } else {
-        BTreeMap::new()
+        )?,
+        None => BTreeMap::new(),
     };
 
     let mut decisions = Vec::new();
@@ -7401,10 +7401,19 @@ pub fn run_curation_disposition(
     })
 }
 
+#[cfg(test)]
 fn structural_decay_feature_enabled(workspace_path: &Path) -> Result<bool, DomainError> {
+    structural_decay_feature_policy(workspace_path).map(|policy| policy.is_some())
+}
+
+/// The structural decay policy when `graph.feature.structural_decay` is on,
+/// with `[graph.curate]` tuning read from the same file. `None` when it is off.
+fn structural_decay_feature_policy(
+    workspace_path: &Path,
+) -> Result<Option<StructuralDecayPolicy>, DomainError> {
     let path = workspace_path.join(".ee").join("config.toml");
     let Some(contents) = structural_decay_config_contents(&path)? else {
-        return Ok(false);
+        return Ok(None);
     };
     let config = ConfigFile::parse(&contents).map_err(|error| DomainError::Configuration {
         message: format!(
@@ -7417,7 +7426,27 @@ fn structural_decay_feature_enabled(workspace_path: &Path) -> Result<bool, Domai
         .graph
         .feature
         .structural_decay_enabled
-        .unwrap_or(false))
+        .unwrap_or(false)
+        .then(|| structural_decay_policy_from_config(&config)))
+}
+
+fn structural_decay_policy_from_config(config: &ConfigFile) -> StructuralDecayPolicy {
+    StructuralDecayPolicy::from_optional_config(
+        config.graph.curate.onion_decay_max,
+        config.graph.curate.articulation_protection_multiplier,
+    )
+}
+
+/// `graph.curate.onion_decay_max` and `articulation_protection_multiplier`
+/// from a workspace's `.ee/config.toml`, or the defaults when it has none or
+/// it does not parse. For `ee maintenance run --include-decay`, which has
+/// already refused an unparseable file before its steward job runs.
+#[must_use]
+pub fn workspace_structural_decay_policy(workspace_path: &Path) -> StructuralDecayPolicy {
+    crate::config::workspace_config(workspace_path)
+        .map_or_else(StructuralDecayPolicy::default, |config| {
+            structural_decay_policy_from_config(&config)
+        })
 }
 
 /// Maximum bytes inspected when reading `<workspace>/.ee/config.toml` from
@@ -7478,7 +7507,7 @@ fn structural_decay_config_contents(path: &Path) -> Result<Option<String>, Domai
     // Bound the read so a peer-planted multi-GB `.ee/config.toml` (whether
     // accidental — `cat /dev/urandom > .ee/config.toml` — or hostile in a
     // shared multi-agent checkout) cannot pin a matching allocation on
-    // the curate hot path. `structural_decay_feature_enabled` is called
+    // the curate hot path. `structural_decay_feature_policy` is called
     // during `ee curate` to gate the structural-decay graph multiplier;
     // without the cap, one bad config silently OOMs every curate
     // invocation in the workspace. Same defect class that 7f56d89b
@@ -13832,6 +13861,7 @@ fn curate_structural_decay_adjustments(
     candidates: &[StoredCurationCandidate],
     policies: &BTreeMap<&str, &StoredCurationTtlPolicy>,
     now: &DateTime<Utc>,
+    structural_decay_policy: StructuralDecayPolicy,
     degraded: &mut Vec<CurateCandidatesDegradation>,
 ) -> Result<BTreeMap<String, CurateStructuralDecayAdjustment>, DomainError> {
     let memory_ids = candidates
@@ -13852,7 +13882,8 @@ fn curate_structural_decay_adjustments(
         .collect::<Vec<_>>();
     let graph = curate_structural_decay_graph(&memory_ids, &visible_links);
     push_structural_decay_connectivity_degradation(&graph, degraded);
-    let structural_decay_index = compute_structural_decay_index(&graph);
+    let structural_decay_index =
+        compute_structural_decay_index_with_policy(&graph, structural_decay_policy);
     let mut adjustments = BTreeMap::new();
 
     for candidate in candidates {
@@ -20903,6 +20934,47 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&outside_path).map_err(|error| error.to_string())?,
             "[graph.feature.structural_decay]\nenabled = true\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn structural_decay_feature_policy_carries_the_graph_curate_tuning() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::create_dir_all(tempdir.path().join(".ee")).map_err(|error| error.to_string())?;
+        let config = tempdir.path().join(".ee").join("config.toml");
+        let tuning =
+            "[graph.curate]\nonion_decay_max = 2.0\narticulation_protection_multiplier = 0.25\n";
+
+        fs::write(&config, tuning).map_err(|error| error.to_string())?;
+        assert_eq!(
+            super::structural_decay_feature_policy(tempdir.path())
+                .map_err(|error| error.to_string())?,
+            None,
+            "tuning alone does not enable the feature"
+        );
+
+        fs::write(
+            &config,
+            format!("[graph.feature.structural_decay]\nenabled = true\n{tuning}"),
+        )
+        .map_err(|error| error.to_string())?;
+        // Curate built its index with StructuralDecayPolicy::default(), 3.0
+        // and 0.5, whatever [graph.curate] said.
+        let expected = Some(super::StructuralDecayPolicy {
+            onion_decay_max: 2.0,
+            articulation_protection: 0.25,
+        });
+        assert_eq!(
+            super::structural_decay_feature_policy(tempdir.path())
+                .map_err(|error| error.to_string())?,
+            expected,
+            "curate reads [graph.curate] with the feature on"
+        );
+        assert_eq!(
+            Some(super::workspace_structural_decay_policy(tempdir.path())),
+            expected,
+            "ee maintenance run --include-decay reads the same keys"
         );
         Ok(())
     }
