@@ -60498,7 +60498,9 @@ fn sentinel_check_data(
     {
         return Err(DomainError::PolicyDenied {
             message: "The stored memory workspace is bound to a different directory.".to_owned(),
-            repair: Some("Run ee sentinel check with --workspace set to the owning directory.".to_owned()),
+            repair: Some(
+                "Run ee sentinel check with --workspace set to the owning directory.".to_owned(),
+            ),
         });
     }
     let memory_id = args.memory_id.as_deref();
@@ -60555,7 +60557,8 @@ fn sentinel_check_data(
     if let Some(workspace) = workspace.as_ref().filter(|_| !checked.is_empty()) {
         connection
             .with_transaction(|| {
-                if connection.workspace_sentinel_check_specs(workspace, memory_id)? != stored_specs {
+                if connection.workspace_sentinel_check_specs(workspace, memory_id)? != stored_specs
+                {
                     return Err(crate::db::DbError::MalformedRow {
                         operation: crate::db::DbOperation::Execute,
                         message: "Workspace sentinel specs changed during the check".to_owned(),
