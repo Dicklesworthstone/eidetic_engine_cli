@@ -1941,13 +1941,27 @@ mod tests {
             .map_err(|error| error.to_string())?;
         }
         for sql in [
-            format!("INSERT INTO sessions (id, workspace_id, cass_session_id, content_hash, imported_at, updated_at) VALUES ('{session}', '{WSP_B}', '{HASH_B}', '{HASH_B}', '{time}', '{time}')"),
-            format!("INSERT INTO evidence_spans (id, workspace_id, session_id, cass_span_id, span_kind, start_line, end_line, excerpt, content_hash, created_at, updated_at) VALUES ('{evidence}', '{WSP_B}', '{session}', '{HASH_B}', 'message', 1, 1, 'Artifact verified', '{HASH_B}', '{time}', '{time}')"),
-            format!("INSERT INTO pack_rule_items (pack_id, rule_id, entity_revision, rank, section, estimated_tokens, relevance, utility, why, provenance_json, trust_class) VALUES ('{PACK_A}', '{rule_a}', '{HASH_A}', 2, 'procedural_rules', 5, 1, 1, 'Release rule', '{{}}', 'human_explicit')"),
-            format!("INSERT INTO pack_evidence_items (pack_id, evidence_id, entity_revision, rank, section, estimated_tokens, relevance, utility, why, provenance_json, trust_class) VALUES ('{PACK_B}', '{evidence}', '{HASH_B}', 2, 'evidence', 5, 1, 1, 'Release evidence', '{{}}', 'cass_evidence')"),
-            format!("INSERT INTO pack_items (pack_id, rule_id, rank, section, estimated_tokens, relevance, utility, why) VALUES ('{PACK_A}', '{rule_a}', 2, 'procedural_rules', 5, 1, 1, 'Release rule')"),
-            format!("INSERT INTO pack_items (pack_id, evidence_span_id, rank, section, estimated_tokens, relevance, utility, why) VALUES ('{PACK_B}', '{evidence}', 2, 'evidence', 5, 1, 1, 'Release evidence')"),
-            format!("INSERT INTO pack_omissions (pack_id, rule_id, estimated_tokens, reason) VALUES ('{PACK_B}', '{rule_b}', 12, 'token_budget_exceeded')"),
+            format!(
+                "INSERT INTO sessions (id, workspace_id, cass_session_id, content_hash, imported_at, updated_at) VALUES ('{session}', '{WSP_B}', '{HASH_B}', '{HASH_B}', '{time}', '{time}')"
+            ),
+            format!(
+                "INSERT INTO evidence_spans (id, workspace_id, session_id, cass_span_id, span_kind, start_line, end_line, excerpt, content_hash, created_at, updated_at) VALUES ('{evidence}', '{WSP_B}', '{session}', '{HASH_B}', 'message', 1, 1, 'Artifact verified', '{HASH_B}', '{time}', '{time}')"
+            ),
+            format!(
+                "INSERT INTO pack_rule_items (pack_id, rule_id, entity_revision, rank, section, estimated_tokens, relevance, utility, why, provenance_json, trust_class) VALUES ('{PACK_A}', '{rule_a}', '{HASH_A}', 2, 'procedural_rules', 5, 1, 1, 'Release rule', '{{}}', 'human_explicit')"
+            ),
+            format!(
+                "INSERT INTO pack_evidence_items (pack_id, evidence_id, entity_revision, rank, section, estimated_tokens, relevance, utility, why, provenance_json, trust_class) VALUES ('{PACK_B}', '{evidence}', '{HASH_B}', 2, 'evidence', 5, 1, 1, 'Release evidence', '{{}}', 'cass_evidence')"
+            ),
+            format!(
+                "INSERT INTO pack_items (pack_id, rule_id, rank, section, estimated_tokens, relevance, utility, why) VALUES ('{PACK_A}', '{rule_a}', 2, 'procedural_rules', 5, 1, 1, 'Release rule')"
+            ),
+            format!(
+                "INSERT INTO pack_items (pack_id, evidence_span_id, rank, section, estimated_tokens, relevance, utility, why) VALUES ('{PACK_B}', '{evidence}', 2, 'evidence', 5, 1, 1, 'Release evidence')"
+            ),
+            format!(
+                "INSERT INTO pack_omissions (pack_id, rule_id, estimated_tokens, reason) VALUES ('{PACK_B}', '{rule_b}', 12, 'token_budget_exceeded')"
+            ),
         ] {
             conn.execute_raw(&sql).map_err(|error| error.to_string())?;
         }
