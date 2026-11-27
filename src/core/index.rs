@@ -189,6 +189,19 @@ impl Drop for TestWorkspaceEmbedderStackGuard {
     }
 }
 
+#[cfg(all(test, unix, feature = "lexical-bm25"))]
+pub(crate) fn install_test_process_embedder(stack: EmbedderStack) {
+    assert!(
+        DEFAULT_SEARCH_EMBEDDER
+            .set(DefaultSearchEmbedder::ready(
+                stack,
+                EmbedModelResolution::deterministic_hash(),
+            ))
+            .is_ok(),
+        "process embedder must be installed in an isolated test"
+    );
+}
+
 #[cfg(test)]
 pub(crate) fn install_test_hash_workspace_embedder(
     workspace_id: &str,
@@ -3194,22 +3207,27 @@ where
         .filter(|_| !_publish_lock.bounded_publication)
         .and_then(|documents| {
             let max_generation_lag = u64::try_from(documents.len()).unwrap_or(u64::MAX).max(1);
-            validate_incremental_index_metadata(index_dir, published_generation, max_generation_lag)
-                .err()
-                .map(|fallback| {
-                    let reason = fallback.reason;
-                    let detail = fallback.detail;
-                    tracing::info!(
-                        target: "ee::index",
-                        workspace_id = %workspace_id,
-                        claimed_jobs = claimed.len(),
-                        fallback_to_full = reason.as_str(),
-                        detail = %detail,
-                        "coalesced incremental index intake fell back to full rebuild"
-                    );
-                    processing_mode.push_str("_fallback_to_full");
-                    reason.as_str().to_owned()
-                })
+            validate_incremental_index_metadata(
+                index_dir,
+                published_generation,
+                max_generation_lag,
+                None,
+            )
+            .err()
+            .map(|fallback| {
+                let reason = fallback.reason;
+                let detail = fallback.detail;
+                tracing::info!(
+                    target: "ee::index",
+                    workspace_id = %workspace_id,
+                    claimed_jobs = claimed.len(),
+                    fallback_to_full = reason.as_str(),
+                    detail = %detail,
+                    "coalesced incremental index intake fell back to full rebuild"
+                );
+                processing_mode.push_str("_fallback_to_full");
+                reason.as_str().to_owned()
+            })
         });
     if incremental_batch.is_some() && fallback_to_full.is_none() {
         processing_mode.push_str("_staged_full_rebuild");
@@ -4030,7 +4048,8 @@ async fn stage_delta_generation(
     // The live generation must be complete, compatible with this binary's
     // corpus revision, and not ahead of the snapshot. Its lag is irrelevant:
     // the digest diff, not the job list, decides what changed.
-    validate_incremental_index_metadata(index_dir, generation, u64::MAX).map_err(refused)?;
+    validate_incremental_index_metadata(index_dir, generation, u64::MAX, Some(stack.fast()))
+        .map_err(refused)?;
     let applied = delta::plan(index_dir, stack, documents).map_err(refused)?;
     let digests = delta::DocDigests::new(stack, documents);
     stage_planned_index_delta(
@@ -4297,7 +4316,12 @@ async fn apply_incremental_index_batch(
     document_counts: IndexDocumentCounts,
 ) -> Result<u32, IncrementalFallback> {
     let max_generation_lag = u64::try_from(documents.len()).unwrap_or(u64::MAX).max(1);
-    validate_incremental_index_metadata(index_dir, generation, max_generation_lag)?;
+    validate_incremental_index_metadata(
+        index_dir,
+        generation,
+        max_generation_lag,
+        Some(stack.fast()),
+    )?;
     let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
     for document in documents {
         upsert_incremental_document(cx, index_dir, stack.clone(), document).await?;
@@ -4338,7 +4362,7 @@ async fn apply_incremental_index_change(
     generation: u64,
     document_counts: IndexDocumentCounts,
 ) -> Result<u32, IncrementalFallback> {
-    validate_incremental_index_metadata(index_dir, generation, 1)?;
+    validate_incremental_index_metadata(index_dir, generation, 1, Some(stack.fast()))?;
     let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
 
     match document {
@@ -4394,12 +4418,14 @@ fn validate_incremental_index_metadata(
     index_dir: &Path,
     generation: u64,
     max_generation_lag: u64,
+    producer: Option<&dyn crate::search::Embedder>,
 ) -> Result<(), IncrementalFallback> {
     validate_incremental_index_metadata_with_limit(
         index_dir,
         generation,
         max_generation_lag,
         INDEX_METADATA_INSPECT_LIMIT,
+        producer,
     )
 }
 
@@ -4408,6 +4434,7 @@ fn validate_incremental_index_metadata_with_limit(
     generation: u64,
     max_generation_lag: u64,
     max_metadata_bytes: u64,
+    producer: Option<&dyn crate::search::Embedder>,
 ) -> Result<(), IncrementalFallback> {
     ensure_index_path_has_no_symlinks(index_dir, "apply incremental index intake").map_err(
         |error| {
@@ -4456,7 +4483,21 @@ fn validate_incremental_index_metadata_with_limit(
             format!("index metadata is absent: {}", metadata_path.display()),
         ));
     };
-    if let Some(detail) = index_metadata_compatibility_error(&metadata_path, &metadata) {
+    let identity = producer
+        .map(|embedder| {
+            u32::try_from(embedder.dimension())
+                .map(|dimension| (embedder.id(), dimension))
+                .map_err(|error| {
+                    incremental_fallback(
+                        IncrementalFallbackReason::CorpusRevisionMismatch,
+                        error.to_string(),
+                    )
+                })
+        })
+        .transpose()?;
+    if let Some(detail) =
+        index_metadata_compatibility_error_with_identity(&metadata_path, &metadata, identity)
+    {
         return Err(incremental_fallback(
             IncrementalFallbackReason::CorpusRevisionMismatch,
             detail,
@@ -4499,29 +4540,23 @@ fn validate_incremental_index_metadata_with_limit(
     Ok(())
 }
 
-/// What the streamed-delta path's metadata gate sees, for bd-q1e4y's probe.
-///
-/// `delta_source::prepare_with_limits` runs exactly this validation and, on a
-/// refusal, only logs it before declining the delta. One refusal is the
-/// embedding-space check, which compares the stored producer with
-/// [`active_semantic_identity`]. That is the process-wide default embedder,
-/// once anything in the process has resolved it, and not the workspace stack
-/// that will embed the delta. The same compatibility check ends
-/// `delta_source::bounded_generation_fits`, which the read-repair hint
-/// (`bounded_generation_gap`) and the bounded processor both run first, and
-/// which declines without logging. Reporting the identity and the verdict lets
-/// a red name that case.
+/// Report the streamed publisher's metadata verdict for its workspace producer.
 #[cfg(all(test, unix))]
-pub(crate) fn delta_metadata_gate_for_test(index_dir: &Path, database_generation: u64) -> String {
+pub(crate) fn delta_metadata_gate_for_test(
+    index_dir: &Path,
+    database_generation: u64,
+    producer: &dyn crate::search::Embedder,
+) -> String {
     format!(
-        "process default resolved {}, identity {:?}; validation {:?}",
-        default_search_embedder_resolved(),
-        active_semantic_identity(),
+        "workspace producer {} ({}d); validation {:?}",
+        producer.id(),
+        producer.dimension(),
         validate_incremental_index_metadata_with_limit(
             index_dir,
             database_generation,
             u64::MAX,
             delta_source::MAX_INTERACTIVE_METADATA_BYTES,
+            Some(producer),
         ),
     )
 }
@@ -6906,7 +6941,10 @@ fn index_generation_is_recoverable(index_dir: &Path) -> bool {
 }
 
 fn recoverable_index_generation(index_dir: &Path) -> Option<u64> {
-    validated_index_generation(index_dir).ok()
+    // Retention and crash recovery preserve complete snapshots. A process
+    // model that cannot query one is not evidence that vacuum can delete it.
+    // Semantic readers validate their producer when opening the snapshot.
+    validated_index_generation_with_identity(index_dir, None).ok()
 }
 
 fn validated_index_generation(index_dir: &Path) -> Result<u64, String> {

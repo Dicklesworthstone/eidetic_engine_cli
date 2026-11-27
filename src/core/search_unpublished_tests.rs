@@ -1573,11 +1573,9 @@ fn embedding_search_publishes_first_generation_from_deferred_remember() {
 /// 1. the source upper bound against the full-rebuild ceiling, where `Some(false)`
 ///    selects the bounded path;
 /// 2. the bounded generation gap, where `Ok(None)` skips the repair;
-/// 3. the streamed delta's metadata validation, evaluated on its own, with the
-///    process default embedder that its embedding-space check compares against.
-///    Any `Err` declines the delta. The same compatibility check also ends the
-///    generation fit test that gate 2 and the processor each run first, so an
-///    `Err` here also explains a gate-2 `Ok(None)`;
+/// 3. the streamed publisher's metadata validation against the workspace's
+///    selected producer. Gate 2 performs only structural admission; the
+///    publisher also verifies native vector producer identities before reuse;
 /// 4. the bounded coalesced processor, with the same one-job limit, since both
 ///    callers queue exactly one delta. A job reported skipped as "deferred"
 ///    means the streamed delta was declined. The census beside it shows the
@@ -1587,7 +1585,11 @@ fn embedding_search_publishes_first_generation_from_deferred_remember() {
 /// Call it only from a failing assertion's message. The processor can
 /// publish, and by then the observation it would change has been made.
 #[cfg(unix)]
-fn delta_publication_probe(fixture: &Fixture, options: &SearchOptions) -> String {
+fn delta_publication_probe(
+    fixture: &Fixture,
+    options: &SearchOptions,
+    producer: &dyn Embedder,
+) -> String {
     let jobs = fixture
         .db
         .list_search_index_jobs(&fixture.workspace, None)
@@ -1603,9 +1605,11 @@ fn delta_publication_probe(fixture: &Fixture, options: &SearchOptions) -> String
         "probe the index directory",
     );
     let delta_gate = match fixture.db.get_workspace_generation(&fixture.workspace) {
-        Ok(generation) => {
-            crate::core::index::delta_metadata_gate_for_test(&index_dir, generation.unwrap_or(0))
-        }
+        Ok(generation) => crate::core::index::delta_metadata_gate_for_test(
+            &index_dir,
+            generation.unwrap_or(0),
+            producer,
+        ),
         Err(error) => format!("database generation unreadable: {error}"),
     };
     let status_options = IndexStatusOptions {
@@ -1712,6 +1716,38 @@ fn index_dir_census(index_dir: &std::path::Path) -> String {
 #[cfg(unix)]
 #[test]
 fn strict_semantic_search_publishes_a_small_delta_without_reembedding_a_larger_corpus() {
+    // A daemon may already have used its process default for another
+    // workspace. Isolate the OnceLock so this regression is deterministic.
+    const CHILD: &str = "EE_TEST_DELTA_WITH_FOREIGN_DEFAULT";
+    const SENTINEL: &str = "workspace delta published with a different process model";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "core::search::unpublished_tests::strict_semantic_search_publishes_a_small_delta_without_reembedding_a_larger_corpus",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("EE_EMBED_BACKEND", "local")
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .output()
+            .expect("isolated delta publication test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains(SENTINEL),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let foreign = FirstPublicationEmbedder {
+        hash: HashEmbedder::new(128, frankensearch::HashAlgorithm::JLProjection { seed: 71 }),
+        ..FirstPublicationEmbedder::new(false)
+    };
+    crate::core::index::install_test_process_embedder(EmbedderStack::from_parts(
+        Arc::new(foreign),
+        None,
+    ));
     with_test_search_timeouts(Duration::from_secs(300), || {
         const RETAINED_BODY: &str =
             "The archivedcobalt upgrade requires an immutable rollback plan.";
@@ -1743,6 +1779,24 @@ fn strict_semantic_search_publishes_a_small_delta_without_reembedding_a_larger_c
             embedder.calls.load(Ordering::Relaxed) >= 128,
             "the fixture counter must observe initial corpus embedding"
         );
+        // Pin both sides: the pre-fix global check refuses this very index,
+        // while the producer that built it is admitted by the search reader.
+        let mismatch = crate::core::index::validate_index_corpus_compatibility(&index_dir)
+            .expect_err("the 128d process default must disagree with the stored 256d producer");
+        assert!(
+            mismatch.contains("embedding dimensions cannot be mixed"),
+            "{mismatch}"
+        );
+        crate::core::index::validate_index_corpus_compatibility_with_embedder(
+            &index_dir,
+            embedder.as_ref(),
+        )
+        .expect("workspace producer matches the published index");
+        let initial_generation = fixture
+            .db
+            .get_workspace_generation(&fixture.workspace)
+            .unwrap()
+            .expect("initial source generation");
 
         let remembered = fixture.remember_deferred(BODY);
         let jobs_before = fixture
@@ -1775,7 +1829,7 @@ fn strict_semantic_search_publishes_a_small_delta_without_reembedding_a_larger_c
                 .iter()
                 .map(|entry| entry.code.as_str())
                 .collect::<Vec<_>>(),
-            delta_publication_probe(&fixture, &options)
+            delta_publication_probe(&fixture, &options, embedder.as_ref())
         );
         assert!(run.report.results[0].fast_score.is_some());
         assert_eq!(
@@ -1801,6 +1855,18 @@ fn strict_semantic_search_publishes_a_small_delta_without_reembedding_a_larger_c
         assert_eq!(jobs_after.len(), 1);
         assert_eq!(jobs_after[0].id, jobs_before[0].id);
         assert_eq!(jobs_after[0].status, "completed");
+        // Vacuum and crash recovery must preserve the displaced workspace
+        // generation even though the process-wide model cannot query it.
+        let retention = crate::core::index::retention_gc::plan(&index_dir, 2).unwrap();
+        let previous = retention
+            .kept()
+            .find(|entry| entry.generation == Some(initial_generation))
+            .expect("vacuum must retain the displaced workspace generation");
+        crate::core::index::validate_index_corpus_compatibility_with_embedder(
+            &previous.path,
+            embedder.as_ref(),
+        )
+        .expect("retained workspace snapshot is still queryable");
         let status = crate::core::index::get_index_status(&IndexStatusOptions {
             workspace_path: fixture.root.clone(),
             database_path: Some(fixture.root.join(".ee/ee.db")),
@@ -1821,6 +1887,7 @@ fn strict_semantic_search_publishes_a_small_delta_without_reembedding_a_larger_c
         assert!(!retained.report.source_mode_fallback);
         assert!(retained.report.index_freshness.is_none());
     });
+    println!("{SENTINEL}");
 }
 
 /// bd-q1e4y: the one red of the test above ranked fixture memory 1 first,
@@ -1920,7 +1987,7 @@ fn strict_semantic_search_reports_a_stale_generation_when_delta_publication_is_c
                 .iter()
                 .map(|entry| entry.code.as_str())
                 .collect::<Vec<_>>(),
-            delta_publication_probe(&fixture, &options)
+            delta_publication_probe(&fixture, &options, embedder.as_ref())
         );
         assert!(!retried.report.source_mode_fallback);
         assert!(retried.report.index_freshness.is_none());

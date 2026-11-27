@@ -1061,10 +1061,11 @@ fn record_outcome_inner(
 
     let record = || {
         let target = if require_learning_observation && target_type == "candidate" {
-            // Typed learn observe/close envelopes use external experiment IDs,
-            // not curation candidate IDs. Only the private learning entrypoint
-            // can select this lane; its mandatory sidecar is validated below.
-            resolve_external_outcome_workspace(&connection, options.workspace_id.as_deref())?
+            resolve_learning_experiment_workspace(
+                &connection,
+                &target_id,
+                options.workspace_id.as_deref(),
+            )?
         } else {
             resolve_target_workspace(
                 &connection,
@@ -1104,7 +1105,12 @@ fn record_outcome_inner(
 
         if options.dry_run {
             require_current_memory_outcome_revision(&connection, &target_type, &target_id)?;
-            let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+            let feedback = current_feedback_summary(
+                &connection,
+                &target.workspace_id,
+                &target_type,
+                &target_id,
+            )?;
             trace_sprt_quarantine("dependency_check", 0, &[]);
             let sprt = sprt_quarantine_decision_preview(
                 &connection,
@@ -1221,7 +1227,12 @@ fn record_outcome_inner(
                     },
                 )?;
             }
-            let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+            let feedback = current_feedback_summary(
+                &connection,
+                &target.workspace_id,
+                &target_type,
+                &target_id,
+            )?;
             trace_sprt_quarantine("response", 0, &[]);
             return Ok(OutcomeRecordReport {
                 version: env!("CARGO_PKG_VERSION"),
@@ -1352,7 +1363,12 @@ fn record_outcome_inner(
                         })
                 },
             )?;
-            let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+            let feedback = current_feedback_summary(
+                &connection,
+                &target.workspace_id,
+                &target_type,
+                &target_id,
+            )?;
             trace_sprt_quarantine("response", 0, &[]);
             let final_quarantine = OutcomeQuarantineSummary {
                 id: Some(quarantine_id.clone()),
@@ -1502,7 +1518,8 @@ fn record_outcome_inner(
         let (confidence_before, confidence_after) =
             confidence.map_or((None, None), |(before, after)| (Some(before), Some(after)));
 
-        let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+        let feedback =
+            current_feedback_summary(&connection, &target.workspace_id, &target_type, &target_id)?;
 
         trace_sprt_quarantine("response", 0, &[]);
         Ok(OutcomeRecordReport {
@@ -3403,20 +3420,12 @@ fn validate_quarantined_feedback_target(
             "Inspect the preserved evidence before releasing this quarantine row.".to_owned(),
         ),
     })?;
-    // Typed learn envelopes can target external experiment IDs. A document
-    // merely cited as evidence does not select that lane, and a live native
-    // candidate always retains its current workspace ownership.
-    let external_experiment = feedback_input.target_type == "candidate"
-        && learning_observation.is_some()
-        && connection
-            .get_curation_candidate_workspace_id(&feedback_input.target_id)
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to query candidate target: {error}"),
-                repair: Some("ee doctor --json".to_owned()),
-            })?
-            .is_none();
-    if external_experiment {
-        resolve_external_outcome_workspace(connection, Some(&feedback_input.workspace_id))?;
+    if feedback_input.target_type == "candidate" && learning_observation.is_some() {
+        resolve_learning_experiment_workspace(
+            connection,
+            &feedback_input.target_id,
+            Some(&feedback_input.workspace_id),
+        )?;
     } else {
         resolve_target_workspace(
             connection,
@@ -3435,6 +3444,19 @@ fn validate_quarantined_feedback_target(
     Ok(learning_observation)
 }
 
+/// Keep policy denials and their repair commands distinct from transaction
+/// failures while rolling back the same pending-row claim in both cases.
+struct QuarantineReleaseError(DomainError);
+
+impl From<crate::db::DbError> for QuarantineReleaseError {
+    fn from(error: crate::db::DbError) -> Self {
+        Self(DomainError::Storage {
+            message: format!("Failed to release feedback quarantine: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })
+    }
+}
+
 fn release_feedback_quarantine_audited(
     connection: &DbConnection,
     row: &StoredFeedbackQuarantine,
@@ -3445,27 +3467,20 @@ fn release_feedback_quarantine_audited(
     let audit_id = generate_audit_id();
     let details = feedback_quarantine_review_audit_details(row, "released", Some(event_id));
     connection
-        .with_transaction(|| {
+        .with_transaction_error(|| {
             // The caller's pending row may predate a competing review. Claim
             // the transition before feedback, rule updates or audit work. The
             // event FK is attached after insertion, within this transaction.
             if !connection.update_feedback_quarantine_status(&row.id, "released", actor, None)? {
-                return already_reviewed_feedback_quarantine_summary(connection, row, "release");
+                return already_reviewed_feedback_quarantine_summary(connection, row, "release")
+                    .map_err(QuarantineReleaseError::from);
             }
             // Evidence admission and native target ownership can change while
             // feedback is held. Recheck authoritative rows after writer
-            // acquisition; failure must also roll back the review claim. Keep
-            // the validator's reason, as the dry-run preview does: a
-            // superseded memory or withdrawn evidence is not a workspace move.
+            // acquisition; failure must also roll back the review claim.
             let learning_observation =
                 validate_quarantined_feedback_target(connection, feedback_input, event_id)
-                    .map_err(|error| crate::db::DbError::MalformedRow {
-                        operation: crate::db::DbOperation::Execute,
-                        message: format!(
-                            "Quarantined feedback target is no longer admitted: {}",
-                            error.message()
-                        ),
-                    })?;
+                    .map_err(QuarantineReleaseError)?;
             connection.insert_feedback_event(event_id, feedback_input)?;
             apply_native_rule_outcome_in_txn(connection, feedback_input, event_id, actor)?;
             // Admission releases the original observation; it does not grant
@@ -3505,10 +3520,7 @@ fn release_feedback_quarantine_audited(
                 audit_id: Some(audit_id),
             })
         })
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to release feedback quarantine: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })
+        .map_err(|error: QuarantineReleaseError| error.0)
 }
 
 fn feedback_quarantine_review_audit_details(
@@ -3738,6 +3750,31 @@ fn resolve_target_workspace(
     resolve_external_outcome_workspace(connection, workspace_id)
 }
 
+/// Experiment IDs are caller-supplied. If one names a native candidate, its
+/// durable owner also governs typed learn writes and quarantine reviews.
+fn resolve_learning_experiment_workspace(
+    connection: &DbConnection,
+    experiment_id: &str,
+    requested_workspace: Option<&str>,
+) -> Result<TargetResolution, DomainError> {
+    let owner = connection
+        .get_curation_candidate_workspace_id(experiment_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query candidate target: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    match owner {
+        Some(workspace_id) => {
+            require_outcome_target_workspace("candidate", &workspace_id, requested_workspace)?;
+            Ok(TargetResolution {
+                workspace_id,
+                verified: true,
+            })
+        }
+        None => resolve_external_outcome_workspace(connection, requested_workspace),
+    }
+}
+
 fn resolve_external_outcome_workspace(
     connection: &DbConnection,
     workspace_id: Option<&str>,
@@ -3813,11 +3850,12 @@ fn outcome_instruction_policy_denied_error(
 
 fn current_feedback_summary(
     connection: &DbConnection,
+    workspace_id: &str,
     target_type: &str,
     target_id: &str,
 ) -> Result<OutcomeFeedbackSummary, DomainError> {
     connection
-        .count_feedback_by_signal(target_type, target_id)
+        .count_feedback_by_signal_in_scope(target_type, target_id, Some(workspace_id))
         .map(|counts| OutcomeFeedbackSummary::from_counts(&counts))
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to summarize feedback: {error}"),
@@ -6923,6 +6961,107 @@ mod tests {
             );
         }
         connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn learning_experiment_feedback_honors_native_candidate_ownership() -> TestResult {
+        let (dir, database) = seed_outcome_database("ee-learning-candidate-owner")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        seed_persisted_outcome_targets(&connection)?;
+        connection
+            .insert_workspace(
+                OUTCOME_OTHER_WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: dir.path().join("other").to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut options =
+            native_rule_outcome_options(&database, "confirmation", "fb_00000000000000000000000721");
+        options.target_type = "candidate".to_owned();
+        options.target_id = OUTCOME_OWNERSHIP_CANDIDATE_ID.to_owned();
+        options.source_type = "outcome_observed".to_owned();
+        options.source_id = Some("acceptance-run".to_owned());
+        options.evidence_json = Some(
+            serde_json::json!({
+                "schema": crate::models::EXPERIMENT_OUTCOME_SCHEMA_V1,
+                "experimentId": options.target_id,
+                "outcomeId": "acceptance-run",
+                "closedAt": "2026-09-20T00:00:00Z",
+                "status": "confirmed",
+            })
+            .to_string(),
+        );
+        options.workspace_id = Some(OUTCOME_OTHER_WORKSPACE_ID.to_owned());
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        assert!(matches!(
+            super::record_learning_outcome(&options),
+            Err(DomainError::PolicyDenied { .. })
+        ));
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            before
+        );
+
+        options.workspace_id = Some(OUTCOME_TEST_WORKSPACE_ID.to_owned());
+        let accepted = super::record_learning_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(accepted.status, OutcomeRecordStatus::Recorded);
+        assert!(accepted.target_verified);
+        assert_eq!(accepted.workspace_id, OUTCOME_TEST_WORKSPACE_ID);
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn external_target_feedback_summary_is_workspace_scoped_on_every_receipt() -> TestResult {
+        let (dir, database) = seed_outcome_database("ee-outcome-summary-scope")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                OUTCOME_OTHER_WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: dir.path().join("other").to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let mut options =
+            native_rule_outcome_options(&database, "helpful", "fb_00000000000000000000000722");
+        options.target_type = "source".to_owned();
+        options.target_id = "shared-build-runner".to_owned();
+        options.workspace_id = Some(OUTCOME_TEST_WORKSPACE_ID.to_owned());
+        let first = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(first.feedback.positive_count, 1);
+
+        options.workspace_id = Some(OUTCOME_OTHER_WORKSPACE_ID.to_owned());
+        options.event_id = Some("fb_00000000000000000000000723".to_owned());
+        options.signal = "harmful".to_owned();
+        options.harmful_per_source_per_hour = 1;
+        options.dry_run = true;
+        let preview = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(preview.feedback.total_count, 0);
+
+        options.dry_run = false;
+        let recorded = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(recorded.status, OutcomeRecordStatus::Recorded);
+        assert_eq!(recorded.feedback.total_count, 1);
+        assert_eq!(recorded.feedback.negative_count, 1);
+        let replay = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(replay.status, OutcomeRecordStatus::AlreadyRecorded);
+        assert_eq!(replay.feedback, recorded.feedback);
+
+        options.event_id = Some("fb_00000000000000000000000724".to_owned());
+        let held = record_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(held.status, OutcomeRecordStatus::Quarantined);
+        assert_eq!(held.feedback, recorded.feedback);
+        Ok(())
     }
 
     #[test]

@@ -25,7 +25,7 @@ use super::{
     prepare_index_embedding_registry_input, publish_staged_generation,
     recover_interrupted_publish_for_snapshot, rule_to_document, session_to_document,
     source_snapshot, stage_planned_index_delta, update_running_index_job_total,
-    validate_incremental_index_metadata, workspace_index_source_rows_fit,
+    validate_incremental_index_metadata_with_limit, workspace_index_source_rows_fit,
 };
 
 #[cfg(test)]
@@ -131,16 +131,20 @@ async fn prepare_with_limits(
         publish_lock.checkpoint()?;
         recovered?;
     }
-    let eligible = if limits.is_some() {
-        super::validate_incremental_index_metadata_with_limit(
-            index_dir,
-            generation_hint,
-            u64::MAX,
-            MAX_INTERACTIVE_METADATA_BYTES,
-        )
+    // This first check is structural. No model has been selected for this
+    // workspace yet, and an unrelated process default has no authority here.
+    let metadata_limit = if limits.is_some() {
+        MAX_INTERACTIVE_METADATA_BYTES
     } else {
-        validate_incremental_index_metadata(index_dir, generation_hint, u64::MAX)
+        super::INDEX_METADATA_INSPECT_LIMIT
     };
+    let eligible = validate_incremental_index_metadata_with_limit(
+        index_dir,
+        generation_hint,
+        u64::MAX,
+        metadata_limit,
+        None,
+    );
     publish_lock.checkpoint()?;
     if let Err(refusal) = eligible {
         log_refusal(&refusal);
@@ -190,16 +194,13 @@ async fn prepare_with_limits(
     };
     // Check the actual captured generation as well as the earlier hint. The
     // complete source set, never a queued job or generation count, owns the diff.
-    let eligible = if limits.is_some() {
-        super::validate_incremental_index_metadata_with_limit(
-            index_dir,
-            snapshot.generation,
-            u64::MAX,
-            MAX_INTERACTIVE_METADATA_BYTES,
-        )
-    } else {
-        validate_incremental_index_metadata(index_dir, snapshot.generation, u64::MAX)
-    };
+    let eligible = validate_incremental_index_metadata_with_limit(
+        index_dir,
+        snapshot.generation,
+        u64::MAX,
+        metadata_limit,
+        Some(stack.fast()),
+    );
     publish_lock.checkpoint()?;
     if let Err(refusal) = eligible {
         log_refusal(&refusal);
@@ -348,9 +349,12 @@ fn bounded_generation_fits(
         .document_count
         .is_some_and(|count| count <= MAX_INTERACTIVE_SOURCE_DOCUMENTS)
         && metadata.generation.is_some()
-        && super::index_metadata_compatibility_error(
+        // This inventory never opens vectors. The publisher checks its selected
+        // stack against the manifest and native headers before reusing them.
+        && super::index_metadata_compatibility_error_with_identity(
             &index_dir.join(super::INDEX_METADATA_FILE),
             &metadata,
+            None,
         )
         .is_none())
 }

@@ -417,11 +417,12 @@ fn domain_error_for_preserve_failure(
 enum CopyScope {
     WorkspaceRegistry,
     WorkspaceColumn,
-    MemoryTags,
+    MemoryChild,
+    SentinelResult,
     RuleSourceMemories,
     RuleTags,
-    PackItems,
-    PackOmissions,
+    PackItemOrOmission,
+    PackChild,
     MemoryLinks,
     ArtifactLinks,
     RationaleTraceLinks,
@@ -1231,17 +1232,26 @@ fn ordered_copy_tables(
         "memories",
         "audit_log",
         "memory_tags",
+        "memory_seals",
+        "memory_anchors",
+        "memory_code_anchor_sources",
+        "memory_sentinel_specs",
+        "memory_sentinel_results",
         "curation_candidates",
         "procedural_rules",
         "rule_source_memories",
         "rule_tags",
         "search_index_jobs",
         "pack_records",
-        "pack_items",
-        "pack_omissions",
         "memory_links",
         "sessions",
         "evidence_spans",
+        // Native pack rows validate both the owner and the rule or session evidence
+        // with insertion triggers. Copy them only after all source parents exist.
+        "pack_items",
+        "pack_omissions",
+        "pack_evidence_items",
+        "pack_rule_items",
         "import_ledger",
         "feedback_events",
         "task_episodes",
@@ -1297,11 +1307,16 @@ fn copy_scope_for_table(table: &str, columns: &[String]) -> CopyScope {
     match table {
         "ee_schema_migrations" | "ee_advisory_locks" => CopyScope::Skip,
         "workspaces" => CopyScope::WorkspaceRegistry,
-        "memory_tags" => CopyScope::MemoryTags,
+        "memory_tags"
+        | "memory_seals"
+        | "memory_anchors"
+        | "memory_code_anchor_sources"
+        | "memory_sentinel_specs" => CopyScope::MemoryChild,
+        "memory_sentinel_results" => CopyScope::SentinelResult,
         "rule_source_memories" => CopyScope::RuleSourceMemories,
         "rule_tags" => CopyScope::RuleTags,
-        "pack_items" => CopyScope::PackItems,
-        "pack_omissions" => CopyScope::PackOmissions,
+        "pack_items" | "pack_omissions" => CopyScope::PackItemOrOmission,
+        "pack_evidence_items" | "pack_rule_items" => CopyScope::PackChild,
         "memory_links" => CopyScope::MemoryLinks,
         "artifact_links" => CopyScope::ArtifactLinks,
         "rationale_trace_links" => CopyScope::RationaleTraceLinks,
@@ -1326,17 +1341,26 @@ fn workspace_predicate(
     match scope {
         CopyScope::WorkspaceRegistry => Some(format!("row.\"id\" = {workspace}")),
         CopyScope::WorkspaceColumn => Some(format!("row.\"workspace_id\" = {workspace}")),
-        CopyScope::MemoryTags => Some(format!(
+        CopyScope::MemoryChild => Some(format!(
             "EXISTS (SELECT 1 FROM {memories} AS m WHERE m.\"id\" = row.\"memory_id\" AND m.\"workspace_id\" = {workspace})"
         )),
+        CopyScope::SentinelResult => {
+            let specs = table_ref(schema, "memory_sentinel_specs");
+            Some(format!(
+                "row.spec_hash IN (SELECT spec_hash FROM {specs} WHERE memory_id IN (SELECT id FROM {memories} WHERE workspace_id = {workspace}))"
+            ))
+        }
         CopyScope::RuleSourceMemories => Some(format!(
             "EXISTS (SELECT 1 FROM {rules} AS r WHERE r.\"id\" = row.\"rule_id\" AND r.\"workspace_id\" = {workspace}) AND EXISTS (SELECT 1 FROM {memories} AS m WHERE m.\"id\" = row.\"memory_id\" AND m.\"workspace_id\" = {workspace})"
         )),
         CopyScope::RuleTags => Some(format!(
             "EXISTS (SELECT 1 FROM {rules} AS r WHERE r.\"id\" = row.\"rule_id\" AND r.\"workspace_id\" = {workspace})"
         )),
-        CopyScope::PackItems | CopyScope::PackOmissions => Some(format!(
-            "EXISTS (SELECT 1 FROM {packs} AS p WHERE p.\"id\" = row.\"pack_id\" AND p.\"workspace_id\" = {workspace}) AND EXISTS (SELECT 1 FROM {memories} AS m WHERE m.\"id\" = row.\"memory_id\" AND m.\"workspace_id\" = {workspace})"
+        CopyScope::PackItemOrOmission => Some(format!(
+            "EXISTS (SELECT 1 FROM {packs} AS p WHERE p.id = row.pack_id AND p.workspace_id = {workspace}) AND (row.memory_id IS NULL OR EXISTS (SELECT 1 FROM {memories} AS m WHERE m.id = row.memory_id AND m.workspace_id = {workspace}))"
+        )),
+        CopyScope::PackChild => Some(format!(
+            "EXISTS (SELECT 1 FROM {packs} AS p WHERE p.id = row.pack_id AND p.workspace_id = {workspace})"
         )),
         CopyScope::MemoryLinks => Some(format!(
             "EXISTS (SELECT 1 FROM {memories} AS src WHERE src.\"id\" = row.\"src_memory_id\" AND src.\"workspace_id\" = {workspace}) AND EXISTS (SELECT 1 FROM {memories} AS dst WHERE dst.\"id\" = row.\"dst_memory_id\" AND dst.\"workspace_id\" = {workspace})"
@@ -1643,6 +1667,33 @@ mod tests {
         let source = DbConnection::open_file(&source_path).map_err(|error| error.to_string())?;
         apply_schema_migrations_deterministically(&source).map_err(|error| error.to_string())?;
         seed_two_workspace_source(&source)?;
+        let surface = crate::models::CreateMemoryAnchorInput::from_stored_code_surface(
+            MEM_A,
+            crate::models::MemoryAnchorKind::Path,
+            "src/alpha.rs",
+            crate::models::MemoryAnchorSource::Explicit,
+            "memory.anchors",
+        )
+        .ok_or_else(|| "invalid test locator".to_owned())?;
+        source
+            .with_transaction(|| source.attach_memory_code_anchor_sources(WSP_A, MEM_A, &[surface]))
+            .map_err(|error| error.to_string())?;
+        source
+            .execute_raw(&format!(
+                "UPDATE memories SET content = '{}' WHERE id = '{MEM_B}'",
+                crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+            ))
+            .map_err(|error| error.to_string())?;
+        let seal = crate::models::MemorySeal {
+            memory_id: MEM_B.to_owned(),
+            content_commitment: crate::models::memory_seal_commitment(b"unrevealed beta"),
+            sealed_at: "2026-01-01T00:00:00Z".to_owned(),
+            revealed_at: None,
+            reveal_verified: None,
+        };
+        source
+            .insert_memory_seal_for_recovery(&seal)
+            .map_err(|error| error.to_string())?;
         drop(source);
 
         let plan = plan_shard_fanout_migration_from_database(
@@ -1666,6 +1717,10 @@ mod tests {
                 .get("agent_context_profiles"),
             Some(&1)
         );
+
+        for table in ["memory_anchors", "memory_code_anchor_sources"] {
+            assert_eq!(workspace_a.row_counts_by_table.get(table), Some(&1));
+        }
 
         let first = apply_shard_fanout_migration(&plan).map_err(|error| error.to_string())?;
         assert_eq!(first.outcome, ShardFanoutMigrationOutcome::Applied);
@@ -1693,8 +1748,28 @@ mod tests {
             )?,
             0
         );
+        for (shard, pack, native_table, foreign_table) in [
+            (&shard_a, PACK_A, "pack_rule_items", "pack_evidence_items"),
+            (&shard_b, PACK_B, "pack_evidence_items", "pack_rule_items"),
+        ] {
+            assert_eq!(scalar_count(shard, "SELECT COUNT(*) FROM pack_items")?, 2);
+            assert_eq!(
+                scalar_count(
+                    shard,
+                    &format!("SELECT COUNT(*) FROM {native_table} WHERE pack_id = '{pack}'"),
+                )?,
+                1
+            );
+            assert_eq!(
+                scalar_count(shard, &format!("SELECT COUNT(*) FROM {foreign_table}"))?,
+                0
+            );
+        }
         assert_eq!(
-            scalar_count(&shard_a, "SELECT COUNT(*) FROM pack_items")?,
+            scalar_count(
+                &shard_b,
+                "SELECT COUNT(*) FROM pack_omissions WHERE rule_id IS NOT NULL",
+            )?,
             1
         );
         assert_eq!(
@@ -1706,6 +1781,41 @@ mod tests {
             1
         );
         assert_eq!(scalar_count(&shard_b, "SELECT COUNT(*) FROM memories")?, 1);
+        let anchors = shard_a
+            .list_memory_code_anchor_sources(MEM_A)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].normalized_value, "src/alpha.rs");
+        for table in ["memory_anchors", "memory_code_anchor_sources"] {
+            assert_eq!(
+                scalar_count(&shard_b, &format!("SELECT COUNT(*) FROM {table}"))?,
+                0
+            );
+        }
+        assert_eq!(
+            scalar_count(&shard_a, "SELECT COUNT(*) FROM memory_seals")?,
+            0
+        );
+        assert_eq!(
+            shard_b
+                .get_effective_memory_seal(MEM_B)
+                .map_err(|error| error.to_string())?,
+            Some(seal)
+        );
+        for (shard, spec_hash, status) in [(&shard_a, HASH_A, "fail"), (&shard_b, HASH_B, "pass")] {
+            for table in ["memory_sentinel_specs", "memory_sentinel_results"] {
+                assert_eq!(workspace_a.row_counts_by_table.get(table), Some(&1));
+                assert_eq!(
+                    scalar_count(shard, &format!("SELECT COUNT(*) FROM {table}"))?,
+                    1
+                );
+            }
+            let result = shard
+                .latest_memory_sentinel_result(spec_hash)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "shard lost sentinel result".to_owned())?;
+            assert_eq!(result.status.as_str(), status);
+        }
         assert_shard_audit_chain(&shard_a, WSP_A, MEM_A)?;
         assert_shard_audit_chain(&shard_b, WSP_B, MEM_B)?;
         drop(shard_a);
@@ -1771,6 +1881,18 @@ mod tests {
              ('{MEM_B}', '{WSP_B}', 'semantic', 'fact', 'beta fact', 0.9, 0.8, 0.7, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
         ))
         .map_err(|error| error.to_string())?;
+        for (memory, hash, status) in [(MEM_A, HASH_A, "fail"), (MEM_B, HASH_B, "pass")] {
+            conn.execute_raw(&format!(
+                "INSERT INTO memory_sentinel_specs (spec_hash, memory_id, sentinel_kind, target, expected_predicate, safety_class, provenance, created_at, updated_at) VALUES \
+                 ('{hash}', '{memory}', 'path_exists', 'src/lib.rs', 'exists', 'pure_predicate', 'migration test', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+            ))
+            .map_err(|error| error.to_string())?;
+            conn.execute_raw(&format!(
+                "INSERT INTO memory_sentinel_results (result_hash, spec_hash, status, checked_at, evidence_summary, created_at) VALUES \
+                 ('{hash}', '{hash}', '{status}', '2026-01-01T00:00:00Z', 'checked path', '2026-01-01T00:00:00Z')"
+            ))
+            .map_err(|error| error.to_string())?;
+        }
         conn.execute_raw(&format!(
             "INSERT INTO audit_log (id, workspace_id, timestamp, actor, action, target_type, target_id, details) VALUES \
              ('audit_aaaaaaaaaaaaaaaaaaaaaaaaaa', '{WSP_A}', '2026-01-01T00:00:00Z', 'tester', 'memory.create', 'memory', '{MEM_A}', '{{\"ok\":true}}'), \
@@ -1779,8 +1901,8 @@ mod tests {
         .map_err(|error| error.to_string())?;
         conn.execute_raw(&format!(
             "INSERT INTO pack_records (id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, created_at) VALUES \
-             ('{PACK_A}', '{WSP_A}', 'alpha', 'compact', 100, 10, 1, 0, '{HASH_A}', '2026-01-01T00:00:00Z'), \
-             ('{PACK_B}', '{WSP_B}', 'beta', 'compact', 100, 10, 1, 0, '{HASH_B}', '2026-01-01T00:00:00Z')"
+             ('{PACK_A}', '{WSP_A}', 'alpha', 'compact', 100, 10, 2, 0, '{HASH_A}', '2026-01-01T00:00:00Z'), \
+             ('{PACK_B}', '{WSP_B}', 'beta', 'compact', 100, 10, 2, 1, '{HASH_B}', '2026-01-01T00:00:00Z')"
         ))
         .map_err(|error| error.to_string())?;
         conn.execute_raw(&format!(
@@ -1789,6 +1911,7 @@ mod tests {
              ('{PACK_B}', '{MEM_B}', 1, 'decisions', 5, 0.9, 0.8, 'beta why')"
         ))
         .map_err(|error| error.to_string())?;
+        seed_native_pack_history(conn)?;
         conn.execute_raw(&format!(
             "INSERT INTO graph_snapshots (id, workspace_id, snapshot_version, schema_version, graph_type, node_count, edge_count, metrics_json, content_hash, source_generation, created_at) VALUES \
              ('gsnap_aaaaaaaaaaaaaaaaaaaaaaaaa', '{WSP_A}', 1, 'ee.graph.snapshot.v1', 'memory_links', 1, 0, '{{}}', '{HASH_A}', 1, '2026-01-01T00:00:00Z'), \
@@ -1801,6 +1924,33 @@ mod tests {
              ('{WSP_B}', 'tester', '{MEM_B}', '2026-01-01T00:00:00Z')"
         ))
         .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn seed_native_pack_history(conn: &DbConnection) -> TestResult {
+        let rule_a = "rule_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let rule_b = "rule_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let session = "sess_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let evidence = "ev_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let time = "2026-01-01T00:00:00Z";
+        for (workspace, rule) in [(WSP_A, rule_a), (WSP_B, rule_b)] {
+            conn.execute_raw(&format!(
+                "INSERT INTO procedural_rules (id, workspace_id, content, confidence, utility, importance, trust_class, created_at, updated_at) VALUES \
+                 ('{rule}', '{workspace}', 'Check release artifacts', 1, 1, 1, 'human_explicit', '{time}', '{time}')"
+            ))
+            .map_err(|error| error.to_string())?;
+        }
+        for sql in [
+            format!("INSERT INTO sessions (id, workspace_id, cass_session_id, content_hash, imported_at, updated_at) VALUES ('{session}', '{WSP_B}', '{HASH_B}', '{HASH_B}', '{time}', '{time}')"),
+            format!("INSERT INTO evidence_spans (id, workspace_id, session_id, cass_span_id, span_kind, start_line, end_line, excerpt, content_hash, created_at, updated_at) VALUES ('{evidence}', '{WSP_B}', '{session}', '{HASH_B}', 'message', 1, 1, 'Artifact verified', '{HASH_B}', '{time}', '{time}')"),
+            format!("INSERT INTO pack_rule_items (pack_id, rule_id, entity_revision, rank, section, estimated_tokens, relevance, utility, why, provenance_json, trust_class) VALUES ('{PACK_A}', '{rule_a}', '{HASH_A}', 2, 'procedural_rules', 5, 1, 1, 'Release rule', '{{}}', 'human_explicit')"),
+            format!("INSERT INTO pack_evidence_items (pack_id, evidence_id, entity_revision, rank, section, estimated_tokens, relevance, utility, why, provenance_json, trust_class) VALUES ('{PACK_B}', '{evidence}', '{HASH_B}', 2, 'evidence', 5, 1, 1, 'Release evidence', '{{}}', 'cass_evidence')"),
+            format!("INSERT INTO pack_items (pack_id, rule_id, rank, section, estimated_tokens, relevance, utility, why) VALUES ('{PACK_A}', '{rule_a}', 2, 'procedural_rules', 5, 1, 1, 'Release rule')"),
+            format!("INSERT INTO pack_items (pack_id, evidence_span_id, rank, section, estimated_tokens, relevance, utility, why) VALUES ('{PACK_B}', '{evidence}', 2, 'evidence', 5, 1, 1, 'Release evidence')"),
+            format!("INSERT INTO pack_omissions (pack_id, rule_id, estimated_tokens, reason) VALUES ('{PACK_B}', '{rule_b}', 12, 'token_budget_exceeded')"),
+        ] {
+            conn.execute_raw(&sql).map_err(|error| error.to_string())?;
+        }
         Ok(())
     }
 
