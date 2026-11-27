@@ -455,8 +455,16 @@ impl IndexGenerationLease {
         else {
             return Ok(None);
         };
+        // Structural, like the published_index_generation watermark that
+        // supplies expected_generation: lexical warming opens no vector bytes,
+        // so the process-default embedder has no say in it.
         if metadata.generation != Some(expected_generation)
-            || super::index_metadata_compatibility_error(&metadata_path, &metadata).is_some()
+            || super::index_metadata_compatibility_error_with_identity(
+                &metadata_path,
+                &metadata,
+                None,
+            )
+            .is_some()
         {
             return Ok(None);
         }
