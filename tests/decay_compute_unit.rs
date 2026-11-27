@@ -42,6 +42,43 @@ fn freshness_function_pins_half_life_boundaries() {
 }
 
 #[test]
+fn default_half_lives_are_the_documented_learn_decay_defaults() {
+    // README "Memory Model" says its half-lives are the `[learn.decay]`
+    // defaults shown under Configuration, so hold that block to the code.
+    let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))
+        .expect("README.md should be readable");
+    let block = readme
+        .split("\n[learn.decay]\n")
+        .nth(1)
+        .expect("README should show a [learn.decay] block");
+    let documented = |key: &str| -> f32 {
+        block
+            .lines()
+            .take_while(|line| !line.trim().is_empty())
+            .find_map(|line| {
+                let (name, value) = line.split_once('=')?;
+                (name.trim() == key).then(|| value.split('#').next().unwrap_or_default().trim())
+            })
+            .unwrap_or_else(|| panic!("README [learn.decay] should set {key}"))
+            .parse()
+            .unwrap_or_else(|error| {
+                panic!("README [learn.decay] {key} should be a number: {error}")
+            })
+    };
+    let defaults = MemoryDecayHalfLives::default();
+    for (key, value) in [
+        ("working_half_life_days", defaults.working),
+        ("episodic_event_half_life_days", defaults.episodic_event),
+        ("episodic_failure_half_life_days", defaults.episodic_failure),
+        ("semantic_fact_half_life_days", defaults.semantic_fact),
+        ("procedural_rule_half_life_days", defaults.procedural_rule),
+        ("default_half_life_days", defaults.default),
+    ] {
+        assert_eq!(documented(key), value, "{key}");
+    }
+}
+
+#[test]
 fn configured_half_life_is_deterministic() {
     let as_of = "2026-01-11T00:00:00Z".parse().expect("as_of should parse");
     let reference = "2026-01-01T00:00:00Z"

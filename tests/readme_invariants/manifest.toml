@@ -178,7 +178,7 @@ verify = { type = "test", path = "tests/cancellation_graph.rs" }
 [[invariant]]
 id = "rfm-003-concurrent-writer-performance-row"
 readme_section = "Performance"
-readme_line_anchor = 3181
+readme_line_anchor = 3187
 sentence_hash = "blake3:b9bdf07e2ed0c10b141a3f35a7530f674158aa9f04a4ad00d8b9fad997277b62"
 classification = "quantitative"
 verify = { type = "test", path = "tests/readme_perf_sync.rs" }
@@ -186,7 +186,7 @@ verify = { type = "test", path = "tests/readme_perf_sync.rs" }
 [[invariant]]
 id = "rfm-004-no-silent-memory-rewrite-faq"
 readme_section = "FAQ"
-readme_line_anchor = 3731
+readme_line_anchor = 3737
 sentence_hash = "blake3:935a24556f4d3cffd019528aae7efa59e2c4dba3abd93112a8f0e8f8e85ec4b2"
 classification = "promise"
 verify = { type = "test", path = "tests/contracts/audit_event_coverage.rs" }
@@ -310,7 +310,7 @@ verify = { type = "test", path = "tests/forbidden_deps.rs" }
 [[invariant]]
 id = "rfm-019-secret-redaction-never-on-disk"
 readme_section = "Privacy & Trust"
-readme_line_anchor = 2799
+readme_line_anchor = 2805
 sentence_hash = "blake3:eebb6a8aaa842756b7e3ff0aeea595201c28631b3bbb68e6247e1a1358ce99fd"
 classification = "promise"
 verify = { type = "test", path = "tests/redaction_fuzz.rs" }
@@ -318,7 +318,7 @@ verify = { type = "test", path = "tests/redaction_fuzz.rs" }
 [[invariant]]
 id = "rfm-020-prompt-injection-quarantine"
 readme_section = "Privacy & Trust"
-readme_line_anchor = 2834
+readme_line_anchor = 2840
 sentence_hash = "blake3:e4d1857af79753026cbd737ed2948623dd8ba0a79e3415a09df0e2146c4dbb73"
 classification = "promise"
 verify = { type = "test", path = "tests/bayesian_trust_class_transitions_unit.rs" }
@@ -326,7 +326,7 @@ verify = { type = "test", path = "tests/bayesian_trust_class_transitions_unit.rs
 [[invariant]]
 id = "rfm-021-migration-atomicity"
 readme_section = "Troubleshooting"
-readme_line_anchor = 3322
+readme_line_anchor = 3328
 sentence_hash = "blake3:d2dc20f433b4ffa3639fb7ace57d4fc947841a76bef53ca8b7c03c2d4f2d6efe"
 classification = "promise"
 verify = { type = "test", path = "tests/e2e_migration_boundary.rs" }
@@ -334,7 +334,7 @@ verify = { type = "test", path = "tests/e2e_migration_boundary.rs" }
 [[invariant]]
 id = "rfm-022-tokio-forbidden-ci-audit"
 readme_section = "FAQ"
-readme_line_anchor = 3663
+readme_line_anchor = 3669
 sentence_hash = "blake3:2e498161dfcffd18f603f9839f366494f4bd887bf162d2cd6b74d9bbed78a371"
 classification = "constraint"
 verify = { type = "test", path = "tests/forbidden_deps.rs" }
@@ -342,7 +342,7 @@ verify = { type = "test", path = "tests/forbidden_deps.rs" }
 [[invariant]]
 id = "rfm-023-indexes-derived-from-db"
 readme_section = "FAQ"
-readme_line_anchor = 3689
+readme_line_anchor = 3695
 sentence_hash = "blake3:d57134fa7080b09c3954a8ff2e9055da2d5e70472f26c8bde42805d6164fbb9c"
 classification = "promise"
 verify = { type = "test", path = "tests/snapshot_index_recovery_e2e.rs" }
@@ -353,7 +353,7 @@ verify = { type = "test", path = "tests/snapshot_index_recovery_e2e.rs" }
 [[invariant]]
 id = "rfm-024-warm-daemon-read-only-pack-latency"
 readme_section = "Claude Code"
-readme_line_anchor = 2700
+readme_line_anchor = 2706
 sentence_hash = "blake3:6430dcca283570b80337493089515e35f85a2cb1d1b93e508096550aba9f04ad"
 classification = "quantitative"
 verify = { type = "test", path = "tests/readme_perf_sync.rs" }
@@ -395,7 +395,7 @@ verify = { type = "test", path = "tests/contracts/index_intake_schema.rs" }
 [[invariant]]
 id = "rfm-029-hooks-never-deny-shell-commands"
 readme_section = "Harness Hooks"
-readme_line_anchor = 2679
+readme_line_anchor = 2685
 sentence_hash = "blake3:ed7d8aae70ef924a7449e8fb4b4d10157f00e9e273d1ff00996346df24b41def"
 classification = "invariant"
 verify = { type = "test", path = "tests/harness_hook_install_audit.rs" }
@@ -403,7 +403,7 @@ verify = { type = "test", path = "tests/harness_hook_install_audit.rs" }
 [[invariant]]
 id = "rfm-030-restore-never-replaces-existing-store"
 readme_section = "Backup & Restore"
-readme_line_anchor = 3038
+readme_line_anchor = 3044
 sentence_hash = "blake3:be1b159840a5834e0d875000389fdbfd8a7d5b769ffa6fd982e86b96ed36aff6"
 classification = "invariant"
 verify = { type = "test", path = "tests/e2e_backup_restore_roundtrip.rs" }
@@ -411,7 +411,7 @@ verify = { type = "test", path = "tests/e2e_backup_restore_roundtrip.rs" }
 [[invariant]]
 id = "rfm-031-cass-binary-path-validation"
 readme_section = "CASS Integration"
-readme_line_anchor = 3304
+readme_line_anchor = 3310
 sentence_hash = "blake3:f9bcb3cf3d3d2214558cdaa706c7d0dbf96a6c162ab155bafafaf6bbe96aab18"
 classification = "invariant"
 verify = { type = "test", path = "tests/contracts/cass_robot.rs" }
@@ -437,3 +437,29 @@ readme_line_anchor = 783
 sentence_hash = "blake3:7b0629c86f1956a51295c9d15550c7636e51d20a63724d8edf4f2d69f924a7e8"
 classification = "promise"
 verify = { type = "test", path = "tests/harness_hook_install_audit.rs::install_audit_distinguishes_empty_counts_from_unavailable_settings" }
+
+[[invariant]]
+id = "rfm-034-decay-half-lives-are-learn-decay-defaults"
+readme_section = "Memory Model"
+readme_line_anchor = 2271
+sentence_hash = "blake3:f5451037f019ea7e42e583d606594ee0e6a697634f7d285c4d74e45697cb576e"
+classification = "quantitative"
+verify = { type = "test", path = "tests/decay_compute_unit.rs::default_half_lives_are_the_documented_learn_decay_defaults" }
+
+[[invariant]]
+id = "rfm-035-decay-demotes-one-level-at-every-level"
+readme_section = "Memory Model"
+readme_line_anchor = 2272
+sentence_hash = "blake3:fc852335b3a450220e570dcc7274348242c615bebb244c1e9ffd356ace1ff9f9"
+classification = "invariant"
+verify = { type = "test", path = "tests/decay_level_demotion_unit.rs::demotion_ladder_is_reversible_and_non_destructive" }
+
+# evaluate_memory_decay reads only the memory, two timestamps and the
+# thresholds, so contradiction has no input to drive it through.
+[[invariant]]
+id = "rfm-036-decay-tombstones-below-forget-threshold"
+readme_section = "Memory Model"
+readme_line_anchor = 2275
+sentence_hash = "blake3:182df71d05bcd18408edc06f0eb9611f0813636b216b06794ccc7d83ebdc1786"
+classification = "invariant"
+verify = { type = "test", path = "tests/decay_threshold_classification_unit.rs::lifecycle_score_classifies_preserve_demote_and_tombstone" }
