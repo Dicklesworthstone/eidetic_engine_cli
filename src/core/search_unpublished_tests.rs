@@ -1638,8 +1638,9 @@ fn delta_publication_probe(fixture: &Fixture, options: &SearchOptions) -> String
         .await;
         (gap, processed)
     });
-    // A runtime error, such as the budget expiring on a held lock, must not
-    // discard the stages already read outside the runtime.
+    // Only building the runtime fails here, and that must not discard the
+    // stages already read outside it. A budget expiry is not this arm: it
+    // comes back inside `gap` or `processed` as their own error.
     let (gap, processed) = match staged {
         Ok((gap, processed)) => (
             format!("{gap:?}"),
