@@ -1560,12 +1560,12 @@ repository's own `.beads/issues.jsonl` and cannot pass remotely. A red in one of
 them on the lane is not a regression, and nothing in it should be "fixed". Each
 one's verdict comes from its local mirror:
 
-| test | local mirror |
-|---|---|
-| `fleet_identifier_guard::no_private_fleet_identifiers_are_published` (fails closed) | `scripts/check-fleet-identifier-census.py` |
-| `readme_invariant_manifest_schema_is_pinned` | `scripts/check-readme-invariants.py` |
-| `bridge_staleness_gate::bridge_completion_validator_inspects_live_repository_read_only` | `scripts/bridge-staleness.sh` |
-| `swarm_schema_lifecycle::swarm_schema_availability_matches_bead_state` | none |
+| target | test | local mirror |
+|---|---|---|
+| `integration_e_f` | `fleet_identifier_guard::no_private_fleet_identifiers_are_published` (fails closed) | `scripts/check-fleet-identifier-census.py` |
+| `integration_n_r` | `readme_invariant_manifest_schema::readme_invariant_manifest_schema_is_pinned` | `scripts/check-readme-invariants.py` |
+| `integration_a_d` | `bridge_staleness_gate::bridge_completion_validator_inspects_live_repository_read_only` | `scripts/bridge-staleness.sh` |
+| `integration_s_z` | `swarm_schema_lifecycle::swarm_schema_availability_matches_bead_state` | none |
 
 `vision_coverage_gate` also reads the path, but it writes a one-bead fixture
 when the file is absent, so it is not one of them.
