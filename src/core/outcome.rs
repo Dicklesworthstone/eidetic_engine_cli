@@ -1061,10 +1061,11 @@ fn record_outcome_inner(
 
     let record = || {
         let target = if require_learning_observation && target_type == "candidate" {
-            // Typed learn observe/close envelopes use external experiment IDs,
-            // not curation candidate IDs. Only the private learning entrypoint
-            // can select this lane; its mandatory sidecar is validated below.
-            resolve_external_outcome_workspace(&connection, options.workspace_id.as_deref())?
+            resolve_learning_experiment_workspace(
+                &connection,
+                &target_id,
+                options.workspace_id.as_deref(),
+            )?
         } else {
             resolve_target_workspace(
                 &connection,
@@ -3403,20 +3404,12 @@ fn validate_quarantined_feedback_target(
             "Inspect the preserved evidence before releasing this quarantine row.".to_owned(),
         ),
     })?;
-    // Typed learn envelopes can target external experiment IDs. A document
-    // merely cited as evidence does not select that lane, and a live native
-    // candidate always retains its current workspace ownership.
-    let external_experiment = feedback_input.target_type == "candidate"
-        && learning_observation.is_some()
-        && connection
-            .get_curation_candidate_workspace_id(&feedback_input.target_id)
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to query candidate target: {error}"),
-                repair: Some("ee doctor --json".to_owned()),
-            })?
-            .is_none();
-    if external_experiment {
-        resolve_external_outcome_workspace(connection, Some(&feedback_input.workspace_id))?;
+    if feedback_input.target_type == "candidate" && learning_observation.is_some() {
+        resolve_learning_experiment_workspace(
+            connection,
+            &feedback_input.target_id,
+            Some(&feedback_input.workspace_id),
+        )?;
     } else {
         resolve_target_workspace(
             connection,
@@ -3734,6 +3727,31 @@ fn resolve_target_workspace(
     }
 
     resolve_external_outcome_workspace(connection, workspace_id)
+}
+
+/// Experiment IDs are caller-supplied. If one names a native candidate, its
+/// durable owner also governs typed learn writes and quarantine reviews.
+fn resolve_learning_experiment_workspace(
+    connection: &DbConnection,
+    experiment_id: &str,
+    requested_workspace: Option<&str>,
+) -> Result<TargetResolution, DomainError> {
+    let owner = connection
+        .get_curation_candidate_workspace_id(experiment_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query candidate target: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    match owner {
+        Some(workspace_id) => {
+            require_outcome_target_workspace("candidate", &workspace_id, requested_workspace)?;
+            Ok(TargetResolution {
+                workspace_id,
+                verified: true,
+            })
+        }
+        None => resolve_external_outcome_workspace(connection, requested_workspace),
+    }
 }
 
 fn resolve_external_outcome_workspace(
@@ -6919,6 +6937,60 @@ mod tests {
                 "foreign and exact replays must not apply learning a second time"
             );
         }
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn learning_experiment_feedback_honors_native_candidate_ownership() -> TestResult {
+        let (dir, database) = seed_outcome_database("ee-learning-candidate-owner")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        seed_persisted_outcome_targets(&connection)?;
+        connection
+            .insert_workspace(
+                OUTCOME_OTHER_WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: dir.path().join("other").to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut options =
+            native_rule_outcome_options(&database, "confirmation", "fb_00000000000000000000000721");
+        options.target_type = "candidate".to_owned();
+        options.target_id = OUTCOME_OWNERSHIP_CANDIDATE_ID.to_owned();
+        options.source_type = "outcome_observed".to_owned();
+        options.source_id = Some("acceptance-run".to_owned());
+        options.evidence_json = Some(
+            serde_json::json!({
+                "schema": crate::models::EXPERIMENT_OUTCOME_SCHEMA_V1,
+                "experimentId": options.target_id,
+                "outcomeId": "acceptance-run",
+                "closedAt": "2026-09-20T00:00:00Z",
+                "status": "confirmed",
+            })
+            .to_string(),
+        );
+        options.workspace_id = Some(OUTCOME_OTHER_WORKSPACE_ID.to_owned());
+        let before = connection
+            .logical_table_digests()
+            .map_err(|error| error.to_string())?;
+        assert!(matches!(
+            super::record_learning_outcome(&options),
+            Err(DomainError::PolicyDenied { .. })
+        ));
+        assert_eq!(
+            connection
+                .logical_table_digests()
+                .map_err(|error| error.to_string())?,
+            before
+        );
+
+        options.workspace_id = Some(OUTCOME_TEST_WORKSPACE_ID.to_owned());
+        let accepted = super::record_learning_outcome(&options).map_err(|error| error.message())?;
+        assert_eq!(accepted.status, OutcomeRecordStatus::Recorded);
+        assert!(accepted.target_verified);
+        assert_eq!(accepted.workspace_id, OUTCOME_TEST_WORKSPACE_ID);
         connection.close().map_err(|error| error.to_string())
     }
 
