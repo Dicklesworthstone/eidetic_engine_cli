@@ -619,7 +619,10 @@ fn superseded_quarantine_release_rolls_back_but_receipt_replay_and_rejection_wor
     review.dry_run = false;
     let error = review_feedback_quarantine(&review).unwrap_err();
     assert!(matches!(&error, DomainError::Storage { .. }));
-    assert!(error.message().contains("no longer live"), "{error:?}");
+    // Since 43e0f8114 the release rechecks target admission after its claim,
+    // before learning, so a superseded memory is refused there rather than
+    // at the learning step's "no longer live" check.
+    assert!(error.message().contains("no longer admitted"), "{error:?}");
     assert_eq!(
         fixture.persisted_feedback_state(),
         before,
@@ -731,7 +734,11 @@ fn superseded_memory_blocks_an_already_approved_anti_pattern() {
         },
     )
     .unwrap();
-    assert_eq!(validation.validation.decision, "approved");
+    assert_eq!(
+        validation.validation.decision, "approved",
+        "the anti-pattern candidate was not approved: {:?}",
+        validation.validation
+    );
     let mut options = crate::core::curate::CurateApplyOptions {
         workspace_path: fixture._root.path(),
         database_path: Some(&fixture.database),

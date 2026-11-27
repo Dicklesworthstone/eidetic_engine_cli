@@ -10534,14 +10534,26 @@ mod tests {
             });
             let held =
                 queue_native_feedback_quarantine(&database, target_type, target_id, evidence)?;
-            connection
-                .execute_raw(&format!(
-                    "UPDATE {table} SET workspace_id = '{OUTCOME_OTHER_WORKSPACE_ID}' WHERE id = '{target_id}'"
-                ))
-                .map_err(|error| error.to_string())?;
-            let before = connection
-                .logical_table_digests()
-                .map_err(|error| error.to_string())?;
+            let moved = connection.execute_raw(&format!(
+                "UPDATE {table} SET workspace_id = '{OUTCOME_OTHER_WORKSPACE_ID}' WHERE id = '{target_id}'"
+            ));
+            // insert_pack_record writes one candidate impression per packed
+            // item, and trigger pack_records_native_workspace_update refuses
+            // to move a pack that has any. So a moved pack is unreachable:
+            // pin that refusal, then check only that the pack stays releasable.
+            let moved = if target_type == "pack" {
+                match moved {
+                    Err(error) if error.to_string().contains("pack workspace is bound") => false,
+                    other => {
+                        return Err(format!(
+                            "the schema must refuse moving a pack with impressions: {other:?}"
+                        ));
+                    }
+                }
+            } else {
+                moved.map_err(|error| error.to_string())?;
+                true
+            };
             let mut review = OutcomeQuarantineReviewOptions {
                 workspace_path: dir.path(),
                 database_path: Some(&database),
@@ -10550,22 +10562,28 @@ mod tests {
                 actor: Some("ownership-reviewer"),
                 dry_run: true,
             };
-            for dry_run in [true, false] {
-                review.dry_run = dry_run;
-                assert!(review_feedback_quarantine(&review).is_err());
-                assert_eq!(
-                    connection
-                        .logical_table_digests()
-                        .map_err(|error| error.to_string())?,
-                    before,
-                    "{target_type} ownership must be checked against the live native row"
-                );
+            if moved {
+                let before = connection
+                    .logical_table_digests()
+                    .map_err(|error| error.to_string())?;
+                for dry_run in [true, false] {
+                    review.dry_run = dry_run;
+                    assert!(review_feedback_quarantine(&review).is_err());
+                    assert_eq!(
+                        connection
+                            .logical_table_digests()
+                            .map_err(|error| error.to_string())?,
+                        before,
+                        "{target_type} ownership must be checked against the live native row"
+                    );
+                }
+                connection
+                    .execute_raw(&format!(
+                        "UPDATE {table} SET workspace_id = '{OUTCOME_TEST_WORKSPACE_ID}' WHERE id = '{target_id}'"
+                    ))
+                    .map_err(|error| error.to_string())?;
             }
-            connection
-                .execute_raw(&format!(
-                    "UPDATE {table} SET workspace_id = '{OUTCOME_TEST_WORKSPACE_ID}' WHERE id = '{target_id}'"
-                ))
-                .map_err(|error| error.to_string())?;
+            review.dry_run = false;
             assert_eq!(
                 review_feedback_quarantine(&review)
                     .map_err(|error| error.message())?

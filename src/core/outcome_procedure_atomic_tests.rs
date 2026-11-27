@@ -181,7 +181,16 @@ impl Fixture {
         assert_eq!(after.updated_at, before.updated_at);
         assert_eq!(after.retired_at, before.retired_at);
         assert_eq!(after.retire_reason, before.retire_reason);
-        assert_eq!(self.counts(), counts);
+        // Name the audit rows, so a count mismatch says which write was extra.
+        assert_eq!(
+            self.counts(),
+            counts,
+            "(feedback events, audit rows, procedure events); audit actions {:?}",
+            self.db.list_audit_entries(None, None).map(|entries| entries
+                .into_iter()
+                .map(|entry| (entry.action, entry.target_id))
+                .collect::<Vec<_>>())
+        );
     }
 }
 
