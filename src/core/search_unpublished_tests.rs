@@ -1567,14 +1567,17 @@ fn embedding_search_publishes_first_generation_from_deferred_remember() {
 /// name its cause (bd-q1e4y: C75z5 at 3ed75b4a1 showed one embed call since
 /// the remember, the index one generation behind, and nothing else). That
 /// one call fits the query alone, so the delta may never have been embedded.
-/// This renders the job rows and re-evaluates each stage in the search's
-/// order, on the same store:
+/// This renders the job rows and re-evaluates each stage on the same store.
+/// Stages 1 to 3 only read, so the order they run in changes nothing. The
+/// processor can publish, so it runs last:
 /// 1. the source upper bound against the full-rebuild ceiling, where `Some(false)`
 ///    selects the bounded path;
 /// 2. the bounded generation gap, where `Ok(None)` skips the repair;
-/// 3. the metadata gate inside the processor's streamed-delta path, evaluated
-///    on its own: the process default embedder its embedding-space check
-///    compares against, and the verdict, where any `Err` declines the delta;
+/// 3. the streamed delta's metadata validation, evaluated on its own, with the
+///    process default embedder that its embedding-space check compares against.
+///    Any `Err` declines the delta. The same compatibility check also ends the
+///    generation fit test that gate 2 and the processor each run first, so an
+///    `Err` here also explains a gate-2 `Ok(None)`;
 /// 4. the bounded coalesced processor, with the same one-job limit, since both
 ///    callers queue exactly one delta. A job reported skipped as "deferred"
 ///    means the streamed delta was declined. The census beside it shows the
@@ -1635,9 +1638,17 @@ fn delta_publication_probe(fixture: &Fixture, options: &SearchOptions) -> String
         .await;
         (gap, processed)
     });
+    // A runtime error, such as the budget expiring on a held lock, must not
+    // discard the stages already read outside the runtime.
     let (gap, processed) = match staged {
-        Ok((gap, processed)) => (format!("{gap:?}"), processed),
-        Err(error) => return format!("jobs before probe {jobs:?}; runtime error: {error:?}"),
+        Ok((gap, processed)) => (
+            format!("{gap:?}"),
+            processed.map_err(|error| format!("error: {error:?}")),
+        ),
+        Err(error) => (
+            "not returned".to_owned(),
+            Err(format!("runtime error: {error:?}")),
+        ),
     };
     let processed = match processed {
         Ok(report) => format!(
@@ -1659,7 +1670,7 @@ fn delta_publication_probe(fixture: &Fixture, options: &SearchOptions) -> String
                 })
                 .collect::<Vec<_>>()
         ),
-        Err(error) => format!("error: {error:?}"),
+        Err(error) => error,
     };
     format!(
         "jobs before probe {jobs:?}; 1. upper bound fits {upper_bound_fits:?}; \

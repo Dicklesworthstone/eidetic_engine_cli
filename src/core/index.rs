@@ -4506,7 +4506,11 @@ fn validate_incremental_index_metadata_with_limit(
 /// embedding-space check, which compares the stored producer with
 /// [`active_semantic_identity`]. That is the process-wide default embedder,
 /// once anything in the process has resolved it, and not the workspace stack
-/// that will embed the delta. Reporting both lets a red name that case.
+/// that will embed the delta. The same compatibility check ends
+/// `delta_source::bounded_generation_fits`, which the read-repair hint
+/// (`bounded_generation_gap`) and the bounded processor both run first, and
+/// which declines without logging. Reporting the identity and the verdict lets
+/// a red name that case.
 #[cfg(all(test, unix))]
 pub(crate) fn delta_metadata_gate_for_test(index_dir: &Path, database_generation: u64) -> String {
     format!(
