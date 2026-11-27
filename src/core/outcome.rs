@@ -1518,12 +1518,8 @@ fn record_outcome_inner(
         let (confidence_before, confidence_after) =
             confidence.map_or((None, None), |(before, after)| (Some(before), Some(after)));
 
-        let feedback = current_feedback_summary(
-            &connection,
-            &target.workspace_id,
-            &target_type,
-            &target_id,
-        )?;
+        let feedback =
+            current_feedback_summary(&connection, &target.workspace_id, &target_type, &target_id)?;
 
         trace_sprt_quarantine("response", 0, &[]);
         Ok(OutcomeRecordReport {
@@ -3448,6 +3444,19 @@ fn validate_quarantined_feedback_target(
     Ok(learning_observation)
 }
 
+/// Keep policy denials and their repair commands distinct from transaction
+/// failures while rolling back the same pending-row claim in both cases.
+struct QuarantineReleaseError(DomainError);
+
+impl From<crate::db::DbError> for QuarantineReleaseError {
+    fn from(error: crate::db::DbError) -> Self {
+        Self(DomainError::Storage {
+            message: format!("Failed to release feedback quarantine: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })
+    }
+}
+
 fn release_feedback_quarantine_audited(
     connection: &DbConnection,
     row: &StoredFeedbackQuarantine,
@@ -3458,25 +3467,20 @@ fn release_feedback_quarantine_audited(
     let audit_id = generate_audit_id();
     let details = feedback_quarantine_review_audit_details(row, "released", Some(event_id));
     connection
-        .with_transaction(|| {
+        .with_transaction_error(|| {
             // The caller's pending row may predate a competing review. Claim
             // the transition before feedback, rule updates or audit work. The
             // event FK is attached after insertion, within this transaction.
             if !connection.update_feedback_quarantine_status(&row.id, "released", actor, None)? {
-                return already_reviewed_feedback_quarantine_summary(connection, row, "release");
+                return already_reviewed_feedback_quarantine_summary(connection, row, "release")
+                    .map_err(QuarantineReleaseError::from);
             }
             // Evidence admission and native target ownership can change while
             // feedback is held. Recheck authoritative rows after writer
             // acquisition; failure must also roll back the review claim.
-            let not_admitted = || crate::db::DbError::MalformedRow {
-                operation: crate::db::DbOperation::Execute,
-                message:
-                    "Quarantined feedback target is no longer admitted in its original workspace."
-                        .to_owned(),
-            };
             let learning_observation =
                 validate_quarantined_feedback_target(connection, feedback_input, event_id)
-                    .map_err(|_| not_admitted())?;
+                    .map_err(QuarantineReleaseError)?;
             connection.insert_feedback_event(event_id, feedback_input)?;
             apply_native_rule_outcome_in_txn(connection, feedback_input, event_id, actor)?;
             // Admission releases the original observation; it does not grant
@@ -3516,10 +3520,7 @@ fn release_feedback_quarantine_audited(
                 audit_id: Some(audit_id),
             })
         })
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to release feedback quarantine: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })
+        .map_err(|error: QuarantineReleaseError| error.0)
 }
 
 fn feedback_quarantine_review_audit_details(

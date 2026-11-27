@@ -611,18 +611,15 @@ fn superseded_quarantine_release_rolls_back_but_receipt_replay_and_rejection_wor
 
     let mut review = fixture.release_options(&quarantine_id);
     review.dry_run = true;
-    assert!(matches!(
-        review_feedback_quarantine(&review),
-        Err(DomainError::PolicyDenied { .. })
-    ));
+    let preview_error = review_feedback_quarantine(&review).unwrap_err();
+    assert!(matches!(&preview_error, DomainError::PolicyDenied { .. }));
+    assert!(preview_error.message().contains("superseded"));
     assert_eq!(fixture.persisted_feedback_state(), before);
     review.dry_run = false;
-    let error = review_feedback_quarantine(&review).unwrap_err();
-    assert!(matches!(&error, DomainError::Storage { .. }));
-    // Since 43e0f8114 the release rechecks target admission after its claim,
-    // before learning, so a superseded memory is refused there rather than
-    // at the learning step's "no longer live" check.
-    assert!(error.message().contains("no longer admitted"), "{error:?}");
+    assert_eq!(
+        review_feedback_quarantine(&review).unwrap_err(),
+        preview_error
+    );
     assert_eq!(
         fixture.persisted_feedback_state(),
         before,
