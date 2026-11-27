@@ -3207,22 +3207,27 @@ where
         .filter(|_| !_publish_lock.bounded_publication)
         .and_then(|documents| {
             let max_generation_lag = u64::try_from(documents.len()).unwrap_or(u64::MAX).max(1);
-            validate_incremental_index_metadata(index_dir, published_generation, max_generation_lag, None)
-                .err()
-                .map(|fallback| {
-                    let reason = fallback.reason;
-                    let detail = fallback.detail;
-                    tracing::info!(
-                        target: "ee::index",
-                        workspace_id = %workspace_id,
-                        claimed_jobs = claimed.len(),
-                        fallback_to_full = reason.as_str(),
-                        detail = %detail,
-                        "coalesced incremental index intake fell back to full rebuild"
-                    );
-                    processing_mode.push_str("_fallback_to_full");
-                    reason.as_str().to_owned()
-                })
+            validate_incremental_index_metadata(
+                index_dir,
+                published_generation,
+                max_generation_lag,
+                None,
+            )
+            .err()
+            .map(|fallback| {
+                let reason = fallback.reason;
+                let detail = fallback.detail;
+                tracing::info!(
+                    target: "ee::index",
+                    workspace_id = %workspace_id,
+                    claimed_jobs = claimed.len(),
+                    fallback_to_full = reason.as_str(),
+                    detail = %detail,
+                    "coalesced incremental index intake fell back to full rebuild"
+                );
+                processing_mode.push_str("_fallback_to_full");
+                reason.as_str().to_owned()
+            })
         });
     if incremental_batch.is_some() && fallback_to_full.is_none() {
         processing_mode.push_str("_staged_full_rebuild");
@@ -6936,7 +6941,10 @@ fn index_generation_is_recoverable(index_dir: &Path) -> bool {
 }
 
 fn recoverable_index_generation(index_dir: &Path) -> Option<u64> {
-    validated_index_generation(index_dir).ok()
+    // Retention and crash recovery preserve complete snapshots. A process
+    // model that cannot query one is not evidence that vacuum can delete it.
+    // Semantic readers validate their producer when opening the snapshot.
+    validated_index_generation_with_identity(index_dir, None).ok()
 }
 
 fn validated_index_generation(index_dir: &Path) -> Result<u64, String> {

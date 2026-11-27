@@ -1783,12 +1783,20 @@ fn strict_semantic_search_publishes_a_small_delta_without_reembedding_a_larger_c
         // while the producer that built it is admitted by the search reader.
         let mismatch = crate::core::index::validate_index_corpus_compatibility(&index_dir)
             .expect_err("the 128d process default must disagree with the stored 256d producer");
-        assert!(mismatch.contains("embedding dimensions cannot be mixed"), "{mismatch}");
+        assert!(
+            mismatch.contains("embedding dimensions cannot be mixed"),
+            "{mismatch}"
+        );
         crate::core::index::validate_index_corpus_compatibility_with_embedder(
             &index_dir,
             embedder.as_ref(),
         )
         .expect("workspace producer matches the published index");
+        let initial_generation = fixture
+            .db
+            .get_workspace_generation(&fixture.workspace)
+            .unwrap()
+            .expect("initial source generation");
 
         let remembered = fixture.remember_deferred(BODY);
         let jobs_before = fixture
@@ -1847,6 +1855,18 @@ fn strict_semantic_search_publishes_a_small_delta_without_reembedding_a_larger_c
         assert_eq!(jobs_after.len(), 1);
         assert_eq!(jobs_after[0].id, jobs_before[0].id);
         assert_eq!(jobs_after[0].status, "completed");
+        // Vacuum and crash recovery must preserve the displaced workspace
+        // generation even though the process-wide model cannot query it.
+        let retention = crate::core::index::retention_gc::plan(&index_dir, 2).unwrap();
+        let previous = retention
+            .kept()
+            .find(|entry| entry.generation == Some(initial_generation))
+            .expect("vacuum must retain the displaced workspace generation");
+        crate::core::index::validate_index_corpus_compatibility_with_embedder(
+            &previous.path,
+            embedder.as_ref(),
+        )
+        .expect("retained workspace snapshot is still queryable");
         let status = crate::core::index::get_index_status(&IndexStatusOptions {
             workspace_path: fixture.root.clone(),
             database_path: Some(fixture.root.join(".ee/ee.db")),
