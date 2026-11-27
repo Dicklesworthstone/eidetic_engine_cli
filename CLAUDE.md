@@ -1524,6 +1524,19 @@ layers: a filtered re-run after each repair is cheap on a warm pinned worker
 (80 s here against a 74-minute unfiltered shard sweep), and it is the only thing
 that finds the next layer.
 
+**AND A REPEAT OF THE SAME PINNED COMMAND RUNS NOTHING AT ALL.** The pinned
+lane's proof broker answers an identical command at an identical sha from its
+ledger. Measured 2026-11-26 in a loop meant to take two consecutive samples of a
+flaky lib filter: the second "run" came back exit 0 with `status:
+"proof_broker_reuse"`, `elapsed_ms: 0` and no remote log at all, so a loop that
+read the exit code reported two greens from one execution. That is the right
+behaviour for a proof and the wrong one for a flake check, which needs an
+independent sample. Read `status` before counting a run. On
+`--pinned-franken-stack`, `--proof-broker-bypass` with any reason other than the
+one token registered for the hermetic contract suite exits 2 with
+`rch_verify_pinned_proof_broker_bypass_refused`. That token is not for this use,
+so a second sample needs a command that differs.
+
 **The discriminator for the first three is the announcement, and it is cheap.**
 libtest prints
 `running N tests` *before* it runs them. A summary belongs to that announcement
