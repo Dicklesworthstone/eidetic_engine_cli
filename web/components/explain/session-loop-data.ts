@@ -157,7 +157,7 @@ export const STATIONS: readonly Station[] = [
     command: 'ee pack "<task>" --workspace . --read-only --max-tokens 4000 --json',
     note: "--read-only writes no pack record, audit row or cache entry.",
     reads: ["data.pack.items[]", "data.pack.skipped[]", "data.pack.skippedTotal", "degraded[]"],
-    footnote: "ee pack --help calls the left-out list data.pack.omitted; the key in the JSON is skipped.",
+    footnote: "skipped[] lists at most 50 of the memories left out; skippedTotal counts all of them.",
     returns:
       "The memories that fit the token budget, each with why it was chosen, its provenance and its trust class, then the memories left out with the reason for each.",
     because:
