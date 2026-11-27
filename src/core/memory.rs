@@ -6683,7 +6683,12 @@ fn propose_curation_candidate_for_remember(
     // deferred write must leave publication to its caller or a later worker,
     // including when tagged memories opt into the default proposal path.
     // Deterministic tag-overlap clustering below remains available.
-    let search_neighbors = if allow_search_neighbors {
+    // Search can only change which members survive truncation. Every eligible
+    // neighbor shares a tag, and the complete cluster is sorted by stable ID
+    // before coherence scoring. When all tag matches fit, skip the query.
+    let search_neighbors = if allow_search_neighbors
+        && potential_cluster_size > REMEMBER_CURATION_NEIGHBOR_LIMIT + 1
+    {
         remember_search_neighbor_ids(prepared, memory_input)
     } else {
         Ok(Vec::new())
@@ -18908,7 +18913,7 @@ mod tests {
     }
 
     #[test]
-    fn remember_curation_skips_search_only_below_the_live_tag_cluster_threshold() -> TestResult {
+    fn remember_curation_searches_only_when_ranking_can_change_cluster_membership() -> TestResult {
         let (connection, input) = remember_curation_growth_fixture()?;
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let prepared = PreparedRememberMemory {
@@ -18982,8 +18987,37 @@ mod tests {
             assert_eq!(queries.len(), input.tags.len(), "only tag IDs are read");
         }
 
+        // Cover the first eligible cluster and the largest one that fits.
+        // A missing index makes an unnecessary neighbor search observable.
+        for ordinal in 2..=REMEMBER_CURATION_NEIGHBOR_LIMIT {
+            connection
+                .insert_memory(&remember_curation_growth_id(ordinal as u32), &input)
+                .map_err(|error| error.to_string())?;
+            if ordinal == 2 || ordinal == REMEMBER_CURATION_NEIGHBOR_LIMIT {
+                let report = propose_curation_candidate_for_remember(
+                    &connection,
+                    &prepared,
+                    &remember_curation_growth_id(0),
+                    &input,
+                    true,
+                    true,
+                )
+                .map_err(|error| error.message())?;
+                assert_ne!(report.status, "skipped_too_few_neighbors");
+                assert!(
+                    !report
+                        .degradations
+                        .iter()
+                        .any(|entry| entry.code == "auto_propose_search_neighbor_lookup_failed")
+                );
+            }
+        }
+
         connection
-            .insert_memory(&remember_curation_growth_id(2), &input)
+            .insert_memory(
+                &remember_curation_growth_id(REMEMBER_CURATION_NEIGHBOR_LIMIT as u32 + 1),
+                &input,
+            )
             .map_err(|error| error.to_string())?;
         let report = propose_curation_candidate_for_remember(
             &connection,
@@ -18994,8 +19028,8 @@ mod tests {
             true,
         )
         .map_err(|error| error.message())?;
-        // The missing search database is a negative control: once a cluster
-        // is possible, the existing semantic lookup and its failure report run.
+        // With twelve live matches, ranking can displace a tag-only member.
+        // The ordinary lookup must run and report its real failure.
         assert!(
             report
                 .degradations
