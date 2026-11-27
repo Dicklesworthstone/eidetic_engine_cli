@@ -137,6 +137,15 @@ impl Fixture {
     }
 
     fn with_workspace(workspace_id: &'static str) -> Self {
+        Self::with_workspace_and_memory(
+            workspace_id,
+            "Release validation requires the integration test suite.",
+        )
+    }
+
+    /// Curation's specificity gate rejects an anti-pattern whose memory names
+    /// no command, path or tool. A test that must reach approval says one.
+    fn with_workspace_and_memory(workspace_id: &'static str, content: &str) -> Self {
         let root = tempfile::tempdir().unwrap();
         let workspace = root.path().canonicalize().unwrap();
         std::fs::create_dir_all(workspace.join(".ee")).unwrap();
@@ -157,7 +166,7 @@ impl Fixture {
                 workspace_id: workspace_id.to_owned(),
                 level: "semantic".to_owned(),
                 kind: "note".to_owned(),
-                content: "Release validation requires the integration test suite.".to_owned(),
+                content: content.to_owned(),
                 workflow_id: None,
                 confidence: 0.5,
                 utility: 0.5,
@@ -712,7 +721,10 @@ fn superseded_memory_cannot_propose_an_anti_pattern_after_feedback_commit() {
 
 #[test]
 fn superseded_memory_blocks_an_already_approved_anti_pattern() {
-    let fixture = Fixture::new();
+    // The default fixture memory names nothing specific, so its anti-pattern
+    // would be rejected as too generic before the supersession check runs.
+    let fixture =
+        Fixture::with_workspace_and_memory(WORKSPACE, "Run cargo fmt --check before release.");
     for ordinal in 1..=3 {
         assert_eq!(
             record_outcome(&fixture.anti_pattern_options(ordinal))
