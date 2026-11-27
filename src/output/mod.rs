@@ -15961,7 +15961,10 @@ pub fn render_agent_docs_json(report: &AgentDocsReport) -> String {
                     "ask",
                     "data.answerText/data.citations or data.sides/data.nearestEvidence",
                 );
-                m.field_str("pack", "data.pack.items (omitted: data.pack.omitted)");
+                m.field_str(
+                    "pack",
+                    "data.pack.items (omitted: data.pack.skipped, count: data.pack.skippedTotal)",
+                );
                 m.field_str(
                     "orient",
                     "data.pack.pack.items plus data.doctor/data.workspaceHygiene",
@@ -27033,6 +27036,42 @@ mod tests {
         let actual = serde_json::Value::from(decoded);
 
         ensure_equal(&actual, &expected, "decoded TOON matches agent-docs JSON")
+    }
+
+    // GitHub #90: the field map told agents to read `data.pack.omitted`, a key
+    // `ee pack --json` has never emitted (the omissions are `skipped`), so a
+    // script following agent-docs read null. Every `data.pack.*` path the map
+    // names must resolve in the default pack JSON.
+    #[test]
+    fn agent_docs_pack_field_map_names_keys_the_pack_json_emits() -> TestResult {
+        let report = AgentDocsReport::gather(None);
+        let docs: serde_json::Value = serde_json::from_str(&render_agent_docs_json(&report))
+            .map_err(|error| format!("agent-docs JSON should parse: {error}"))?;
+        let pack_map = docs
+            .pointer("/data/responseFieldMap/pack")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("agent-docs responseFieldMap must describe pack")?;
+        let response = context_response_fixture()?;
+        let pack: serde_json::Value =
+            serde_json::from_str(&render_context_response_json(&response))
+                .map_err(|error| format!("pack JSON should parse: {error}"))?;
+
+        let named: Vec<&str> = pack_map
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '_'))
+            .filter(|token| token.starts_with("data.pack."))
+            .collect();
+        ensure(
+            named.len() >= 3,
+            format!("pack field map must name items, the omitted list and its count: {pack_map}"),
+        )?;
+        for path in named {
+            let pointer = format!("/{}", path.replace('.', "/"));
+            ensure(
+                pack.pointer(&pointer).is_some(),
+                format!("agent-docs names {path}, which default `ee pack --json` does not emit"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

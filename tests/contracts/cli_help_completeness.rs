@@ -167,7 +167,8 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
         &pack_help,
         &[
             "data.pack.items",
-            "data.pack.omitted",
+            "data.pack.skipped",
+            "data.pack.skippedTotal",
             "--candidate-pool",
             "--speed",
             "--profile",

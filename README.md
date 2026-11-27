@@ -2263,10 +2263,16 @@ Each workspace has its own store. Commands that take `--workspace` read and writ
 
 | Level | Examples | Decay | Packing priority |
 |---|---|---|---|
-| `working` | Active task notes, scratch, in-progress facts | fastest | low (suppressed across sessions) |
-| `episodic` | "On 2026-03-12 the release failed because…" | medium | medium |
-| `semantic` | Project conventions, architectural facts | slow | high |
-| `procedural` | Rules, anti-patterns, playbooks | slowest, decays only on contradiction | highest |
+| `working` | Active task notes, scratch, in-progress facts | fastest (1-day half-life) | low (suppressed across sessions) |
+| `episodic` | "On 2026-03-12 the release failed because…" | medium (30 days for events, 90 for failures) | medium |
+| `semantic` | Project conventions, architectural facts | slow (180 days) | high |
+| `procedural` | Rules, anti-patterns, playbooks | slowest (365 days) | highest |
+
+The half-lives are the `[learn.decay]` defaults shown under Configuration. Decay
+maintenance applies the same rule at every level: a memory whose freshness ×
+confidence × utility falls below `demote_threshold` moves down one level
+(`procedural` -> `semantic` -> `episodic`), and below `forget_threshold` it is
+tombstoned. Contradiction does not drive decay.
 
 Level changes are explicit lifecycle transitions, not silent rewrites. Automatic
 paths include workflow close (`working` -> `episodic`), curate apply for repeated

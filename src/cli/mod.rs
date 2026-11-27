@@ -3691,7 +3691,7 @@ impl From<CompletionShell> for Shell {
 #[derive(Clone, Debug, Parser, PartialEq)]
 #[command(
     args_conflicts_with_subcommands = true,
-    after_help = "With --json, selected memories live at data.pack.items; omitted memories live at data.pack.omitted."
+    after_help = "With --json, selected memories live at data.pack.items; omitted memories live at data.pack.skipped (at most 50, listed with a reason each) and data.pack.skippedTotal counts all of them. --no-skipped and the lean profile drop data.pack.skipped; data.pack.skippedTotal stays."
 )]
 pub struct PackArgs {
     /// Exclude the separate user-global memory store when building this pack.
