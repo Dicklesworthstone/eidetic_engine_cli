@@ -315,6 +315,43 @@ fn cache_key(index_dir: &Path, config: &TwoTierConfig) -> Result<CacheKey, &'sta
     {
         return Err("unsupported_configuration");
     }
+    let (directory, source) = immutable_generation_identity(index_dir)?;
+    Ok(CacheKey {
+        directory,
+        source,
+        configuration: serde_json::to_vec(config).map_err(|_| "configuration_unverified")?,
+    })
+}
+
+/// An in-flight global hybrid result can be shared for this exact live
+/// publication. A lagging, mutable, damaged, missing or busy generation
+/// simply runs outside the request coalescer.
+pub(crate) fn coalescible_global_generation(
+    index_dir: &Path,
+    source_generation: u64,
+) -> Option<String> {
+    let lease =
+        crate::core::index::IndexGenerationLease::try_read_for_inspection(index_dir).ok()??;
+    let (_, identity) = immutable_generation_identity(index_dir).ok()?;
+    if identity.generation != source_generation {
+        return None;
+    }
+    // Best-effort hybrid always selects a complete current generation ahead
+    // of retained candidates. An unreadable active tier cannot witness a
+    // result that might instead come from a different retained directory.
+    if !lease.admits_current_publication(index_dir, source_generation) {
+        return None;
+    }
+    Some(
+        blake3::hash(&serde_json::to_vec(&identity).ok()?)
+            .to_hex()
+            .to_string(),
+    )
+}
+
+fn immutable_generation_identity(
+    index_dir: &Path,
+) -> Result<(PathBuf, GenerationIdentity), &'static str> {
     let directory_identity =
         super::generation_directory_identity(index_dir).map_err(|_| "directory_unverified")?;
     let directory = fs::canonicalize(index_dir).map_err(|_| "directory_unverified")?;
@@ -357,17 +394,16 @@ fn cache_key(index_dir: &Path, config: &TwoTierConfig) -> Result<CacheKey, &'sta
     if vectors[0].is_none() && vectors[1].is_none() {
         return Err("vector_unverified");
     }
-    Ok(CacheKey {
+    Ok((
         directory,
-        source: GenerationIdentity {
+        GenerationIdentity {
             generation,
             directory_identity,
             metadata_hash: *blake3::hash(&metadata).as_bytes(),
             manifest_hash,
             vectors,
         },
-        configuration: serde_json::to_vec(config).map_err(|_| "configuration_unverified")?,
-    })
+    ))
 }
 
 fn artifact_identity(path: &Path) -> Result<Option<ArtifactIdentity>, &'static str> {

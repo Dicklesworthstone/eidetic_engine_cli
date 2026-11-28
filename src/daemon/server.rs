@@ -5188,18 +5188,13 @@ fn daemon_read_singleflight_key(
         &options.resolve_database_path(),
         reference_time,
     )?;
-    let global = if options.no_global {
-        None
-    } else {
-        daemon_search_global_witness(reference_time)?
-    };
+    let global = daemon_search_global_witness(options, reference_time)?;
     let index_generation =
         crate::core::index::published_index_generation(&options.resolve_index_dir());
     let config = crate::core::config_surface::merged_workspace_config(&options.workspace_path)
         .ok()?
         .values;
 
-    let global = format!("{global:?}");
     let config = format!("{config:?}");
     let option_pairs = [
         ("request", request),
@@ -5230,16 +5225,45 @@ struct DaemonSearchStoreWitness {
     calibration_input_identity: String,
 }
 
-/// `Some(None)` means the optional store is confirmed absent. Resolution or
-/// read failure supplies no witness and must fall back to uncoalesced work.
+/// Capture the source and, for a best-effort hybrid read, the exact current
+/// vector publication. A write to index files need not advance the DB
+/// watermark. Refusal of a witness runs the read independently.
 fn daemon_search_global_witness(
+    options: &SearchOptions,
     reference_time: chrono::DateTime<chrono::Utc>,
-) -> Option<Option<DaemonSearchStoreWitness>> {
+) -> Option<String> {
+    if options.no_global
+        || options.query.trim().is_empty()
+        || !crate::core::search::global_store_participates_in_scope(options.memory_scope)
+    {
+        return Some("not_requested".to_owned());
+    }
     let paths = crate::core::global_store::default_global_store_paths_from_env().ok()?;
     if !paths.database_path.try_exists().ok()? {
-        return Some(None);
+        return Some("absent".to_owned());
     }
-    daemon_search_store_witness(&paths.root, &paths.database_path, reference_time).map(Some)
+    let policy = crate::config::workspace_memory_policy(&options.workspace_path).ok()?;
+    if !policy.participate.unwrap_or(true) || !policy.include_global.unwrap_or(true) {
+        // Admission may report a disabled store's presence. Its contents
+        // cannot affect this response, including its feedback ledger.
+        return Some("disabled".to_owned());
+    }
+
+    let store = daemon_search_store_witness(&paths.root, &paths.database_path, reference_time)?;
+    let mode = options.execution_source_mode();
+    if !mode.uses_embeddings() {
+        return Some(format!("lexical {store:?}"));
+    }
+    if mode != SearchSourceMode::Hybrid || options.strict_source_mode {
+        // Producer-constrained selection may skip the live directory for an
+        // independently retained producer. A live-only witness cannot key it.
+        return None;
+    }
+    let publication = crate::core::search::coalescible_global_generation(
+        &paths.index_dir,
+        store.generation,
+    )?;
+    Some(format!("hybrid {store:?} {publication}"))
 }
 
 /// Read a store's generation and complete calibration authority together, or
@@ -11300,12 +11324,87 @@ mod tests {
             excluded_keys,
             "excluded global feedback is irrelevant"
         );
+        #[cfg(feature = "lexical-bm25")]
+        assert_global_publication_changes_daemon_keys(&options, &global, &workspace_id, &paths);
         global
             .execute_raw("ALTER TABLE feedback_events RENAME TO withheld_feedback_events")
             .expect("withhold global ledger");
         assert!(daemon_search_singleflight_key(&options, None, &[], None).is_none());
         assert!(daemon_pack_search_singleflight_key(&options, false, None).is_none());
         assert_eq!(keys(&excluded), excluded_keys);
+        for policy in ["include_global = false", "participate = false"] {
+            fs::write(workspace_path.join(".ee/config.toml"), format!("[memory]\n{policy}\n"))
+                .expect("disable global store in workspace policy");
+            assert!(daemon_search_singleflight_key(&options, None, &[], None).is_some());
+            assert!(daemon_pack_search_singleflight_key(&options, false, None).is_some());
+        }
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    fn assert_global_publication_changes_daemon_keys(
+        options: &SearchOptions,
+        global: &crate::db::DbConnection,
+        workspace_id: &str,
+        paths: &crate::core::global_store::GlobalStorePaths,
+    ) {
+        let mut request = options.clone();
+        request.speed = SpeedMode::Default;
+        request.source_mode = SearchSourceMode::Hybrid;
+        let model: crate::core::index::CachedLocalEmbedderAttestation =
+            serde_json::from_value(serde_json::json!({
+                "backend": "neural_local",
+                "modelId": "potion-base-8m",
+                "modelHash": "blake3:fixture-model",
+                "dimension": 256,
+            }))
+            .expect("model-key fixture");
+        let keys = |options: &SearchOptions| {
+            (
+                daemon_search_singleflight_key(options, None, &[], Some(&model))
+                    .map(|key| key.key_hash),
+                daemon_pack_search_singleflight_key(options, false, Some(&model))
+                    .map(|key| key.key_hash),
+            )
+        };
+        insert_singleflight_memory(
+            global,
+            workspace_id,
+            "mem_01J00000000000000000000094",
+            "A global notebook for release verification",
+        );
+        let _selected = crate::core::index::install_test_hash_workspace_embedder(workspace_id);
+        let rebuild = crate::core::index::IndexRebuildOptions {
+            workspace_path: paths.root.clone(),
+            database_path: Some(paths.database_path.clone()),
+            index_dir: Some(paths.index_dir.clone()),
+            dry_run: false,
+        };
+        let publish = || {
+            let report = crate::core::index::rebuild_index(&rebuild).expect("publish global index");
+            assert_eq!(report.status, crate::core::index::IndexRebuildStatus::Success);
+        };
+        assert_eq!(keys(&request), (None, None), "unpublished global vectors");
+        publish();
+        let original = keys(&request);
+        assert!(original.0.is_some() && original.1.is_some());
+        assert_eq!(original, keys(&request));
+        let generation = global.total_workspace_generation().expect("source generation");
+        // Keep the displaced bytes alive so the replacement cannot reuse the inode.
+        fs::rename(&paths.index_dir, paths.root.join("first-global-publication"))
+            .expect("displace first publication");
+        publish();
+        assert_eq!(global.total_workspace_generation().unwrap(), generation);
+        let replacement = keys(&request);
+        assert!(replacement.0.is_some() && replacement.1.is_some());
+        assert_ne!(original.0, replacement.0);
+        assert_ne!(original.1, replacement.1);
+
+        request.strict_source_mode = true;
+        assert_eq!(keys(&request), (None, None), "retained producer selection");
+        request.strict_source_mode = false;
+        fs::write(paths.index_dir.join("vector.fast.idx.wal"), b"mutable")
+            .expect("mutable-index control");
+        assert_eq!(keys(&request), (None, None));
     }
 
     #[cfg(feature = "lexical-bm25")]

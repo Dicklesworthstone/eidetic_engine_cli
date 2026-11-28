@@ -85,6 +85,8 @@ mod global_handoff;
 #[path = "search_index_cache.rs"]
 mod index_cache;
 #[cfg(unix)]
+pub(crate) use index_cache::coalescible_global_generation;
+#[cfg(unix)]
 #[path = "search_prefetch.rs"]
 mod prefetch;
 #[cfg(unix)]
@@ -16605,7 +16607,7 @@ fn admit_global_store_search_hits(
     admitted
 }
 
-fn global_store_participates_in_scope(scope: MemoryScope) -> bool {
+pub(crate) fn global_store_participates_in_scope(scope: MemoryScope) -> bool {
     matches!(
         scope,
         MemoryScope::Swarm | MemoryScope::Workspace | MemoryScope::Global

@@ -51,11 +51,20 @@ impl InspectionBudget {
     fn checkpoint(&self, cx: &asupersync::Cx) -> Result<(), IndexRebuildError> {
         // Preserve an explicit cancellation, even when both budgets expired.
         index_checkpoint(cx)?;
+        self.wall_checkpoint()
+    }
+
+    fn wall_checkpoint(&self) -> Result<(), IndexRebuildError> {
         self.request.check().map_err(|_| inspection_budget_error())
     }
 
     fn entry(&mut self, cx: &asupersync::Cx) -> Result<(), IndexRebuildError> {
-        self.checkpoint(cx)?;
+        index_checkpoint(cx)?;
+        self.take_entry()
+    }
+
+    fn take_entry(&mut self) -> Result<(), IndexRebuildError> {
+        self.wall_checkpoint()?;
         self.entries_remaining = self
             .entries_remaining
             .checked_sub(1)
@@ -116,6 +125,18 @@ impl IndexGenerationLease {
         Ok(Some(Self {
             _directory: directory,
         }))
+    }
+
+    /// Passive key preparation has no request runtime. Apply the same bounded
+    /// directory-entry and complete-tier admission before opening native
+    /// readers. Requiring the exact active watermark excludes retained reads.
+    pub(crate) fn admits_current_publication(&self, index_dir: &Path, generation: u64) -> bool {
+        let mut inspection = InspectionBudget::new();
+        verify_parent_identity(index_parent(index_dir), &self._directory).is_ok()
+            && inspect_physical_entries(index_dir, || inspection.take_entry()).is_ok()
+            && inspection.wall_checkpoint().is_ok()
+            && super::validated_index_generation_with_identity(index_dir, None) == Ok(generation)
+            && inspection.wall_checkpoint().is_ok()
     }
 
     /// Select a complete generation no newer than the pinned source snapshot.
@@ -561,16 +582,24 @@ fn inspect_generation_entries(
     root: &Path,
     inspection: &mut InspectionBudget,
 ) -> Result<(), IndexRebuildError> {
+    inspect_physical_entries(root, || inspection.entry(cx))?;
+    inspection.checkpoint(cx)
+}
+
+fn inspect_physical_entries(
+    root: &Path,
+    mut take_entry: impl FnMut() -> Result<(), IndexRebuildError>,
+) -> Result<(), IndexRebuildError> {
     let mut pending = vec![root.to_path_buf()];
     while let Some(path) = pending.pop() {
-        inspection.entry(cx)?;
+        take_entry()?;
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|error| lease_error("inspect generation entry", error))?;
         if metadata.is_dir() {
             for entry in std::fs::read_dir(&path)
                 .map_err(|error| lease_error("inspect generation directory", error))?
             {
-                inspection.entry(cx)?;
+                take_entry()?;
                 let entry =
                     entry.map_err(|error| lease_error("inspect generation entry", error))?;
                 let kind = entry
@@ -591,7 +620,7 @@ fn inspect_generation_entries(
             ));
         }
     }
-    inspection.checkpoint(cx)
+    Ok(())
 }
 
 fn open_directory(parent: &Path) -> Result<File, IndexRebuildError> {
