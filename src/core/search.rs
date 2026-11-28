@@ -11942,6 +11942,13 @@ async fn run_search_inner_with_performance(
     let indexed_retrieval = producer_selection_error.is_none()
         && live_snapshot_retrieval.is_none()
         && !empty_generation;
+    // Keep the exact producer that the indexed workspace read is about to
+    // use. Seeded callers can reach this path without a prepared override.
+    // Empty and live-source executions preserve their model-free behavior.
+    let fast_embedder_override = fast_embedder_override.or_else(|| {
+        (indexed_retrieval && source_mode.applied.uses_embeddings())
+            .then(|| crate::core::index::default_search_embedder_stack().fast_arc())
+    });
     let search_result = if let Some(error) = producer_selection_error {
         Err(error)
     } else if let Some(retrieval) = live_snapshot_retrieval {
@@ -12082,7 +12089,7 @@ async fn run_search_inner_with_performance(
             let mut global_source_memories = BTreeMap::new();
             let mut global_feedback_snapshot = None;
             let mut pack_global_snapshot = None;
-            let global_hits = global_store_frankensearch_hits(
+            let global_run = global_store_frankensearch_hits(
                 cx,
                 options,
                 memory_filters,
@@ -12095,13 +12102,7 @@ async fn run_search_inner_with_performance(
                 scoring_reference_time,
                 &mut trace,
                 GlobalSearchExecution {
-                    mode: if options.strict_source_mode
-                        || options.source_mode == SearchSourceMode::SemanticOnly
-                    {
-                        source_mode.applied
-                    } else {
-                        SearchSourceMode::LexicalOnly
-                    },
+                    mode: source_mode.applied,
                     producer: fast_embedder_override.as_ref(),
                     fusion_weights,
                 },
@@ -12110,13 +12111,24 @@ async fn run_search_inner_with_performance(
             )
             .await;
             search_checkpoint(cx)?;
+            // The empty workspace executed no engine. In that case the
+            // global lane owns the actual response mode, including on a miss.
+            let source_mode = match global_run.applied {
+                Some(applied) if empty_generation => SourceModeResolution {
+                    applied,
+                    fallback_applied: applied != options.execution_source_mode(),
+                    unavailable_no_results: false,
+                },
+                _ => source_mode,
+            };
             let embed_backend = if empty_generation
-                && global_hits.iter().any(|hit| hit.fast_score.is_some())
+                && global_run.applied.is_some_and(SearchSourceMode::uses_embeddings)
             {
                 EmbedBackend::NeuralLocal
             } else {
                 embed_backend
             };
+            let global_hits = global_run.hits;
             let admitted_global_ids: BTreeSet<String> =
                 global_source_memories.keys().cloned().collect();
             if let Some(preloaded) = preloaded_memories.as_deref_mut() {
@@ -15829,6 +15841,14 @@ struct GlobalSearchExecution<'a> {
     fusion_weights: SearchFusionWeights,
 }
 
+/// A compatible semantic generation can legitimately return zero vector hits.
+/// Retain the actual execution mode independently of the result population.
+#[derive(Default)]
+struct GlobalSearchResult {
+    hits: Vec<SearchHit>,
+    applied: Option<SearchSourceMode>,
+}
+
 async fn global_store_frankensearch_hits(
     cx: &asupersync::Cx,
     options: &SearchOptions,
@@ -15844,13 +15864,13 @@ async fn global_store_frankensearch_hits(
     execution: GlobalSearchExecution<'_>,
     source_only: bool,
     pack_witness: Option<&mut Option<global_handoff::GlobalPackSearchWitness>>,
-) -> Vec<SearchHit> {
+) -> GlobalSearchResult {
     if !global_store_participates_in_scope(options.memory_scope) || options.query.trim().is_empty()
     {
         if let Some(pack_witness) = pack_witness {
             *pack_witness = global_handoff::capture(options, memory_config, None);
         }
-        return Vec::new();
+        return GlobalSearchResult::default();
     }
     let admitted = admitted_global_store_memories(
         options,
@@ -15876,11 +15896,11 @@ async fn global_store_frankensearch_hits(
         );
     }
     let Some((paths, mut snapshot)) = admitted else {
-        return Vec::new();
+        return GlobalSearchResult::default();
     };
     if !admit_global_memories_for_local_snapshot(local_connection, &mut snapshot.memories, degraded)
     {
-        return Vec::new();
+        return GlobalSearchResult::default();
     }
     global_store_snapshot_frankensearch_hits(
         cx,
@@ -15910,7 +15930,7 @@ async fn global_store_snapshot_frankensearch_hits(
     trace: &mut SearchPerformanceTrace,
     execution: GlobalSearchExecution<'_>,
     source_only: bool,
-) -> Vec<SearchHit> {
+) -> GlobalSearchResult {
     let GlobalStoreSearchSnapshot {
         source,
         generation,
@@ -15918,24 +15938,28 @@ async fn global_store_snapshot_frankensearch_hits(
         feedback,
     } = snapshot;
     let Some(source_generation) = generation else {
-        return Vec::new();
+        return GlobalSearchResult::default();
     };
     *feedback_snapshot = Some(feedback);
 
     if memories.is_empty() {
-        return Vec::new();
+        return GlobalSearchResult::default();
     }
-    let producer = if execution.mode.uses_embeddings() {
-        let Some(producer) = execution.producer.filter(|model| model.is_semantic()) else {
-            degraded.push(SearchDegradation::global_index_unavailable(
-                "the requested retrieval mode requires an admitted semantic producer",
-            ));
-            return Vec::new();
-        };
-        Some(producer)
-    } else {
-        None
-    };
+    let best_effort_hybrid = execution.mode == SearchSourceMode::Hybrid
+        && options.execution_source_mode() == SearchSourceMode::Hybrid
+        && !options.strict_source_mode;
+    let producer = execution
+        .producer
+        .filter(|model| execution.mode.uses_embeddings() && model.is_semantic());
+    if execution.mode.uses_embeddings() && !best_effort_hybrid && producer.is_none() {
+        degraded.push(SearchDegradation::global_index_unavailable(
+            "the requested retrieval mode requires an admitted semantic producer",
+        ));
+        return GlobalSearchResult::default();
+    }
+    // Optional semantic scoring is chosen after source and tier admission.
+    // A compatible older retained index cannot displace a current lexical one.
+    let required_producer = producer.filter(|_| !best_effort_hybrid);
     let global_options = SearchOptions {
         workspace_path: paths.root.clone(),
         database_path: Some(paths.database_path.clone()),
@@ -15967,7 +15991,7 @@ async fn global_store_snapshot_frankensearch_hits(
         degraded.push(SearchDegradation::global_index_unavailable(
             &error.to_string(),
         ));
-        return Vec::new();
+        return GlobalSearchResult::default();
     }
     #[cfg(unix)]
     let generation_lease = match pin_search_generation(cx, &paths.index_dir).await {
@@ -15976,14 +16000,15 @@ async fn global_store_snapshot_frankensearch_hits(
             degraded.push(SearchDegradation::global_index_unavailable(
                 &error.to_string(),
             ));
-            return Vec::new();
+            return GlobalSearchResult::default();
         }
     };
     // This lane has its own publication lifecycle. A healthy workspace index
     // must not hide newly remembered global rows while their index is absent
     // or behind. Only a current request may replace the persisted view.
-    let current_source_request =
-        !execution.mode.uses_embeddings() && options.as_of.is_none() && !options.include_tombstoned;
+    let current_source_request = (!execution.mode.uses_embeddings() || best_effort_hybrid)
+        && options.as_of.is_none()
+        && !options.include_tombstoned;
     let unpublished_index = !paths.index_dir.exists() || index_dir_is_plain_empty(&paths.index_dir);
     #[cfg(unix)]
     let unpublished_index = if unpublished_index {
@@ -15993,7 +16018,7 @@ async fn global_store_snapshot_frankensearch_hits(
                 degraded.push(SearchDegradation::global_index_unavailable(
                     &error.to_string(),
                 ));
-                return Vec::new();
+                return GlobalSearchResult::default();
             }
         }
     } else {
@@ -16014,7 +16039,7 @@ async fn global_store_snapshot_frankensearch_hits(
     // workspace snapshot. Never score its captured bodies with a newer live
     // index merely because a fresh DB connection would call that index Ready.
     #[cfg(unix)]
-    let selected_index = if let Some(model) = producer {
+    let selected_index = if let Some(model) = required_producer {
         match generation_lease.index_for_snapshot_with_embedder(
             cx,
             &paths.index_dir,
@@ -16026,7 +16051,7 @@ async fn global_store_snapshot_frankensearch_hits(
                 degraded.push(SearchDegradation::global_index_unavailable(
                     &map_index_generation_selection_error(error).to_string(),
                 ));
-                return Vec::new();
+                return GlobalSearchResult::default();
             }
         }
     } else {
@@ -16059,7 +16084,7 @@ async fn global_store_snapshot_frankensearch_hits(
                     )
                 {
                     degraded.push(SearchDegradation::global_index_unavailable(&reason));
-                    return Vec::new();
+                    return GlobalSearchResult::default();
                 }
                 // Selection already proved the live watermark is newer; the
                 // same lease prevents publication between that observation
@@ -16077,7 +16102,7 @@ async fn global_store_snapshot_frankensearch_hits(
             degraded.push(SearchDegradation::global_index_unavailable(
                 &error.to_string(),
             ));
-            return Vec::new();
+            return GlobalSearchResult::default();
         }
     };
     #[cfg(not(unix))]
@@ -16090,7 +16115,7 @@ async fn global_store_snapshot_frankensearch_hits(
         database_path: Some(paths.database_path.clone()),
         index_dir: Some(index_dir.clone()),
     };
-    let status = match producer {
+    let status = match required_producer {
         Some(model) => crate::core::index::get_index_status_with_embedder(
             &status_options,
             Some(source.connection()),
@@ -16121,7 +16146,7 @@ async fn global_store_snapshot_frankensearch_hits(
                 )
             {
                 degraded.push(SearchDegradation::global_index_unavailable(&reason));
-                return Vec::new();
+                return GlobalSearchResult::default();
             }
             return retrieve_global_store_live_snapshot(
                 cx,
@@ -16137,14 +16162,14 @@ async fn global_store_snapshot_frankensearch_hits(
             degraded.push(SearchDegradation::global_index_unavailable(&format!(
                 "index status probe failed: {error}"
             )));
-            return Vec::new();
+            return GlobalSearchResult::default();
         }
     };
     if index_status.db_generation != Some(source_generation) {
         degraded.push(SearchDegradation::global_index_unavailable(
             "index status did not describe the admitted global source snapshot",
         ));
-        return Vec::new();
+        return GlobalSearchResult::default();
     }
     // Stale also describes incompatible metadata and incomplete persisted
     // tiers. Source fallback may cover generation lag, never conceal those
@@ -16184,15 +16209,38 @@ async fn global_store_snapshot_frankensearch_hits(
             IndexHealth::Ready => unreachable!("non-ready global index branch"),
         };
         degraded.push(SearchDegradation::global_index_unavailable(&reason));
-        return Vec::new();
+        return GlobalSearchResult::default();
     }
     if index_status.index_generation != Some(source_generation) {
         degraded.push(SearchDegradation::global_index_unavailable(
             "index generation did not match the admitted global source snapshot",
         ));
-        return Vec::new();
+        return GlobalSearchResult::default();
     }
 
+    let applied = if best_effort_hybrid {
+        let compatible = producer.map(|model| {
+            crate::core::index::admitted_index_matches_fast_embedder(&index_dir, model.as_ref())
+        });
+        match compatible {
+            Some(Ok(true)) => SearchSourceMode::Hybrid,
+            Some(Err(error)) => {
+                degraded.push(SearchDegradation::global_index_unavailable(&error));
+                return GlobalSearchResult::default();
+            }
+            Some(Ok(false)) | None => {
+                degraded.push(SearchDegradation::source_mode_fallback(
+                    SearchSourceMode::Hybrid,
+                    SearchSourceMode::LexicalOnly,
+                    "user-global retrieval has no matching admitted semantic producer",
+                ));
+                SearchSourceMode::LexicalOnly
+            }
+        }
+    } else {
+        execution.mode
+    };
+    let producer = producer.filter(|_| applied.uses_embeddings());
     let global_search_start = Instant::now();
     let mut global_trace = SearchPerformanceTrace::default();
     // Source admission can hide sealed, retired or held rows even without an
@@ -16208,7 +16256,7 @@ async fn global_store_snapshot_frankensearch_hits(
         &index_dir,
         &global_options,
         effective_limit,
-        execution.mode,
+        applied,
         Deterministic::from_seed(0).shared_child(if producer.is_some() {
             "search.global.semantic"
         } else {
@@ -16228,20 +16276,31 @@ async fn global_store_snapshot_frankensearch_hits(
     let runtime_fallback::Retrieval {
         hits: mut raw_hits,
         degraded: retrieval_degraded,
+        applied: global_applied,
         ..
     } = match search_result {
-        Ok(result) if result.applied == execution.mode => result,
+        Ok(result) if result.applied == applied => result,
+        Ok(mut result) if best_effort_hybrid && result.applied == SearchSourceMode::LexicalOnly => {
+            // The shared engine recovers only inference failures. Producer
+            // rejection, cancellation and integrity errors remain refusals.
+            for entry in &mut result.degraded {
+                if entry.code == "source_mode_fallback" {
+                    entry.message = format!("User-global retrieval. {}", entry.message);
+                }
+            }
+            result
+        }
         Ok(_) => {
             degraded.push(SearchDegradation::global_index_unavailable(
                 "global inference fell back to a source mode outside this request",
             ));
-            return Vec::new();
+            return GlobalSearchResult::default();
         }
         Err(error) => {
             degraded.push(SearchDegradation::global_index_unavailable(
                 &error.to_string(),
             ));
-            return Vec::new();
+            return GlobalSearchResult::default();
         }
     };
     degraded.extend(retrieval_degraded);
@@ -16255,7 +16314,10 @@ async fn global_store_snapshot_frankensearch_hits(
     trace.record_elapsed("search::globalTombstoneSnapshotRetrieve", historical_start);
     drop(source);
 
-    admit_global_store_search_hits(options, memories, raw_hits, preloaded_memories)
+    GlobalSearchResult {
+        hits: admit_global_store_search_hits(options, memories, raw_hits, preloaded_memories),
+        applied: Some(global_applied),
+    }
 }
 
 fn tombstone_lexical_supplement_allowed(options: &SearchOptions) -> bool {
@@ -16324,7 +16386,7 @@ async fn retrieve_global_store_live_snapshot(
     degraded: &mut Vec<SearchDegradation>,
     preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
     trace: &mut SearchPerformanceTrace,
-) -> Vec<SearchHit> {
+) -> GlobalSearchResult {
     let global_search_start = Instant::now();
     let result = {
         let memory_refs = memories.iter().collect::<Vec<_>>();
@@ -16344,11 +16406,14 @@ async fn retrieve_global_store_live_snapshot(
                 ),
                 repair: None,
             });
-            admit_global_store_search_hits(options, memories, hits, preloaded_memories)
+            GlobalSearchResult {
+                hits: admit_global_store_search_hits(options, memories, hits, preloaded_memories),
+                applied: Some(SearchSourceMode::LexicalOnly),
+            }
         }
         Err(reason) => {
             degraded.push(SearchDegradation::global_index_unavailable(&reason));
-            Vec::new()
+            GlobalSearchResult::default()
         }
     }
 }

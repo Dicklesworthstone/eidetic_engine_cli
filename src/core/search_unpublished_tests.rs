@@ -1395,7 +1395,8 @@ fn retrieve_captured_global_search(
             },
             false,
         )
-        .await;
+        .await
+        .hits;
         CapturedGlobalSearchResult {
             hits,
             degraded,

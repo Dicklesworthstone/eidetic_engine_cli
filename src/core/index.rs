@@ -12713,6 +12713,30 @@ fn verify_selected_index_producers(
     status.compatibility_error = verification.err();
 }
 
+/// Check an optional query producer against a generation that the caller
+/// already admitted structurally and pinned to its source. A producer change
+/// permits best-effort lexical retrieval. Unreadable assets and unverifiable
+/// query identities remain errors.
+pub(crate) fn admitted_index_matches_fast_embedder(
+    index_dir: &Path,
+    embedder: &dyn crate::search::Embedder,
+) -> Result<bool, String> {
+    let selected = EmbedderDescriptor::from_embedder(embedder);
+    if selected.producer_revision.is_none() {
+        return Err("the query embedder has no verified producer identity".to_owned());
+    }
+    let dimension = u32::try_from(selected.dimension).map_err(|error| error.to_string())?;
+    let metadata = parse_index_metadata(index_dir)?
+        .ok_or_else(|| "the admitted generation has no index metadata".to_owned())?;
+    let index = open_fast_vector_index_read_only(index_dir).map_err(|error| error.detail)?;
+    Ok(embedding_space_compatibility_error(
+        &index_dir.join(INDEX_METADATA_FILE),
+        stored_semantic_identity(&metadata),
+        Some((embedder.id(), dimension)),
+    )
+    .is_none() && verify_vector_producer(&index, &selected, "fast").is_ok())
+}
+
 fn verify_index_vector_producers(
     index_dir: &Path,
     (fast, quality): &(EmbedderDescriptor, Option<EmbedderDescriptor>),
@@ -18415,6 +18439,8 @@ mod tests {
             index_dir: Some(index_dir.clone()),
         };
         let before = index_regular_file_snapshot(&index_dir)?;
+        assert!(admitted_index_matches_fast_embedder(&index_dir, original.fast())?);
+        assert!(!admitted_index_matches_fast_embedder(&index_dir, changed.fast())?);
         {
             let _selection =
                 install_test_workspace_embedder(&fixture.workspace_id, original.clone());

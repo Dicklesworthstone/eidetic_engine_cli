@@ -2404,11 +2404,18 @@ leaves the source store, queued jobs, and persisted index unchanged. Explicit
 historical requests and corrupt or incompatible indexes retain the
 `global_index_unavailable` refusal instead of substituting current source rows.
 
-Semantic-only and strict hybrid searches score global vectors when the request
-has a semantic model and the global index matches both that model and the
-pinned global source generation. If the global index is missing, behind, or
-incompatible, the response reports `global_index_unavailable` and keeps the
-workspace matches. A model-free search of an empty workspace can also report
+Hybrid and semantic-only searches score global vectors when the request's
+semantic model matches the global index producer and the index matches the
+pinned global source generation. Best-effort hybrid search can still return
+verified lexical matches for a different producer or a recoverable inference
+failure. The hits carry lexical scores and the response identifies the fallback.
+If the workspace is empty, the reported source mode reflects the engine that
+actually searched the global store, including on a query with zero matches.
+
+Strict hybrid and semantic-only searches with an active semantic execution
+withhold the global lane when its index is missing, behind, or incompatible.
+The response reports `global_index_unavailable` and keeps available workspace
+matches. A model-free strict search of an empty workspace can also report
 this condition. Reading the global lane never loads a second model.
 
 ---

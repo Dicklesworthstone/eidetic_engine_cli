@@ -1100,7 +1100,24 @@ fn explicit_semantic_search_admits_only_compatible_published_global_vectors() {
             !report.degraded.iter().any(|entry| entry.code == "global_live_snapshot_lexical")
         );
     };
+    let assert_global_lexical = |report: &SearchReport, reason: &str| {
+        let hit = report
+            .results
+            .iter()
+            .find(|hit| hit.doc_id == id)
+            .expect("global lexical hit");
+        assert!(hit.lexical_score.is_some());
+        assert!(hit.fast_score.is_none() && hit.quality_score.is_none());
+        assert!(report.degraded.iter().any(|entry| entry.code == reason));
+        assert!(
+            !report.degraded.iter().any(|entry| entry.code == "global_index_unavailable")
+        );
+    };
     assert_global_withheld(&search(&options));
+    options.source_mode = SearchSourceMode::Hybrid;
+    options.strict_source_mode = false;
+    assert_global_lexical(&search(&options), "global_live_snapshot_lexical");
+    assert!(!global.paths.index_dir.join("meta.json").exists());
 
     let publish = |dimension| {
         let _guard = crate::core::index::install_test_workspace_embedder(
@@ -1119,8 +1136,13 @@ fn explicit_semantic_search_admits_only_compatible_published_global_vectors() {
         publish(256).status,
         crate::core::index::IndexRebuildStatus::Success
     );
-    for mode in [SearchSourceMode::SemanticOnly, SearchSourceMode::Hybrid] {
+    for (mode, strict) in [
+        (SearchSourceMode::SemanticOnly, true),
+        (SearchSourceMode::Hybrid, true),
+        (SearchSourceMode::Hybrid, false),
+    ] {
         options.source_mode = mode;
+        options.strict_source_mode = strict;
         let report = search(&options);
         assert_eq!(report.source_mode_applied, mode);
         assert!(!report.source_mode_fallback);
@@ -1136,6 +1158,58 @@ fn explicit_semantic_search_admits_only_compatible_published_global_vectors() {
         }
     }
 
+    // Fail only the global producer to distinguish inference recovery from
+    // workspace mode resolution and producer-compatibility selection.
+    let run_global = |strict| {
+        let mut request = options.clone();
+        request.strict_source_mode = strict;
+        let snapshot = read_global_search_memories(
+            &global.paths,
+            &request,
+            SearchMemoryFilters::default(),
+            Utc::now(),
+        )
+        .unwrap()
+        .unwrap();
+        let paths = &global.paths;
+        let failing = Arc::new(SemanticIdentityFixture::new(256));
+        failing.fail_inference.store(true, Ordering::Relaxed);
+        let producer: Arc<dyn Embedder> = failing;
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let mut degraded = Vec::new();
+            let mut feedback = None;
+            let result = global_store_snapshot_frankensearch_hits(
+                &cx,
+                &request,
+                paths,
+                snapshot,
+                16,
+                &mut degraded,
+                None,
+                &mut feedback,
+                &mut SearchPerformanceTrace::default(),
+                GlobalSearchExecution {
+                    mode: SearchSourceMode::Hybrid,
+                    producer: Some(&producer),
+                    fusion_weights: SearchFusionWeights::default(),
+                },
+                false,
+            )
+            .await;
+            (result, degraded)
+        })
+        .unwrap()
+    };
+    let (recovered, degraded) = run_global(false);
+    assert_eq!(recovered.applied, Some(SearchSourceMode::LexicalOnly));
+    assert!(recovered.hits.iter().any(|hit| {
+        hit.doc_id == id && hit.lexical_score.is_some() && hit.fast_score.is_none()
+    }));
+    assert!(degraded.iter().any(|entry| entry.code == "source_mode_fallback"));
+    let (refused, degraded) = run_global(true);
+    assert!(refused.applied.is_none() && refused.hits.is_empty());
+    assert!(degraded.iter().any(|entry| entry.code == "global_index_unavailable"));
+
     options.query = "cobalt -absentterm".to_owned();
     assert!(search(&options).results.iter().any(|hit| hit.doc_id == id));
     options.query = "cobalt -notebook".to_owned();
@@ -1145,14 +1219,47 @@ fn explicit_semantic_search_admits_only_compatible_published_global_vectors() {
     // No retained generation can match the new source watermark with the
     // request's original producer. Strict reads must withhold global hits.
     global.memory(603, created);
+    assert_global_lexical(&search(&options), "global_live_snapshot_lexical");
+    options.strict_source_mode = true;
     assert_global_withheld(&search(&options));
     assert_eq!(
         publish(512).status,
         crate::core::index::IndexRebuildStatus::Success
     );
     assert_global_withheld(&search(&options));
+    options.strict_source_mode = false;
+    let mismatched = search(&options);
+    assert_global_lexical(&mismatched, "source_mode_fallback");
+    assert_eq!(mismatched.source_mode_applied, SearchSourceMode::Hybrid);
+    assert!(!mismatched.source_mode_fallback, "the workspace ran hybrid");
     options.query = BODY.to_owned();
     assert!(search(&options).results.iter().any(|hit| hit.doc_id == local));
+
+    // With a verified empty workspace the global lane is the only engine.
+    // Even a clean miss must report its actual lexical fallback.
+    let empty = Fixture::new();
+    include_global(&empty, true);
+    let empty_index = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+        workspace_path: empty.root.clone(),
+        database_path: Some(empty.root.join(".ee/ee.db")),
+        index_dir: None,
+        dry_run: false,
+    })
+    .unwrap();
+    assert_eq!(
+        empty_index.status,
+        crate::core::index::IndexRebuildStatus::NoDocuments
+    );
+    let mut empty_options = empty.options();
+    empty_options.speed = SpeedMode::Default;
+    empty_options.source_mode = SearchSourceMode::Hybrid;
+    for (query, has_match) in [("cobalt", true), ("neverindextoken", false)] {
+        empty_options.query = query.to_owned();
+        let report = search(&empty_options);
+        assert_eq!(report.source_mode_applied, SearchSourceMode::LexicalOnly);
+        assert!(report.source_mode_fallback);
+        assert_eq!(report.results.iter().any(|hit| hit.doc_id == id), has_match);
+    }
 
     options.source_mode = SearchSourceMode::LexicalOnly;
     options.query = "cobalt".to_owned();
