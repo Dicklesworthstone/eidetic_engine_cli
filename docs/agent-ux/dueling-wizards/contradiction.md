@@ -14,7 +14,7 @@ Bead lineage: `bd-1n0np.7` (feature), `7.1` (ADR + `ConflictCluster` model),
 
 ## The six explicit signals
 
-A [`ConflictEdge`](../../src/core/contradiction_detect.rs) is one explicit,
+A [`ConflictEdge`](../../../src/core/contradiction_detect.rs) is one explicit,
 DB-recorded conflict relationship between two memories — never an inferred guess.
 Each signal carries a load-bearing weight (milli-units): how strongly it
 implicates a genuine contradiction.

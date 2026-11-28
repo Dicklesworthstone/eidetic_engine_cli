@@ -1,6 +1,6 @@
 # `ee why-not` — counterfactual exclusion explainer
 
-`ee why-not` is the read-only reverse of [`ee why`](insights-onboarding.md). Where
+`ee why-not` is the read-only reverse of [`ee why`](../insights-onboarding.md). Where
 `ee why <id>` explains why a memory **was** stored, retrieved, and selected,
 `ee why-not <id> --task "<task>"` explains why a memory **was not** selected for
 the context pack a given task would build — and the minimal change that would
@@ -137,6 +137,6 @@ Here the memory was authoritatively excluded by the token budget despite scoring
 
 ## See also
 
-- [`insights-onboarding.md`](insights-onboarding.md) — `ee why` and graph-derived explanation surfaces.
-- [`adaptive-pack-budget.md`](adaptive-pack-budget.md) — how the token budget that `ee why-not` reasons against is computed.
+- [`insights-onboarding.md`](../insights-onboarding.md) — `ee why` and graph-derived explanation surfaces.
+- [`adaptive-pack-budget.md`](../adaptive-pack-budget.md) — how the token budget that `ee why-not` reasons against is computed.
 - `docs/schemas/ee.why_not_selected.v1.json` — the canonical report schema.

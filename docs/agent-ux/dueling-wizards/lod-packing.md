@@ -80,5 +80,5 @@ the knob is absent.
 
 ## See also
 
-- [`adaptive-pack-budget.md`](adaptive-pack-budget.md) — how the token budget LOD partitions is computed.
+- [`adaptive-pack-budget.md`](../adaptive-pack-budget.md) — how the token budget LOD partitions is computed.
 - [`why-not.md`](why-not.md) — link-only items have a clear, explainable exclusion-from-full reason.

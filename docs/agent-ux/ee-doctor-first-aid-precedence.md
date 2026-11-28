@@ -40,11 +40,14 @@
 The auto-fixer is intentionally conservative. Reach for the manual
 skills (and their references / agents / scripts subtrees) when:
 
+These skills are user-level (`~/.claude/skills/<name>/SKILL.md`), not files
+in this repository.
+
 | Situation | Skill |
 | --- | --- |
-| `.beads/issues.jsonl` is corrupt enough that `br doctor` / `br show` fail, both stores have diverged, or DB-only changes must be harvested before rebuilding `.beads/beads.db`. | [`fixing-beads-problems`](../../../.claude/skills/fixing-beads-problems/SKILL.md) |
-| RCH workers fail preflight or the daemon is silent / version-skewed / disk-full, and the `bd-17c65.10.17.*` topology lane has not yet shipped a fix. | [`rch`](../../../.claude/skills/rch/SKILL.md) |
-| `br sync` retries are needed across a multi-agent commit window or a previous `br` operation aborted partway through. | `br-retry` (if present) or the [`br`](../../../.claude/skills/br/SKILL.md) skill itself. |
+| `.beads/issues.jsonl` is corrupt enough that `br doctor` / `br show` fail, both stores have diverged, or DB-only changes must be harvested before rebuilding `.beads/beads.db`. | `fixing-beads-problems` |
+| RCH workers fail preflight or the daemon is silent / version-skewed / disk-full, and the `bd-17c65.10.17.*` topology lane has not yet shipped a fix. | `rch` |
+| `br sync` retries are needed across a multi-agent commit window or a previous `br` operation aborted partway through. | `br-retry` (if present) or the `br` skill itself. |
 
 A doctor fixer that lights up the same diagnostic the manual skill
 covers should be considered the primary path; the skill content is

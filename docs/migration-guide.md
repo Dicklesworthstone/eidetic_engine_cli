@@ -244,7 +244,7 @@ typed native omission contract remains separate work.
 - [Mechanical Boundary Command Inventory](./mechanical-boundary-command-inventory.md) — full command matrix
 - [Command Classification](./command_classification.md) — disposition categories
 - [Boundary Migration E2E Logging](./boundary-migration-e2e-logging.md) — test coverage
-- [ADR 0011](./adr/0011-mechanical-cli-boundary.md) — architectural decision record
+- [ADR 0011](./adr/0011-mechanical-boundary.md) — architectural decision record
 - [Project-local Skills](../skills/README.md) — skill directory and standards
 
 ---

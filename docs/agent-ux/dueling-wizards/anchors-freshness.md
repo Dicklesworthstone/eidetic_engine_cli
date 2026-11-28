@@ -14,9 +14,9 @@ subsystem adds two convergent capabilities sharing one table:
 
 Bead lineage: `bd-1n0np.3` (feature), `bd-1n0np.3.2` (anchor table + precision
 extraction), `bd-1n0np.3.5` (`ee impact`), `bd-1n0np.3.7` (freshness). Design:
-[ADR-0056](../adr/0056-code-anchoring-substrate-and-freshness.md); symbol
+[ADR-0056](../../adr/0056-code-anchoring-substrate-and-freshness.md); symbol
 resolution reuses the symbol graph from
-[ADR-0042](../adr/0042-symbol-graph-derived-index.md).
+[ADR-0042](../../adr/0042-symbol-graph-derived-index.md).
 
 ## Typed anchors
 
@@ -225,6 +225,6 @@ diagnosis.
 
 ## See also
 
-- [`insights-onboarding.md`](insights-onboarding.md) — `ee why` / `ee pack --explain` graph surfaces.
+- [`insights-onboarding.md`](../insights-onboarding.md) — `ee why` / `ee pack --explain` graph surfaces.
 - [`surface-contract.md`](surface-contract.md) — the new-surface registration contract.
-- [ADR-0056](../adr/0056-code-anchoring-substrate-and-freshness.md) — the anchoring + freshness decision record.
+- [ADR-0056](../../adr/0056-code-anchoring-substrate-and-freshness.md) — the anchoring + freshness decision record.
