@@ -14614,6 +14614,10 @@ fn contains_any_token(normalized: &str, needles: &[&str]) -> bool {
 ///
 /// Scans existing memories and returns warnings for any that are similar
 /// to the provided content. Uses exact matching and lexical similarity.
+///
+/// Only this module's tests call it. `ee remember` reports near-duplicates
+/// through the embedding dedup decision instead
+/// (`remember_near_duplicates_from_embed_dedup_decision`).
 pub fn check_for_duplicates(options: &DedupeCheckOptions<'_>) -> DedupeCheckReport {
     let conn = match open_migrated_memory_database(options.database_path) {
         Ok(c) => c,
@@ -14697,8 +14701,7 @@ pub fn check_for_duplicates(options: &DedupeCheckOptions<'_>) -> DedupeCheckRepo
     // is `jaccard_similarity(...)` (always finite in [0, 1] by construction;
     // see fn body at line ~6600), so `partial_cmp` always returns
     // `Some(Ordering)` today and the `unwrap_or(Equal)` is unreachable. The
-    // dedupe-check report is a `ee remember` user-facing surface that runs
-    // on every remember call — same DB + same input → same warning order.
+    // same DB and the same input must give the same warning order.
     // If a future refactor changes `jaccard_similarity` (e.g. ratio of two
     // u64 counts where the second could be zero) and lets a NaN through,
     // the bare `partial_cmp(...).unwrap_or(Equal)` would collapse the sort
