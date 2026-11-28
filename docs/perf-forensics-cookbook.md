@@ -14,20 +14,27 @@ artifacts and produce comparison reports without mutating workspace state.
 ## Workflow
 
 ```
-1. Capture baseline  →  2. Run new bench  →  3. Compare  →  4. Triage
+1. Capture baseline  →  2. Capture candidate  →  3. Compare  →  4. Triage
 ```
 
 ---
 
 ## Step 1: Capture Baseline
 
-A baseline is any normalized artifact summary (`ee.perf.artifact_summary.v1`). Sources:
+`ee perf compare` and `ee perf budget check` read either a normalized artifact
+summary (`ee.perf.artifact_summary.v1`) or a support bundle directory, which they
+summarize on the fly after verifying its manifest hashes. No `ee` command writes a
+standalone summary file. Sources:
 
 | Source | How to capture |
 |--------|----------------|
-| Prior benchmark run | Save the JSON output from `ee bench smoke --json` |
-| Support bundle | Extract from `bundle.zip/perf/artifact_summary.json` |
+| Support bundle | `ee support bundle --workspace . --out <dir>`; pass the `ee_support_<id>` directory it prints |
 | Golden fixture | Use existing `tests/fixtures/golden/perf_artifact/*.json` |
+| Your own harness | Any JSON file in the schema below |
+
+A bundle's metrics come from its profile evidence, scale benchmark summary, cache
+reports, write-queue report and explain samples. A section the host has no data for
+is reported as a missing-section degradation rather than a zero.
 
 Example baseline artifact structure:
 
@@ -46,20 +53,21 @@ Example baseline artifact structure:
 }
 ```
 
-Save your baseline:
+Capture a baseline bundle:
 
 ```bash
-ee bench smoke --json > baseline.json
+ee support bundle --workspace . --out ./bundles/baseline
+# The "Output:" line names the bundle: ./bundles/baseline/ee_support_<id>
 ```
 
 ---
 
-## Step 2: Run Candidate Benchmark
+## Step 2: Capture Candidate
 
-After code changes, run the same benchmark to produce a candidate artifact:
+After code changes, capture a second bundle the same way:
 
 ```bash
-ee bench smoke --json > candidate.json
+ee support bundle --workspace . --out ./bundles/candidate
 ```
 
 Ensure both artifacts:
@@ -75,6 +83,9 @@ Ensure both artifacts:
 
 ```bash
 ee perf compare --baseline baseline.json --candidate candidate.json --json
+# or, with two support bundles:
+ee perf compare --baseline ./bundles/baseline/ee_support_<id> \
+  --candidate ./bundles/candidate/ee_support_<id> --json
 ```
 
 ### Interpreting results
@@ -199,7 +210,7 @@ regression detected?
 
 | Condition | Escalation |
 |-----------|------------|
-| Unknown regression cause | Run `ee explain-performance` |
+| Unknown regression cause | Run `ee perf explain-latency --surface context --report <artifact> --json`, or capture `ee context "<task>" --explain-performance --json` |
 | Perf evidence disagrees with replay, RCH, or support-bundle evidence | Build an `ee.regression_causality.v1` capsule with `ee regress explain` and `perf_report=<artifact>` |
 | Need profiler data | Attach `perf record` or flamegraph |
 | Need full bundle | Generate `ee support bundle` |
@@ -234,7 +245,7 @@ jq '.profile.profileName' baseline.json candidate.json
 
 ```bash
 # Compare multiple runs to check variance
-for i in 1 2 3; do ee bench smoke --json > "run_$i.json"; done
+for i in 1 2 3; do ee support bundle --workspace . --out "./bundles/run_$i"; done
 # Compare each pair and check if delta is consistent
 ```
 
@@ -253,18 +264,16 @@ jq '.metrics | keys' baseline.json candidate.json
 ### Laptop (portable)
 
 ```bash
-# Capture baseline
-ee bench smoke --json > baseline.json
+# Capture baseline, then a candidate after changes
+ee support bundle --workspace . --out ./bundles/baseline
+ee support bundle --workspace . --out ./bundles/candidate
 
-# After changes
-ee bench smoke --json > candidate.json
-
-# Compare
-ee perf compare --baseline baseline.json --candidate candidate.json --json | \
-  jq '.data.report.summary'
+# Compare (use the ee_support_<id> directories each run printed)
+ee perf compare --baseline ./bundles/baseline/ee_support_<id> \
+  --candidate ./bundles/candidate/ee_support_<id> --json | jq '.data.report.summary'
 
 # Check budget
-ee perf budget check --profile portable --report candidate.json --json
+ee perf budget check --profile portable --report ./bundles/candidate/ee_support_<id> --json
 ```
 
 ### CI Runner (constrained)
@@ -281,10 +290,10 @@ ee perf compare --baseline golden/baseline.json --candidate ./candidate.json --j
 ### Build Server (swarm)
 
 ```bash
-# Compare support bundle artifacts
+# Compare two support bundle directories
 ee perf compare \
-  --baseline bundle_baseline/perf/summary.json \
-  --candidate bundle_candidate/perf/summary.json \
+  --baseline ./bundles/baseline/ee_support_<id> \
+  --candidate ./bundles/candidate/ee_support_<id> \
   --json
 
 # Swarm budgets are more generous
@@ -299,11 +308,10 @@ ee perf budget check --profile swarm --report swarm_artifact.json --json
 
 | Command | Purpose |
 |---------|---------|
-| `ee perf compare` | Compare two artifact summaries |
-| `ee perf budget check` | Check artifact against profile budget |
-| `ee bench smoke` | Generate benchmark artifact |
+| `ee perf compare` | Compare two artifact summaries or support bundles |
+| `ee perf budget check` | Check an artifact or support bundle against a profile budget |
 | `ee profile config plan` | View current profile configuration |
-| `ee support bundle` | Generate full support bundle |
+| `ee support bundle` | Generate a support bundle, which compare and budget check accept |
 | `ee regress explain` | Compare perf, replay, RCH, tracker, and support evidence without treating a hypothesis as proof |
 
 ### Tested scenarios
@@ -313,6 +321,7 @@ These scenarios are covered by automated tests:
 - `tests/e2e_perf_compare.rs`: regression detected, no regression, missing files, malformed JSON
 - `tests/perf_budget_conformance.rs`: all 4 profiles, mismatch detection, error handling
 - `tests/perf_artifact_contract.rs`: schema stability, serialization contracts
+- `tests/support_bundle_perf_compare.rs`: bundle summaries (complete, partial, tampered, mismatched profile, unsupported version) and compare or budget check on bundle directories
 
 ### Schemas
 

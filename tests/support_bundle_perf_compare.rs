@@ -7,7 +7,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use ee::core::perf_forensics::compare_normalized_artifacts;
+use ee::core::perf_forensics::{
+    check_perf_budget_report, compare_artifact_summary_files, compare_normalized_artifacts,
+};
 use ee::core::support_bundle::{
     BundleManifest, ManifestEntry, SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1,
     summarize_bundle_for_perf_compare,
@@ -469,6 +471,63 @@ fn mismatched_profile_bundles_degrade_compare_confidence() -> TestResult {
     assert_snapshot!(
         "support_bundle_profile_mismatch_compare",
         snapshot_value(&report)?
+    );
+
+    Ok(())
+}
+
+/// `ee perf compare` and `ee perf budget check` take support bundle directories
+/// directly. Before this, only these tests called the adapter, and both
+/// commands refused a directory.
+#[test]
+fn perf_compare_and_budget_check_read_support_bundle_directories() -> TestResult {
+    let baseline = write_bundle(
+        "baseline-portable",
+        SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1,
+        complete_files("portable"),
+        true,
+    )?;
+    let candidate = write_bundle(
+        "candidate-swarm",
+        SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1,
+        complete_files("swarm"),
+        true,
+    )?;
+
+    let from_directories = compare_artifact_summary_files(&baseline.path, &candidate.path)
+        .map_err(|error| error.message())?;
+    let from_summaries = compare_normalized_artifacts(
+        &summarize_bundle_for_perf_compare(&baseline.path).map_err(|error| error.message())?,
+        &summarize_bundle_for_perf_compare(&candidate.path).map_err(|error| error.message())?,
+    );
+    assert_eq!(
+        snapshot_value(&from_directories)?,
+        snapshot_value(&from_summaries)?,
+        "comparing two bundle directories must equal comparing their adapter summaries"
+    );
+
+    let matching =
+        check_perf_budget_report("portable", &baseline.path).map_err(|error| error.message())?;
+    assert_eq!(
+        matching.artifact.artifact_id, "support-bundle:baseline-portable",
+        "budget check must summarize the bundle, not refuse the directory"
+    );
+    assert_eq!(matching.artifact.profile.as_deref(), Some("portable"));
+    assert!(
+        !matching
+            .degraded
+            .iter()
+            .any(|degradation| degradation.code == "profile_mismatch"),
+        "a portable bundle checked against portable must not report a profile mismatch"
+    );
+    let mismatched =
+        check_perf_budget_report("swarm", &baseline.path).map_err(|error| error.message())?;
+    assert!(
+        mismatched
+            .degraded
+            .iter()
+            .any(|degradation| degradation.code == "profile_mismatch"),
+        "a portable bundle checked against swarm must report a profile mismatch"
     );
 
     Ok(())

@@ -8639,11 +8639,11 @@ pub enum PerfBudgetCommand {
 /// Arguments for `ee perf compare`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct PerfCompareArgs {
-    /// Baseline normalized artifact summary JSON.
+    /// Baseline normalized artifact summary JSON, or a support bundle directory.
     #[arg(long, value_name = "PATH")]
     pub baseline: PathBuf,
 
-    /// Candidate normalized artifact summary JSON.
+    /// Candidate normalized artifact summary JSON, or a support bundle directory.
     #[arg(long, value_name = "PATH")]
     pub candidate: PathBuf,
 }
@@ -8715,7 +8715,7 @@ pub struct PerfBudgetCheckArgs {
     #[arg(long, value_name = "PROFILE")]
     pub profile: String,
 
-    /// Normalized performance artifact summary JSON.
+    /// Normalized performance artifact summary JSON, or a support bundle directory.
     #[arg(long, value_name = "PATH")]
     pub report: PathBuf,
 }

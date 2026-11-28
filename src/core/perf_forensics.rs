@@ -1188,6 +1188,17 @@ fn aggregate_explain_latency_degraded(
     }))
 }
 
+/// Load one `ee perf compare` or `ee perf budget check` input. A directory is
+/// read as a support bundle and summarized by `summarize_bundle_for_perf_compare`,
+/// which verifies its manifest hashes (bd-mwjq.7 built that adapter, but no
+/// command called it). Anything else must be a normalized artifact summary file.
+fn read_perf_input(path: &Path) -> Result<models::ArtifactSummary, DomainError> {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+        return crate::core::support_bundle::summarize_bundle_for_perf_compare(path);
+    }
+    read_perf_artifact_summary(path)
+}
+
 /// Load a normalized perf artifact summary from a JSON file.
 pub fn read_perf_artifact_summary(path: &Path) -> Result<models::ArtifactSummary, DomainError> {
     validate_perf_artifact_path(path)?;
@@ -1535,13 +1546,14 @@ fn first_existing_symlink_component(
     })
 }
 
-/// Compare normalized artifact summary files without mutating durable state.
+/// Compare normalized artifact summary files or support bundle directories
+/// without mutating durable state.
 pub fn compare_artifact_summary_files(
     baseline_path: &Path,
     candidate_path: &Path,
 ) -> Result<CompareReport, DomainError> {
-    let baseline = read_perf_artifact_summary(baseline_path)?;
-    let candidate = read_perf_artifact_summary(candidate_path)?;
+    let baseline = read_perf_input(baseline_path)?;
+    let candidate = read_perf_input(candidate_path)?;
     Ok(compare_normalized_artifacts(&baseline, &candidate))
 }
 
@@ -1568,7 +1580,7 @@ pub fn check_perf_budget_report(
             repair: Some("Pass --profile <name> with a non-empty profile.".to_owned()),
         });
     }
-    let artifact = read_perf_artifact_summary(report_path)?;
+    let artifact = read_perf_input(report_path)?;
     Ok(check_perf_budget_summary(profile, &artifact))
 }
 
