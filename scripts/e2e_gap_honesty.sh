@@ -152,8 +152,10 @@ fi
 
 step "knowledge_gap surfaces in swarm brief (6.4)"
 if ee_supports swarm brief; then
-    # `--fields summary` is a hand-built projection with no knowledgeGaps key,
-    # so the probe needs standard. The key is also omitted when empty, and the
+    # Standard serializes the whole report. The hand-built summary projection
+    # (the default) carries knowledgeGaps only on binaries that include
+    # swarm_brief_summary_carries_knowledge_gaps_only_when_present, so standard
+    # is the profile every binary agrees on. Both omit the key when empty, and the
     # brief clusters by exact query hash: three paraphrases are three hashes and
     # never reach KNOWLEDGE_GAP_MIN_CLUSTER_MISSES (3).
     brief="$(ee_json swarm brief --workspace "$WS" --fields standard --json)"

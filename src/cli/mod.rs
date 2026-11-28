@@ -72383,6 +72383,20 @@ fn swarm_brief_summary_json(report: &SwarmBriefReport) -> Result<serde_json::Val
             })?;
         object.insert("compileBlockerAttribution".to_string(), attr_value);
     }
+    // bd-1n0np.6.4 attached knowledge gaps to the report, but only the
+    // standard and full profiles serialize the report; this hand-built
+    // projection, which is the default for `--json`, never carried them.
+    // Like dirtyFileOwnership, the key appears only when there is something
+    // to report, so briefs without repeated misses keep their shape. Gaps
+    // arrive sorted by miss count, so the cap keeps the most-missed.
+    if !report.knowledge_gaps.is_empty()
+        && let Some(object) = summary.as_object_mut()
+    {
+        object.insert(
+            "knowledgeGaps".to_string(),
+            swarm_brief_summary_array(&report.knowledge_gaps, 5, "knowledgeGaps")?,
+        );
+    }
     Ok(summary)
 }
 
@@ -97924,6 +97938,44 @@ mod tests {
             &degraded[0]["sources"],
             &serde_json::json!(["agent_mail", "rch"]),
             "swarm brief source labels",
+        )
+    }
+
+    #[test]
+    fn swarm_brief_summary_carries_knowledge_gaps_only_when_present() -> TestResult {
+        let mut report = crate::core::swarm_brief::SwarmBriefReport::empty(Path::new("."));
+        let render = |report: &crate::core::swarm_brief::SwarmBriefReport| -> Result<serde_json::Value, String> {
+            let rendered = super::render_swarm_brief_json(report, output::FieldProfile::Summary)
+                .map_err(|error| error.message())?;
+            serde_json::from_str::<serde_json::Value>(&rendered).map_err(|error| error.to_string())
+        };
+
+        let empty = render(&report)?;
+        ensure(
+            empty["data"].get("knowledgeGaps").is_none(),
+            "summary omits knowledgeGaps when there are none, keeping its shape",
+        )?;
+
+        report.knowledge_gaps = (0..7_u32)
+            .map(|index| crate::core::swarm_brief::SwarmBriefKnowledgeGap {
+                query_hash: format!("hash{index}"),
+                miss_count: 9 - index,
+                reasons: vec!["no_relevant_results".to_string()],
+            })
+            .collect();
+        let value = render(&report)?;
+        let gaps = value["data"]["knowledgeGaps"]
+            .as_array()
+            .ok_or_else(|| format!("summary must carry a knowledgeGaps array: {value}"))?;
+        ensure_equal(&gaps.len(), &5, "summary caps knowledgeGaps at five")?;
+        ensure_equal(
+            &gaps[0],
+            &serde_json::json!({
+                "queryHash": "hash0",
+                "missCount": 9,
+                "reasons": ["no_relevant_results"],
+            }),
+            "summary keeps the most-missed gap first, in the schema's camelCase",
         )
     }
 
