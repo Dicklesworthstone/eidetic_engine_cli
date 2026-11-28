@@ -1802,6 +1802,7 @@ impl EffectManifest {
                 "Preview bounded promotion candidates from verification tied directly to packs without writing storage",
             ),
             CommandEffect::read_only_db("outcome quarantine list", "List feedback quarantine rows"),
+            CommandEffect::read_only_db("outcome trace", "Trace memory feedback and quarantine review"),
             CommandEffect::read_only_db("pack diff", "Compare persisted pack ledgers"),
             CommandEffect::read_only_db("pack replay", "Inspect persisted pack ledger"),
             CommandEffect::read_only(

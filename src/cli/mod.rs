@@ -11552,8 +11552,7 @@ pub struct OutcomeArgs {
 /// Subcommands of `ee outcome`.
 #[derive(Clone, Debug, Subcommand, PartialEq)]
 pub enum OutcomeCommand {
-    /// Read-only report joining one memory's feedback events with the
-    /// bayes posterior updates and trust transitions they triggered.
+    /// Show one memory's accepted feedback, learning updates, and quarantine review receipts.
     Trace(OutcomeTraceArgs),
     /// Compare historical confidence with observed outcomes in an explicit time window.
     Calibration(OutcomeCalibrationArgs),
@@ -53606,6 +53605,7 @@ fn resolve_outcome_pack_item_target(
 /// introspection report.
 fn handle_outcome_trace<W, E>(
     cli: &Cli,
+    parent: &OutcomeArgs,
     args: &OutcomeTraceArgs,
     stdout: &mut W,
     stderr: &mut E,
@@ -53614,16 +53614,33 @@ where
     W: Write,
     E: Write,
 {
+    if outcome_has_record_flags(parent) || parent.actor.is_some() {
+        return write_domain_error(
+            &DomainError::Usage {
+                message: "trace cannot be combined with single-target or batch outcome flags"
+                    .to_owned(),
+                repair: Some("ee outcome trace --help".to_owned()),
+            },
+            cli.renderer(),
+            stdout,
+            stderr,
+        );
+    }
     let workspace_path = cli.resolve_workspace();
     let database_path = args
         .database
         .clone()
+        .or_else(|| parent.database.clone())
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
-    match crate::core::outcome::build_outcome_trace(&database_path, &args.memory_id) {
+    match crate::core::outcome::build_workspace_outcome_trace(
+        &workspace_path,
+        &database_path,
+        &args.memory_id,
+    ) {
         Ok(report) => {
             let data = serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({}));
-            let human = format!(
-                "Outcome trace for {}: {} event(s), {} quarantined, {} bayes update(s), {} \
+            let mut human = format!(
+                "Outcome trace for {}: {} accepted event(s), {} released from quarantine, {} bayes update(s), {} \
                  trust transition(s)\n",
                 report.memory_id,
                 report.event_count,
@@ -53631,6 +53648,12 @@ where
                 report.bayes_updates_applied,
                 report.trust_transitions
             );
+            for receipt in &report.quarantine {
+                human.push_str(&format!(
+                    "  Quarantine {}: {}\n",
+                    receipt.quarantine_id, receipt.status
+                ));
+            }
             write_remember_data_payload(cli, &data, &human, stdout)
         }
         Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
@@ -53764,7 +53787,7 @@ where
     if let Some(command) = &args.command {
         return match command {
             OutcomeCommand::Trace(trace_args) => {
-                handle_outcome_trace(cli, trace_args, stdout, stderr)
+                handle_outcome_trace(cli, args, trace_args, stdout, stderr)
             }
             OutcomeCommand::Calibration(calibration) => {
                 handle_outcome_calibration(cli, args, calibration, stdout, stderr)
@@ -73608,7 +73631,8 @@ impl NormalizedInvocation {
                         "outcome harvest --apply".to_string()
                     }
                     Some(OutcomeCommand::Harvest(_)) => "outcome harvest".to_string(),
-                    Some(OutcomeCommand::Trace(_)) | None => "outcome".to_string(),
+                    Some(OutcomeCommand::Trace(_)) => "outcome trace".to_string(),
+                    None => "outcome".to_string(),
                 },
                 Command::Orient(_) => "orient".to_string(),
                 Command::OutcomeQuarantine(command) => match command {

@@ -13132,7 +13132,7 @@ pub struct OutcomeTraceEvent {
     pub source_type: String,
     pub recorded_at: String,
     pub reason_present: bool,
-    /// True when a feedback_quarantine row references this event.
+    /// True when an accepted event was released from feedback quarantine.
     pub quarantined: bool,
     /// Posterior means from the matching outcome.bayes_update audit row.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -13142,6 +13142,19 @@ pub struct OutcomeTraceEvent {
     /// trust_class.transition triggered by this event, when one fired.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trust_transition: Option<String>,
+}
+
+/// Redacted queue receipt. Pending and rejected observations have no accepted
+/// feedback event, so these records are separate from the chronological events.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutcomeTraceQuarantine {
+    pub quarantine_id: String,
+    pub status: String,
+    pub proposed_event_id: Option<String>,
+    pub released_feedback_event_id: Option<String>,
+    pub recorded_at: String,
+    pub reviewed_at: Option<String>,
 }
 
 /// Read-only trace report for one memory's feedback history.
@@ -13156,6 +13169,7 @@ pub struct OutcomeTraceReport {
     pub bayes_updates_applied: usize,
     pub trust_transitions: usize,
     pub events: Vec<OutcomeTraceEvent>,
+    pub quarantine: Vec<OutcomeTraceQuarantine>,
 }
 
 /// Build the read-only outcome trace for one memory. Joins
@@ -13167,38 +13181,83 @@ pub fn build_outcome_trace(
     database_path: &Path,
     memory_id: &str,
 ) -> Result<OutcomeTraceReport, DomainError> {
-    let connection =
-        DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
-            message: format!("Failed to open database for outcome trace: {error}"),
-            repair: Some("ee doctor --json".to_owned()),
-        })?;
-    let events = connection
-        .list_feedback_events_for_target("memory", memory_id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to list feedback events: {error}"),
-            repair: Some("ee doctor --json".to_owned()),
-        })?;
-    let audits = connection
-        .list_audit_by_target("memory", memory_id, None)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to list audit rows: {error}"),
-            repair: Some("ee doctor --json".to_owned()),
-        })?;
-    // Quarantine rows are workspace-scoped; resolve the workspace from the
-    // events themselves (no events means nothing can be quarantined for
-    // this target either).
-    let quarantines = match events.first().map(|event| event.workspace_id.clone()) {
-        Some(workspace_id) => connection
-            .list_feedback_quarantine(&workspace_id, None)
+    read_outcome_trace(database_path, memory_id, None)
+}
+
+/// Resolve the memory and its learning history in the workspace addressed by
+/// the CLI, including when several workspaces share a custom database.
+pub(crate) fn build_workspace_outcome_trace(
+    workspace_path: &Path,
+    database_path: &Path,
+    memory_id: &str,
+) -> Result<OutcomeTraceReport, DomainError> {
+    read_outcome_trace(database_path, memory_id, Some(workspace_path))
+}
+
+fn read_outcome_trace(
+    database_path: &Path,
+    memory_id: &str,
+    workspace_path: Option<&Path>,
+) -> Result<OutcomeTraceReport, DomainError> {
+    let connection = open_existing_database(database_path, true)?;
+    crate::core::curate::source_admission::with_snapshot(&connection, || {
+        let owner = connection
+            .get_memory(memory_id)
             .map_err(|error| DomainError::Storage {
-                message: format!("Failed to list feedback quarantine rows: {error}"),
+                message: format!("Failed to read outcome trace target: {error}"),
                 repair: Some("ee doctor --json".to_owned()),
             })?
-            .into_iter()
-            .filter(|row| row.target_type == "memory" && row.target_id == memory_id)
-            .collect(),
-        None => Vec::new(),
-    };
+            .map(|memory| memory.workspace_id);
+        if let Some(workspace_path) = workspace_path {
+            let not_found = || DomainError::NotFound {
+                resource: "memory".to_owned(),
+                id: memory_id.to_owned(),
+                repair: Some("ee memory list --workspace . --json".to_owned()),
+            };
+            let addressed = crate::core::workspace::addressed_workspace_row(
+                &connection,
+                workspace_path,
+                database_path,
+            )?
+            .ok_or_else(not_found)?;
+            if owner.as_deref() != Some(addressed.id.as_str()) {
+                return Err(not_found());
+            }
+        }
+        // An explicit workspace always has a confirmed native owner here.
+        // Database-level callers without a memory row may still inspect the
+        // retained historical ledger by ID, as in the original API.
+        let rows = connection
+            .memory_outcome_trace_rows(owner.as_deref(), memory_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to read outcome trace history: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        Ok(assemble_outcome_trace(memory_id, rows))
+    })
+}
+
+fn assemble_outcome_trace(
+    memory_id: &str,
+    rows: crate::db::MemoryOutcomeTraceRows,
+) -> OutcomeTraceReport {
+    let crate::db::MemoryOutcomeTraceRows {
+        events,
+        audits,
+        quarantine,
+    } = rows;
+    let quarantine: Vec<_> = quarantine
+        .into_iter()
+        .filter(|row| !is_write_immune_quarantine(row))
+        .map(|row| OutcomeTraceQuarantine {
+            quarantine_id: row.id,
+            status: row.status,
+            proposed_event_id: row.proposed_event_id,
+            released_feedback_event_id: row.released_feedback_event_id,
+            recorded_at: row.recorded_at,
+            reviewed_at: row.reviewed_at,
+        })
+        .collect();
 
     // Index audit details by feedbackEventId for the join.
     let mut bayes_by_event: std::collections::BTreeMap<String, (Option<f64>, Option<f64>)> =
@@ -13244,9 +13303,14 @@ pub fn build_outcome_trace(
             transition_by_event.insert(event_id.to_owned(), transition);
         }
     }
-    let quarantined_event_ids: std::collections::BTreeSet<&str> = quarantines
+    let quarantined_event_ids: BTreeSet<&str> = quarantine
         .iter()
-        .filter_map(|row| row.proposed_event_id.as_deref())
+        .filter(|row| row.status == "released")
+        .filter_map(|row| {
+            row.released_feedback_event_id
+                .as_deref()
+                .or(row.proposed_event_id.as_deref())
+        })
         .collect();
 
     let mut traced = Vec::with_capacity(events.len());
@@ -13283,7 +13347,7 @@ pub fn build_outcome_trace(
         });
     }
 
-    Ok(OutcomeTraceReport {
+    OutcomeTraceReport {
         schema: OUTCOME_TRACE_SCHEMA_V1,
         version: env!("CARGO_PKG_VERSION"),
         memory_id: memory_id.to_owned(),
@@ -13292,7 +13356,8 @@ pub fn build_outcome_trace(
         bayes_updates_applied,
         trust_transitions,
         events: traced,
-    })
+        quarantine,
+    }
 }
 
 #[cfg(test)]

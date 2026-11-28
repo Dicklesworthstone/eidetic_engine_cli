@@ -21062,6 +21062,14 @@ pub struct CreateFeedbackQuarantineInput {
     pub raw_event_hash: String,
 }
 
+/// Rows read in a single snapshot for one memory's outcome trace.
+#[derive(Debug)]
+pub(crate) struct MemoryOutcomeTraceRows {
+    pub(crate) events: Vec<StoredFeedbackEvent>,
+    pub(crate) audits: Vec<StoredAuditEntry>,
+    pub(crate) quarantine: Vec<StoredFeedbackQuarantine>,
+}
+
 /// A stored feedback_quarantine row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -24488,6 +24496,54 @@ impl DbConnection {
         )?;
 
         rows.iter().map(stored_feedback_event_from_row).collect()
+    }
+
+    /// Read one target's learning history, including holds with no accepted event.
+    /// The public CLI always supplies the addressed workspace. The database-level
+    /// trace API can inspect the history of a memory ID without a workspace path.
+    pub(crate) fn memory_outcome_trace_rows(
+        &self,
+        workspace_id: Option<&str>,
+        memory_id: &str,
+    ) -> Result<MemoryOutcomeTraceRows> {
+        let params = [
+            Value::Text(memory_id.to_owned()),
+            workspace_id.map_or(Value::Null, |id| Value::Text(id.to_owned())),
+        ];
+        let events = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, target_type, target_id, signal, weight, source_type, source_id, reason, evidence_json, session_id, applied_at, created_at FROM feedback_events WHERE target_type = 'memory' AND target_id = ?1 AND (?2 IS NULL OR workspace_id = ?2) ORDER BY created_at ASC, id ASC",
+            &params,
+        )?;
+        let audits = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash FROM audit_log WHERE target_type = 'memory' AND target_id = ?1 AND (?2 IS NULL OR workspace_id = ?2) AND action IN (?3, ?4) ORDER BY timestamp ASC, id ASC",
+            &[
+                params[0].clone(),
+                params[1].clone(),
+                Value::Text(audit_actions::OUTCOME_BAYES_UPDATE.to_owned()),
+                Value::Text(audit_actions::TRUST_CLASS_TRANSITION.to_owned()),
+            ],
+        )?;
+        let quarantine = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, source_id, target_type, target_id, signal, weight, source_type, proposed_event_id, recorded_at, reason, event_reason, evidence_json, session_id, raw_event_hash, status, reviewed_at, reviewed_by, released_feedback_event_id FROM feedback_quarantine WHERE target_type = 'memory' AND target_id = ?1 AND (?2 IS NULL OR workspace_id = ?2) ORDER BY recorded_at ASC, id ASC",
+            &params,
+        )?;
+        Ok(MemoryOutcomeTraceRows {
+            events: events
+                .iter()
+                .map(stored_feedback_event_from_row)
+                .collect::<Result<_>>()?,
+            audits: audits
+                .iter()
+                .map(stored_audit_from_row)
+                .collect::<Result<_>>()?,
+            quarantine: quarantine
+                .iter()
+                .map(stored_feedback_quarantine_from_row)
+                .collect::<Result<_>>()?,
+        })
     }
 
     /// List feedback events for a workspace in deterministic order.

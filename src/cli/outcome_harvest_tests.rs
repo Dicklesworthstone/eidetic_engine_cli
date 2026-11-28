@@ -1,4 +1,4 @@
-//! Public CLI boundaries for bounded, preview-first outcome harvesting.
+//! Public CLI boundaries for historical outcome reports and preview-first harvesting.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -685,5 +685,152 @@ fn calibration_cli_rejects_missing_bounds_and_recording_flags() -> TestResult {
         assert!(format!("{stdout}\n{stderr}").contains(expected));
         assert!(!temporary.path().join(".ee/ee.db").exists());
     }
+    Ok(())
+}
+
+#[test]
+fn trace_cli_isolates_shared_store_history_and_shows_unapplied_holds() -> TestResult {
+    const HOLD: &str = "fq_00000000000000000000000021";
+    let fixture = HarvestFixture::new()?;
+    let other = tempfile::tempdir()?;
+    let other_workspace = other.path().canonicalize()?;
+    let other_id = crate::models::WorkspaceId::from_uuid(uuid::Uuid::now_v7()).to_string();
+    let database = fixture.database.to_str().ok_or("non-UTF-8 database")?;
+    let connection = crate::db::DbConnection::open_file(&fixture.database)?;
+    connection.insert_workspace(
+        &other_id,
+        &crate::db::CreateWorkspaceInput {
+            path: other_workspace.to_string_lossy().into_owned(),
+            name: None,
+        },
+    )?;
+    // Historical/imported target references need not match the memory's
+    // current owner. Their ledger workspace must still bound each join.
+    connection.insert_feedback_event(
+        "fb_00000000000000000000000022",
+        &crate::db::CreateFeedbackEventInput {
+            workspace_id: other_id,
+            target_type: "memory".to_owned(),
+            target_id: fixture.memory_id.clone(),
+            signal: "harmful".to_owned(),
+            weight: 1.0,
+            source_type: "outcome_observed".to_owned(),
+            source_id: None,
+            reason: None,
+            evidence_json: None,
+            session_id: None,
+        },
+    )?;
+    connection.insert_feedback_quarantine(
+        HOLD,
+        &crate::db::CreateFeedbackQuarantineInput {
+            workspace_id: fixture.workspace_id.clone(),
+            source_id: "private-trace-source".to_owned(),
+            target_type: "memory".to_owned(),
+            target_id: fixture.memory_id.clone(),
+            signal: "harmful".to_owned(),
+            weight: 1.0,
+            source_type: "outcome_observed".to_owned(),
+            proposed_event_id: Some("fb_00000000000000000000000021".to_owned()),
+            recorded_at: SINCE.to_owned(),
+            reason: "private-trace-reason".to_owned(),
+            event_reason: None,
+            evidence_json: None,
+            session_id: None,
+            raw_event_hash: "blake3:trace-hold".to_owned(),
+        },
+    )?;
+    connection.close()?;
+    let trace = |workspace: &std::path::Path| -> Result<_, Box<dyn std::error::Error>> {
+        let args = [
+            "ee",
+            "--json",
+            "--workspace",
+            workspace.to_str().ok_or("non-UTF-8 workspace")?,
+            "outcome",
+            "--database",
+            database,
+            "trace",
+            &fixture.memory_id,
+        ];
+        let cli = Cli::try_parse_from(args)?;
+        let os_args = args.iter().map(OsString::from).collect::<Vec<_>>();
+        let invocation = NormalizedInvocation::from_cli(&cli, &os_args);
+        let manifest = crate::core::effect::EffectManifest::build();
+        let effect = manifest
+            .get(&invocation.command_path)
+            .ok_or("missing trace effect")?;
+        assert_eq!(invocation.command_path, "outcome trace");
+        assert!(effect.requires_read_snapshot);
+        assert!(!effect.default_effect.is_mutating());
+        Ok(invoke(&args))
+    };
+
+    let (exit, stdout, stderr) = trace(&fixture.workspace)?;
+    assert_eq!(exit, ProcessExitCode::Success, "{stdout}\n{stderr}");
+    assert!(!stdout.contains("private-trace"));
+    let envelope: serde_json::Value = serde_json::from_str(&stdout)?;
+    assert_eq!(envelope["data"]["events"], serde_json::json!([]));
+    assert_eq!(envelope["data"]["eventCount"], 0);
+    assert_eq!(envelope["data"]["quarantinedCount"], 0);
+    assert_eq!(envelope["data"]["quarantine"][0]["quarantineId"], HOLD);
+    assert_eq!(envelope["data"]["quarantine"][0]["status"], "pending");
+
+    let connection = crate::db::DbConnection::open_file(&fixture.database)?;
+    assert!(connection.update_feedback_quarantine_status(HOLD, "rejected", None, None)?);
+    connection.close()?;
+    let (exit, stdout, stderr) = trace(&fixture.workspace)?;
+    assert_eq!(exit, ProcessExitCode::Success, "{stdout}\n{stderr}");
+    let envelope: serde_json::Value = serde_json::from_str(&stdout)?;
+    assert_eq!(envelope["data"]["quarantine"][0]["status"], "rejected");
+    assert_eq!(envelope["data"]["bayesUpdatesApplied"], 0);
+
+    let (exit, stdout, stderr) = invoke(&[
+        "ee",
+        "--workspace",
+        fixture.workspace.to_str().ok_or("non-UTF-8 workspace")?,
+        "--json",
+        "outcome",
+        &fixture.memory_id,
+        "--signal",
+        "helpful",
+        "--database",
+        database,
+    ]);
+    assert_eq!(exit, ProcessExitCode::Success, "{stdout}\n{stderr}");
+    let (exit, stdout, stderr) = trace(&fixture.workspace)?;
+    assert_eq!(exit, ProcessExitCode::Success, "{stdout}\n{stderr}");
+    let envelope: serde_json::Value = serde_json::from_str(&stdout)?;
+    assert_eq!(envelope["data"]["eventCount"], 1);
+    assert_eq!(envelope["data"]["events"][0]["signal"], "helpful");
+    assert_eq!(envelope["data"]["bayesUpdatesApplied"], 1);
+    assert_eq!(envelope["data"]["quarantinedCount"], 0);
+
+    let (exit, stdout, stderr) = trace(&other_workspace)?;
+    assert_ne!(exit, ProcessExitCode::Success, "{stdout}\n{stderr}");
+    let refusal = format!("{stdout}\n{stderr}");
+    assert!(refusal.contains("not_found"), "{refusal}");
+    assert!(!refusal.contains(HOLD));
+    assert!(!other_workspace.join(".ee/ee.db").exists());
+    Ok(())
+}
+
+#[test]
+fn trace_never_creates_a_missing_custom_database() -> TestResult {
+    let workspace = tempfile::tempdir()?;
+    let database = workspace.path().join("absent.sqlite");
+    let (exit, stdout, stderr) = invoke(&[
+        "ee",
+        "--workspace",
+        workspace.path().to_str().ok_or("non-UTF-8 workspace")?,
+        "--json",
+        "outcome",
+        "trace",
+        "mem_00000000000000000000000017",
+        "--database",
+        database.to_str().ok_or("non-UTF-8 database")?,
+    ]);
+    assert_eq!(exit, ProcessExitCode::WorkspaceStoreMissing, "{stdout}\n{stderr}");
+    assert!(!database.exists());
     Ok(())
 }
