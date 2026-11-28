@@ -138,10 +138,9 @@ retention_days = 14
 
 `EE_JOURNAL_ENABLED` and `EE_JOURNAL_RETENTION_DAYS` override those keys.
 Disabling capture makes journal surfaces report `journal_disabled` rather than
-silently writing. Retention is enforced only by the explicit
-`journal-retention` steward job. That job tombstones or prunes according to the
-configured window with audit rows; routine command execution never deletes
-journal evidence in the background.
+silently writing. `retention_days` is parsed but not yet enforced: no steward
+job prunes the journal, and routine command execution never deletes journal
+evidence in the background.
 
 ## CASS Transcript Reader Projection
 

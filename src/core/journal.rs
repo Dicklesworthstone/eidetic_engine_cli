@@ -64,9 +64,9 @@ pub const JOURNAL_STRUCTURED_MAX_BYTES: usize = 8 * 1024;
 pub const JOURNAL_SESSION_KEY_MAX_BYTES: usize = 128;
 /// Maximum JSONL lines per `ee journal append --stdin` invocation.
 pub const JOURNAL_STDIN_MAX_LINES: usize = 512;
-/// Default `[journal] retention_days` when the config key is absent.
-/// Enforcement is the explicit `journal-retention` steward job
-/// (bd-1pi9m.5); this bead only defines the config surface.
+/// Default `[journal] retention_days` when the config key is absent. Nothing
+/// enforces it yet: the `journal-retention` steward job the docs once named was
+/// never built (bd-8ezv3).
 pub const JOURNAL_DEFAULT_RETENTION_DAYS: u64 = 14;
 
 /// Entry kind vocabulary (ADR 0062 §1).
@@ -624,7 +624,7 @@ pub fn journal_capture_enabled(workspace_path: &Path) -> bool {
         .unwrap_or(true)
 }
 
-/// Effective `[journal] retention_days` (enforced by bd-1pi9m.5).
+/// Effective `[journal] retention_days`; unenforced (bd-8ezv3).
 #[must_use]
 pub fn journal_retention_days(workspace_path: &Path) -> u64 {
     crate::core::config_surface::effective_workspace_config(workspace_path)

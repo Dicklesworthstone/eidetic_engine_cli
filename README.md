@@ -2069,7 +2069,7 @@ decay_half_life_days = 60             # parsed, not read yet
 
 [journal]
 enabled = true
-retention_days = 14                   # applied only by the explicit journal-retention steward job
+retention_days = 14                   # parsed but not yet enforced; nothing prunes the journal
 
 [learn]
 cluster_coherence_threshold = 0.55     # average-linkage merge floor for `ee learn cluster`
@@ -2137,7 +2137,7 @@ Environment variable overrides:
 | `EE_AGENT_NAME` | agent identity for outcome attribution and per-agent bias |
 | `EE_SECURITY_PROFILE` | workspace/import security posture; it does not govern shell commands |
 | `EE_JOURNAL_ENABLED` | `[journal].enabled` capture gate; false makes journal surfaces report `journal_disabled` |
-| `EE_JOURNAL_RETENTION_DAYS` | `[journal].retention_days` for the explicit journal-retention steward job |
+| `EE_JOURNAL_RETENTION_DAYS` | `[journal].retention_days`; parsed but not yet enforced |
 | `EE_HARMFUL_PER_SOURCE_PER_HOUR` | `[feedback].harmful_per_source_per_hour` |
 | `EE_HARMFUL_BURST_WINDOW_SECONDS` | `[feedback].harmful_burst_window_seconds` |
 | `EE_QUERY_PLAN_CACHE_ENTRIES` | query-plan cache size (environment-only; no TOML key) |

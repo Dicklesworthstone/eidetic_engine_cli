@@ -156,9 +156,9 @@ retention_days = 14
 ```
 
 `EE_JOURNAL_ENABLED` and `EE_JOURNAL_RETENTION_DAYS` override those keys.
-When capture is disabled, journal commands report `journal_disabled`. Retention
-is enforced by the explicit `journal-retention` steward job with audit evidence;
-ordinary journal commands do not delete rows in the background.
+When capture is disabled, journal commands report `journal_disabled`.
+`retention_days` is parsed but not yet enforced: no steward job prunes the
+journal, and ordinary journal commands do not delete rows in the background.
 
 ## Anti-Patterns
 
