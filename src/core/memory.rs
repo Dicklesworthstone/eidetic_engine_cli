@@ -1582,6 +1582,8 @@ struct RememberBatchStoreSession {
     database_path: PathBuf,
     connection: DbConnection,
     workspace_id: String,
+    /// Read once per session, so a batch does not re-read config per line.
+    write_immune_thresholds: crate::core::write_owner::WriteImmuneQuarantineConfig,
     simhash_entries: std::cell::RefCell<Option<Vec<(String, crate::db::MemoryContentSimHash)>>>,
     simhash_embeddings: std::cell::RefCell<BTreeMap<String, Vec<f32>>>,
     single_tag_bounded_ids: std::cell::RefCell<BTreeMap<String, Vec<String>>>,
@@ -1606,6 +1608,7 @@ impl RememberBatchStoreSession {
             database_path: database_path.to_path_buf(),
             connection,
             workspace_id,
+            write_immune_thresholds: remember_write_immune_thresholds(workspace_path),
             simhash_entries: std::cell::RefCell::new(None),
             simhash_embeddings: std::cell::RefCell::new(BTreeMap::new()),
             single_tag_bounded_ids: std::cell::RefCell::new(BTreeMap::new()),
@@ -1920,6 +1923,7 @@ fn remember_memory_outcome_inner_with_store_and_batch_session(
         &write_operation,
         origin,
         is_batch_session,
+        &session.write_immune_thresholds,
         &memory_id,
     )?;
     // Serialize only source-of-truth mutations. Expensive embedding
@@ -5490,13 +5494,14 @@ fn remember_write_immune_hold(
     write_operation: &crate::core::write_owner::WriteOperation,
     origin: RememberWriteOrigin,
     is_batch_session: bool,
+    thresholds: &crate::core::write_owner::WriteImmuneQuarantineConfig,
     memory_id: &str,
 ) -> Result<Option<PreparedRememberWriteImmuneHold>, DomainError> {
     use crate::core::write_owner::{
         DEFAULT_WRITE_STREAM_NEAR_DUPLICATE_HAMMING, DEFAULT_WRITE_STREAM_WINDOW_MS,
-        REMEMBER_WRITE_IMMUNE_MIN_WRITES, REMEMBER_WRITE_IMMUNE_WRITES_PER_WINDOW, WriteOperation,
-        WriteStreamObservation, WriteStreamStatsConfig, build_write_immune_quarantine_input,
-        compute_source_write_stats, evaluate_write_immune_quarantine, remember_write_immune_config,
+        REMEMBER_WRITE_IMMUNE_MIN_WRITES, WriteOperation, WriteStreamObservation,
+        WriteStreamStatsConfig, build_write_immune_quarantine_input, compute_source_write_stats,
+        evaluate_write_immune_quarantine,
     };
 
     if origin != RememberWriteOrigin::Manual {
@@ -5508,17 +5513,24 @@ fn remember_write_immune_hold(
     let Some(current) = write_operation.write_stream_observation() else {
         return Ok(None);
     };
+    // A whitelisted agent's decision is always allow, which holds nothing.
+    if thresholds.source_whitelist.contains(&current.source_id) {
+        return Ok(None);
+    }
     let window_end_ms = current.observed_at_ms;
     let window_start_ms = window_end_ms.saturating_sub(DEFAULT_WRITE_STREAM_WINDOW_MS);
     // The newest rows from every agent, as many as the write ceiling, plus
     // this write are enough to exceed it. A workspace busier than that across
-    // agents undercounts, which can only withhold a hold, never add one.
+    // agents undercounts, which can only withhold a hold, never add one. A
+    // configured ceiling below the minimum sample still reads that sample.
     let rows = connection
         .list_memories_with_ids_between(
             workspace_id,
             &memory_id_bound_at_ms(window_start_ms, false),
             &memory_id_bound_at_ms(window_end_ms, true),
-            REMEMBER_WRITE_IMMUNE_WRITES_PER_WINDOW,
+            thresholds
+                .max_writes_per_window
+                .max(REMEMBER_WRITE_IMMUNE_MIN_WRITES),
         )
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to read the write-immune window: {error}"),
@@ -5574,7 +5586,7 @@ fn remember_write_immune_hold(
     if stats.write_count < REMEMBER_WRITE_IMMUNE_MIN_WRITES {
         return Ok(None);
     }
-    let mut thresholds = remember_write_immune_config();
+    let mut thresholds = thresholds.clone();
     if is_batch_session {
         thresholds.max_writes_per_window = u32::MAX;
     }
@@ -8499,6 +8511,17 @@ fn remember_duplicate_similarity_threshold(workspace_path: &Path) -> f32 {
     crate::core::config_surface::effective_workspace_config(workspace_path)
         .and_then(|config| config.curation.duplicate_similarity)
         .map_or(REMEMBER_DEFAULT_DUPLICATE_SIMILARITY, |value| value as f32)
+}
+
+/// The write-immune thresholds `ee remember` applies in this workspace: the
+/// built-in ones with any `[feedback] write_immune_*` keys applied.
+fn remember_write_immune_thresholds(
+    workspace_path: &Path,
+) -> crate::core::write_owner::WriteImmuneQuarantineConfig {
+    crate::core::config_surface::effective_workspace_config(workspace_path).map_or_else(
+        crate::core::write_owner::remember_write_immune_config,
+        |config| crate::core::write_owner::remember_write_immune_config_for(&config.feedback),
+    )
 }
 
 pub(crate) fn validate_remember_idempotency_key(raw: &str) -> Result<String, DomainError> {
@@ -25068,6 +25091,84 @@ mod tests {
                 true,
                 &format!("distinct write {index} is ordinary bulk capture"),
             )?;
+        }
+        Ok(())
+    }
+
+    fn set_workspace_feedback_config(workspace: &Path, body: &str) -> TestResult {
+        std::fs::write(
+            workspace.join(".ee").join("config.toml"),
+            format!("[feedback]\n{body}"),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    /// bd-1n0np.8.6: an orchestrator named in the whitelist is never held,
+    /// however repetitive its writes, while the same flood from any other
+    /// agent in that workspace still is.
+    #[test]
+    fn remember_never_holds_an_agent_on_the_configured_source_whitelist() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        set_workspace_feedback_config(
+            temp.path(),
+            "write_immune_source_whitelist = [\"orchestrator\"]\n",
+        )?;
+        let content = "Retry the flaky upload step.";
+        let writes = crate::core::write_owner::REMEMBER_WRITE_IMMUNE_MIN_WRITES + 5;
+        for index in 0..writes {
+            let report = remember_as(temp.path(), content, Some("orchestrator"))?;
+            ensure(
+                report.write_immune_hold.is_none(),
+                true,
+                &format!("whitelisted write {index} is never held"),
+            )?;
+        }
+
+        let mut held = None;
+        for _ in 0..crate::core::write_owner::REMEMBER_WRITE_IMMUNE_MIN_WRITES {
+            let report = remember_as(temp.path(), content, Some("flood-agent"))?;
+            held = report.write_immune_hold;
+        }
+        ensure(
+            held.map(|hold| hold.source_id),
+            Some("flood-agent".to_owned()),
+            "the whitelist exempts only the agents it names",
+        )
+    }
+
+    /// bd-1n0np.8.6: `write_immune_writes_per_hour` replaces the built-in
+    /// ceiling of 500, so distinct writes, which never trip the near-duplicate
+    /// limit, are held once they pass it.
+    #[test]
+    fn remember_holds_distinct_writes_past_the_configured_hourly_ceiling() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let ceiling = crate::core::write_owner::REMEMBER_WRITE_IMMUNE_MIN_WRITES;
+        set_workspace_feedback_config(
+            temp.path(),
+            &format!("write_immune_writes_per_hour = {ceiling}\n"),
+        )?;
+        for index in 0..=ceiling {
+            let content = (0..8)
+                .map(|word| format!("q{index}z{word}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let report = remember_as(temp.path(), &content, Some("busy-agent"))?;
+            if index < ceiling {
+                ensure(
+                    report.write_immune_hold.is_none(),
+                    true,
+                    &format!("distinct write {index} is within the ceiling"),
+                )?;
+            } else {
+                let hold = report
+                    .write_immune_hold
+                    .ok_or("the write past the configured ceiling is held")?;
+                ensure(
+                    hold.reason_codes,
+                    vec!["writes_per_window_exceeded".to_owned()],
+                    "only the configured ceiling trips",
+                )?;
+            }
         }
         Ok(())
     }

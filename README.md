@@ -2087,6 +2087,9 @@ default_half_life_days = 30
 [feedback]
 harmful_per_source_per_hour = 5        # excess harmful events are quarantined
 harmful_burst_window_seconds = 3600
+write_immune_writes_per_hour = 500     # one agent's `ee remember` writes per hour before a hold
+write_immune_near_duplicate_ratio = 0.5  # share of an agent's hour that may repeat its writes
+write_immune_source_whitelist = []     # agent names exempt from holds, e.g. ["orchestrator"]
 
 [privacy]
 redact_secrets   = true

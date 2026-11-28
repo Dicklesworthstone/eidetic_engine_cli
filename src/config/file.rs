@@ -1328,10 +1328,19 @@ impl LearnDecayConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct FeedbackConfig {
     pub harmful_per_source_per_hour: Option<u64>,
     pub harmful_burst_window_seconds: Option<u64>,
+    /// `ee remember`'s write ceiling per agent per hour before a write is
+    /// held for review. Unset, it is 500.
+    pub write_immune_writes_per_hour: Option<u64>,
+    /// `ee remember`'s limit on the share of an agent's hour that repeats
+    /// earlier writes. Unset, it is 0.5.
+    pub write_immune_near_duplicate_ratio: Option<f64>,
+    /// Agent names whose `ee remember` writes are never held, such as an
+    /// orchestrator that legitimately writes many similar memories.
+    pub write_immune_source_whitelist: Option<Vec<String>>,
 }
 
 impl FeedbackConfig {
@@ -1346,6 +1355,21 @@ impl FeedbackConfig {
                 document,
                 "feedback",
                 "harmful_burst_window_seconds",
+            )?,
+            write_immune_writes_per_hour: optional_positive_u32_as_u64(
+                document,
+                "feedback",
+                "write_immune_writes_per_hour",
+            )?,
+            write_immune_near_duplicate_ratio: optional_unit_float(
+                document,
+                "feedback",
+                "write_immune_near_duplicate_ratio",
+            )?,
+            write_immune_source_whitelist: optional_string_array(
+                document,
+                "feedback",
+                "write_immune_source_whitelist",
             )?,
         })
     }
@@ -1888,6 +1912,9 @@ fn config_key_policy(table_path: &str) -> Option<ConfigKeyPolicy> {
         "feedback" => ConfigKeyPolicy::Closed(&[
             "harmful_per_source_per_hour",
             "harmful_burst_window_seconds",
+            "write_immune_writes_per_hour",
+            "write_immune_near_duplicate_ratio",
+            "write_immune_source_whitelist",
         ]),
         "redaction" => ConfigKeyPolicy::Closed(&["defaults"]),
         "redaction.defaults" => {
@@ -3970,6 +3997,45 @@ prompt_injection_guard = true
             &None,
             "redaction classes",
         )
+    }
+
+    /// bd-1n0np.8.6: `ee remember`'s write-immune keys parse in `[feedback]`
+    /// and are range-checked like their neighbours.
+    #[test]
+    fn parses_feedback_write_immune_keys_and_rejects_out_of_range_values() -> TestResult {
+        let config = ConfigFile::parse(
+            "[feedback]\n\
+             write_immune_writes_per_hour = 50\n\
+             write_immune_near_duplicate_ratio = 0.75\n\
+             write_immune_source_whitelist = [\"orchestrator\"]\n",
+        )
+        .map_err(|error| format!("write-immune keys should parse: {error}"))?;
+        ensure_equal(
+            &config.feedback.write_immune_writes_per_hour,
+            &Some(50),
+            "writes per hour",
+        )?;
+        ensure_equal(
+            &config.feedback.write_immune_near_duplicate_ratio,
+            &Some(0.75),
+            "near-duplicate ratio",
+        )?;
+        ensure_equal(
+            &config.feedback.write_immune_source_whitelist,
+            &Some(vec!["orchestrator".to_owned()]),
+            "source whitelist",
+        )?;
+        for bad in [
+            "write_immune_writes_per_hour = 0",
+            "write_immune_near_duplicate_ratio = 1.5",
+            "write_immune_source_whitelist = \"orchestrator\"",
+        ] {
+            ensure(
+                ConfigFile::parse(&format!("[feedback]\n{bad}\n")).is_err(),
+                format!("`{bad}` must be rejected"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

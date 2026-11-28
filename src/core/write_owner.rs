@@ -275,6 +275,27 @@ pub fn remember_write_immune_config() -> WriteImmuneQuarantineConfig {
     }
 }
 
+/// [`remember_write_immune_config`] with a workspace's `[feedback]`
+/// `write_immune_*` keys applied (bd-1n0np.8.6). Only the write ceiling, the
+/// near-duplicate limit and the source whitelist can be configured: the two
+/// evidence ratios stay off for the reason given above.
+#[must_use]
+pub fn remember_write_immune_config_for(
+    feedback: &crate::config::FeedbackConfig,
+) -> WriteImmuneQuarantineConfig {
+    let mut config = remember_write_immune_config();
+    if let Some(writes) = feedback.write_immune_writes_per_hour {
+        config.max_writes_per_window = u32::try_from(writes).unwrap_or(u32::MAX);
+    }
+    if let Some(ratio) = feedback.write_immune_near_duplicate_ratio {
+        config.max_near_duplicate_ratio = ratio as f32;
+    }
+    for source in feedback.write_immune_source_whitelist.iter().flatten() {
+        config = config.with_whitelisted_source(source.as_str());
+    }
+    config
+}
+
 /// Default wait-free write-hot-path enqueue capacity.
 pub const DEFAULT_WRITE_HOT_PATH_V2_QUEUE_CAPACITY: usize = DEFAULT_SPOOL_MAX_PENDING;
 
@@ -4641,6 +4662,32 @@ mod tests {
         assert_eq!(decision.action, "allow");
         assert!(decision.whitelisted);
         assert!(!decision.reasons.is_empty());
+    }
+
+    /// bd-1n0np.8.6: unset keys leave `ee remember`'s thresholds alone, and
+    /// set ones replace only what they name. The evidence ratios stay off.
+    #[test]
+    fn remember_write_immune_config_for_applies_only_the_configured_keys() {
+        assert_eq!(
+            remember_write_immune_config_for(&crate::config::FeedbackConfig::default()),
+            remember_write_immune_config(),
+        );
+
+        let config = remember_write_immune_config_for(&crate::config::FeedbackConfig {
+            write_immune_writes_per_hour: Some(50),
+            write_immune_near_duplicate_ratio: Some(0.75),
+            write_immune_source_whitelist: Some(vec![" orchestrator ".to_owned(), String::new()]),
+            ..crate::config::FeedbackConfig::default()
+        });
+        assert_eq!(config.max_writes_per_window, 50);
+        assert!((config.max_near_duplicate_ratio - 0.75).abs() < f32::EPSILON);
+        assert_eq!(
+            config.source_whitelist,
+            BTreeSet::from(["orchestrator".to_owned()]),
+            "names are trimmed and a blank entry whitelists nobody"
+        );
+        assert!((config.max_missing_evidence_ratio - 1.0).abs() < f32::EPSILON);
+        assert!((config.max_high_trust_missing_evidence_ratio - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -164,6 +164,11 @@ pub const LEARN_DECAY_DEFAULT_HALF_LIFE_DAYS_KEY: &str = "learn.decay.default_ha
 pub const LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY: &str = "learn.cluster_coherence_threshold";
 pub const FEEDBACK_HARMFUL_PER_SOURCE_PER_HOUR_KEY: &str = "feedback.harmful_per_source_per_hour";
 pub const FEEDBACK_HARMFUL_BURST_WINDOW_SECONDS_KEY: &str = "feedback.harmful_burst_window_seconds";
+pub const FEEDBACK_WRITE_IMMUNE_WRITES_PER_HOUR_KEY: &str = "feedback.write_immune_writes_per_hour";
+pub const FEEDBACK_WRITE_IMMUNE_NEAR_DUPLICATE_RATIO_KEY: &str =
+    "feedback.write_immune_near_duplicate_ratio";
+pub const FEEDBACK_WRITE_IMMUNE_SOURCE_WHITELIST_KEY: &str =
+    "feedback.write_immune_source_whitelist";
 pub const REDACTION_DEFAULT_EXPORT_KEY: &str = "redaction.defaults.export";
 pub const REDACTION_DEFAULT_HANDOFF_CREATE_KEY: &str = "redaction.defaults.handoff_create";
 pub const REDACTION_DEFAULT_CONTEXT_JSON_KEY: &str = "redaction.defaults.context_json";
@@ -1019,6 +1024,27 @@ impl MergedConfig {
                 self.source(FEEDBACK_HARMFUL_BURST_WINDOW_SECONDS_KEY),
             ));
         }
+        if let Some(writes) = self.values.feedback.write_immune_writes_per_hour {
+            entries.push(ConfigShowEntry::new(
+                FEEDBACK_WRITE_IMMUNE_WRITES_PER_HOUR_KEY,
+                writes.to_string(),
+                self.source(FEEDBACK_WRITE_IMMUNE_WRITES_PER_HOUR_KEY),
+            ));
+        }
+        if let Some(ratio) = self.values.feedback.write_immune_near_duplicate_ratio {
+            entries.push(ConfigShowEntry::new(
+                FEEDBACK_WRITE_IMMUNE_NEAR_DUPLICATE_RATIO_KEY,
+                ratio.to_string(),
+                self.source(FEEDBACK_WRITE_IMMUNE_NEAR_DUPLICATE_RATIO_KEY),
+            ));
+        }
+        if let Some(ref sources) = self.values.feedback.write_immune_source_whitelist {
+            entries.push(ConfigShowEntry::new(
+                FEEDBACK_WRITE_IMMUNE_SOURCE_WHITELIST_KEY,
+                sources.join(","),
+                self.source(FEEDBACK_WRITE_IMMUNE_SOURCE_WHITELIST_KEY),
+            ));
+        }
 
         // Redaction defaults section
         if let Some(level) = self.values.redaction.defaults.export {
@@ -1357,9 +1383,14 @@ pub fn built_in_config(expander: &PathExpander) -> ConfigFile {
                 default_half_life_days: Some(30.0),
             },
         },
+        // The write_immune_* defaults live with `ee remember` in
+        // core::write_owner; config does not depend on core.
         feedback: FeedbackConfig {
             harmful_per_source_per_hour: Some(5),
             harmful_burst_window_seconds: Some(3600),
+            write_immune_writes_per_hour: None,
+            write_immune_near_duplicate_ratio: None,
+            write_immune_source_whitelist: None,
         },
         redaction: RedactionConfig {
             defaults: RedactionDefaultsConfig {
@@ -1566,6 +1597,9 @@ pub fn config_from_env(
                 env,
                 EnvVar::HarmfulBurstWindowSeconds.name(),
             )?,
+            write_immune_writes_per_hour: None,
+            write_immune_near_duplicate_ratio: None,
+            write_immune_source_whitelist: None,
         },
         redaction: RedactionConfig::default(),
         policy: PolicyConfig::default(),
@@ -2766,6 +2800,36 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.feedback.harmful_burst_window_seconds,
                 &layers.user.feedback.harmful_burst_window_seconds,
                 &layers.defaults.feedback.harmful_burst_window_seconds,
+            ),
+            write_immune_writes_per_hour: pick_field(
+                &mut sources,
+                FEEDBACK_WRITE_IMMUNE_WRITES_PER_HOUR_KEY,
+                &layers.cli.feedback.write_immune_writes_per_hour,
+                &layers.environment.feedback.write_immune_writes_per_hour,
+                &layers.project.feedback.write_immune_writes_per_hour,
+                &layers.user.feedback.write_immune_writes_per_hour,
+                &layers.defaults.feedback.write_immune_writes_per_hour,
+            ),
+            write_immune_near_duplicate_ratio: pick_field(
+                &mut sources,
+                FEEDBACK_WRITE_IMMUNE_NEAR_DUPLICATE_RATIO_KEY,
+                &layers.cli.feedback.write_immune_near_duplicate_ratio,
+                &layers
+                    .environment
+                    .feedback
+                    .write_immune_near_duplicate_ratio,
+                &layers.project.feedback.write_immune_near_duplicate_ratio,
+                &layers.user.feedback.write_immune_near_duplicate_ratio,
+                &layers.defaults.feedback.write_immune_near_duplicate_ratio,
+            ),
+            write_immune_source_whitelist: pick_field(
+                &mut sources,
+                FEEDBACK_WRITE_IMMUNE_SOURCE_WHITELIST_KEY,
+                &layers.cli.feedback.write_immune_source_whitelist,
+                &layers.environment.feedback.write_immune_source_whitelist,
+                &layers.project.feedback.write_immune_source_whitelist,
+                &layers.user.feedback.write_immune_source_whitelist,
+                &layers.defaults.feedback.write_immune_source_whitelist,
             ),
         },
         redaction: RedactionConfig {
