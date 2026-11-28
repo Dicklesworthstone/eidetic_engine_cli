@@ -12880,10 +12880,16 @@ fn evaluate_candidate_for_apply(
             }
         }
         CandidateType::CreateDerivedMemory => {
+            // Defensive: create-derived candidates are special-cased upstream
+            // through evaluate_create_derived_candidate_for_apply and must
+            // never reach the generic memory-mutation evaluator.
             errors.push(validation_issue(
-                "create_derived_memory_apply_unimplemented",
-                "create-derived-memory candidates are not yet wired into curation apply.",
-                "Keep the candidate pending until derived-memory apply support lands.",
+                "create_derived_generic_apply_refused",
+                "Create-derived candidates apply through the dedicated create-derived path, not generic memory mutation.",
+                format!(
+                    "Re-run `ee curate apply {}`; report this if it recurs.",
+                    stored.id
+                ),
             ));
         }
         CandidateType::LinkProposal | CandidateType::ContradictionReview => {
