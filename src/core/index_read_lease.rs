@@ -456,7 +456,12 @@ impl IndexGenerationLease {
             return Ok(None);
         };
         if metadata.generation != Some(expected_generation)
-            || super::index_metadata_compatibility_error(&metadata_path, &metadata).is_some()
+            || super::index_metadata_compatibility_error_with_identity(
+                &metadata_path,
+                &metadata,
+                None,
+            )
+            .is_some()
         {
             return Ok(None);
         }
