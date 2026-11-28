@@ -1062,3 +1062,81 @@ fn global_retrieval_resolves_local_ownership_before_scoring() {
         }
     }
 }
+
+#[test]
+fn explicit_semantic_search_admits_only_compatible_published_global_vectors() {
+    if isolate_global_store(
+        "explicit_semantic_search_admits_only_compatible_published_global_vectors",
+        "EE_TEST_GLOBAL_SOURCE_MODE",
+    ) {
+        return;
+    }
+    let (fixture, local, _) = lexical_identity_fixture();
+    include_global(&fixture, true);
+    let global = GlobalQualityFixture::new(
+        crate::core::global_store::default_global_store_paths_from_env().unwrap(),
+    );
+    let created = Utc::now() - chrono::Duration::days(1);
+    let id = global.memory(602, created);
+    global.db.execute_raw("UPDATE memories SET content = 'global cobalt release notebook'").unwrap();
+    let model = Arc::new(SemanticIdentityFixture::new(256));
+    let mut options = fixture.options();
+    options.query = "global cobalt release notebook".to_owned();
+    options.speed = SpeedMode::Default;
+    options.source_mode = SearchSourceMode::SemanticOnly;
+    options.strict_source_mode = true;
+    options.relevance_floor = Some(0.0);
+    let search = |options: &SearchOptions| run_search_with_embedder(options, model.clone()).unwrap();
+    let assert_global_withheld = |report: &SearchReport| {
+        assert!(!report.results.iter().any(|hit| hit.doc_id == id));
+        assert!(report.degraded.iter().any(|entry| entry.code == "global_index_unavailable"));
+        assert!(!report.degraded.iter().any(|entry| entry.code == "global_live_snapshot_lexical"));
+    };
+    assert_global_withheld(&search(&options));
+
+    let publish = |dimension| {
+        let _guard = crate::core::index::install_test_workspace_embedder(
+            &global.workspace,
+            EmbedderStack::from_parts(Arc::new(SemanticIdentityFixture::new(dimension)), None),
+        );
+        crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+            workspace_path: global.paths.root.clone(),
+            database_path: Some(global.paths.database_path.clone()),
+            index_dir: Some(global.paths.index_dir.clone()),
+            dry_run: false,
+        }).unwrap()
+    };
+    assert_eq!(publish(256).status, crate::core::index::IndexRebuildStatus::Success);
+    for mode in [SearchSourceMode::SemanticOnly, SearchSourceMode::Hybrid] {
+        options.source_mode = mode;
+        let report = search(&options);
+        assert_eq!(report.source_mode_applied, mode);
+        assert!(!report.source_mode_fallback);
+        let hit = report.results.iter().find(|hit| hit.doc_id == id).expect("global vector hit");
+        assert!(hit.fast_score.is_some());
+        assert_eq!(hit.metadata.as_ref().unwrap()["storeLane"], "global");
+        if mode == SearchSourceMode::SemanticOnly {
+            assert!(hit.lexical_score.is_none());
+        }
+    }
+
+    options.query = "cobalt -absentterm".to_owned();
+    assert!(search(&options).results.iter().any(|hit| hit.doc_id == id));
+    options.query = "cobalt -notebook".to_owned();
+    assert!(!search(&options).results.iter().any(|hit| hit.doc_id == id));
+    options.query = "global cobalt release notebook".to_owned();
+
+    // No retained generation can match the new source watermark with the
+    // request's original producer. Strict reads must withhold global hits.
+    global.memory(603, created);
+    assert_global_withheld(&search(&options));
+    assert_eq!(publish(512).status, crate::core::index::IndexRebuildStatus::Success);
+    assert_global_withheld(&search(&options));
+    options.query = BODY.to_owned();
+    assert!(search(&options).results.iter().any(|hit| hit.doc_id == local));
+
+    options.source_mode = SearchSourceMode::LexicalOnly;
+    options.query = "cobalt".to_owned();
+    let lexical = search(&options);
+    assert!(lexical.results.iter().any(|hit| hit.doc_id == id && hit.lexical_score.is_some() && hit.fast_score.is_none()));
+}

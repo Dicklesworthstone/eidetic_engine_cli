@@ -1387,7 +1387,11 @@ fn retrieve_captured_global_search(
             Some(&mut memories),
             &mut feedback,
             &mut SearchPerformanceTrace::default(),
-            false,
+            GlobalSearchExecution {
+                mode: SearchSourceMode::LexicalOnly,
+                producer: None,
+                fusion_weights: SearchFusionWeights::default(),
+            },
             false,
         )
         .await;
