@@ -95,8 +95,11 @@ if "$EE_BIN" remember --help 2>&1 | grep -q -- "--scope"; then
         --level semantic --kind note --scope global --json)"
     assert_jq "$scope_out" '.success == true' "ee remember --scope global succeeds"
 else
-    # No-silent-cap: the audited promotion write surface is not shipped yet.
-    log_drop 1 "ee remember --scope global flag absent (bd-1n0np.10.2 pending): promotion-CLI assertion skipped"
+    # No-silent-cap: `ee remember --scope global` was deferred when
+    # bd-1n0np.10.2 closed. Audited promotion ships as `ee memory
+    # promote-global`, covered by scripts/e2e_global_lane.sh and
+    # tests/global_store_e2e.rs.
+    log_drop 1 "ee remember --scope global absent (deferred at bd-1n0np.10.2; use ee memory promote-global): promotion-CLI assertion skipped"
 fi
 
 end_temp_workspace
