@@ -1127,20 +1127,20 @@ ee mesh auto-enroll --workspace . --json
 
 **Introduced by:** bd-2e4xa (epic SRR6.46)
 
-**Trigger.** SRR6.46.3 auto-enrollment materialized the peer group successfully but the follow-on `--sync-once` invocation (the integrated mesh handshake/sync step) failed — usually because a peer was momentarily unreachable, the discovery view was stale, or a credential rotation interleaved. Materialization is preserved; the degradation surfaces so the operator knows the initial sync did not land and can retry without re-running auto-enrollment from scratch.
+**Trigger.** SRR6.46.3 auto-enrollment materialized the peer group successfully but the sync it runs right after materializing (the integrated mesh handshake/sync step) failed — usually because a peer was momentarily unreachable, the discovery view was stale, or a credential rotation interleaved. Materialization is preserved; the degradation surfaces so the operator knows the initial sync did not land and can retry without re-running auto-enrollment from scratch.
 
 **Setup.**
 
 ```bash
 ee init --workspace .
 printf '[mesh]\nenabled = true\n' >> .ee/config.toml
-ee mesh auto-enroll --workspace . --sync-once --json   # materialize plus initial sync; sync step fails
+ee mesh auto-enroll --workspace . --json   # materializes, then runs one sync; make a peer unreachable so that sync fails
 ```
 
 **Invocation.**
 
 ```bash
-ee mesh auto-enroll --workspace . --sync-once --json
+ee mesh auto-enroll --workspace . --json
 ```
 
 **Expected emission.** Message contains: `sync`
@@ -4247,7 +4247,7 @@ Historical ee.daemon.context RPC sent over the UDS socket before bd-16pwc.1; cur
 **Setup.**
 
 ```bash
-ee daemon start --no-warm --json
+ee daemon start --json   # in a workspace with no local semantic model installed, so none is ever loaded
 ```
 
 **Invocation.**
@@ -11031,7 +11031,7 @@ ee team share bodies --confirm --token-stdin --workspace .
 
 ```bash
 ee init --workspace . --json
-ee mesh peer add --workspace . --peer peer_mesh_metadata_only --grant metadata --deny body --json
+ee mesh peer add --workspace . --alias peer_mesh_metadata_only --tailscale-node-key <node-key> --endpoint <endpoint> --tailnet-id <tailnet-id> --public-key-fingerprint <fingerprint> --profile metadata-only --yes --json
 ee mesh import --workspace . --file peer-body-metadata-only.json --json
 ```
 
@@ -11651,14 +11651,13 @@ ee mesh peer add <node-key> --yes --handshake-node-key <other-key> --workspace .
 
 ```bash
 ee init --workspace . --json
-ee mesh peer add --workspace . --peer peer_mesh_metadata_only --grant metadata --deny body --deny embedding --json
-ee mesh export --workspace . --peer peer_mesh_metadata_only --lane body --json
+ee mesh peer add --workspace . --alias peer_mesh_metadata_only --tailscale-node-key <node-key> --endpoint <endpoint> --tailnet-id <tailnet-id> --public-key-fingerprint <fingerprint> --profile metadata-only --yes --json
 ```
 
 **Invocation.**
 
 ```bash
-ee mesh export --workspace . --peer peer_mesh_metadata_only --lane body --json
+ee mesh export --workspace . --peer peer_mesh_metadata_only --json   # export has no lane flag; the peer's profile decides what may leave
 ```
 
 **Expected emission.** Message contains: `mesh policy ... denied ... policyRef`
@@ -11714,7 +11713,7 @@ ee mesh peer unknown-attempt <unknown-node-key> --workspace . --json
 
 ```bash
 ee init --workspace . --json
-ee mesh peer add --workspace . --peer peer_mesh_body_allowed --grant metadata --grant body --json
+ee mesh peer add --workspace . --alias peer_mesh_body_allowed --tailscale-node-key <node-key> --endpoint <endpoint> --tailnet-id <tailnet-id> --public-key-fingerprint <fingerprint> --profile body-allowed --yes --json
 ee mesh import --workspace . --file peer-body-metadata-only.json --json
 ```
 
@@ -19724,5 +19723,5 @@ the gap is one of:
 For new degraded codes, follow the J6 fixture-authoring workflow in
 `tests/fixtures/failure_modes/` (see any existing fixture as a
 template), then regenerate.
-<!-- degraded-codes-fingerprint inputs=sha256:4f0c2dd83a05cafabce7488c0a91ad96fa1d0f8c80b8232bb4e9353dfc7deee7 -->
-<!-- degraded-codes-fingerprint body=sha256:8ef90d3f9463daac49c97fb606ebbfe01298debf9bd50a64ecebd41e27ddf3e9 -->
+<!-- degraded-codes-fingerprint inputs=sha256:e813c2d6a411337f631ae20fb5dda79c3f3d391e75e641067ac495ff111536e2 -->
+<!-- degraded-codes-fingerprint body=sha256:0bc07d95cd2c073a27d0a3902e79f82f631433cfa138a05fbea67b7df8a8f44e -->

@@ -12,10 +12,9 @@
     "description": "A peer attempts to import or export mesh body, preview, embedding, tag, or metadata material outside its policy grants.",
     "setup_commands": [
       "ee init --workspace . --json",
-      "ee mesh peer add --workspace . --peer peer_mesh_metadata_only --grant metadata --deny body --deny embedding --json",
-      "ee mesh export --workspace . --peer peer_mesh_metadata_only --lane body --json"
+      "ee mesh peer add --workspace . --alias peer_mesh_metadata_only --tailscale-node-key <node-key> --endpoint <endpoint> --tailnet-id <tailnet-id> --public-key-fingerprint <fingerprint> --profile metadata-only --yes --json"
     ],
-    "invocation": "ee mesh export --workspace . --peer peer_mesh_metadata_only --lane body --json"
+    "invocation": "ee mesh export --workspace . --peer peer_mesh_metadata_only --json   # export has no lane flag; the peer's profile decides what may leave"
   },
   "expected_emission": {
     "code": "mesh_peer_policy_denied",

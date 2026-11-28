@@ -12,7 +12,7 @@
     "description": "A query needs a cached peer body and policy allows body fetch, but the remote body is not available at fetch time, so ee keeps the peer material metadata-only and reports the unavailable remote body without silently inventing local content.",
     "setup_commands": [
       "ee init --workspace . --json",
-      "ee mesh peer add --workspace . --peer peer_mesh_body_allowed --grant metadata --grant body --json",
+      "ee mesh peer add --workspace . --alias peer_mesh_body_allowed --tailscale-node-key <node-key> --endpoint <endpoint> --tailnet-id <tailnet-id> --public-key-fingerprint <fingerprint> --profile body-allowed --yes --json",
       "ee mesh import --workspace . --file peer-body-metadata-only.json --json"
     ],
     "invocation": "ee context 'peer body evidence' --workspace . --memory-scope swarm --json"

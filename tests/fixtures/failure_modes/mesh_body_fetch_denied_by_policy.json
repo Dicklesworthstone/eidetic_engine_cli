@@ -12,7 +12,7 @@
     "description": "A query needs a cached peer body, but the inbound mesh policy decision has bodyFetchAllowed=false, so ee keeps the peer material metadata-only and reports the policy-gated body-fetch denial without exposing peer body content.",
     "setup_commands": [
       "ee init --workspace . --json",
-      "ee mesh peer add --workspace . --peer peer_mesh_metadata_only --grant metadata --deny body --json",
+      "ee mesh peer add --workspace . --alias peer_mesh_metadata_only --tailscale-node-key <node-key> --endpoint <endpoint> --tailnet-id <tailnet-id> --public-key-fingerprint <fingerprint> --profile metadata-only --yes --json",
       "ee mesh import --workspace . --file peer-body-metadata-only.json --json"
     ],
     "invocation": "ee context 'peer body evidence' --workspace . --memory-scope swarm --json"

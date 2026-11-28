@@ -16,7 +16,7 @@
   "trigger": {
     "description": "An ee.daemon.context read-only pack request sets requireCachedLocalEmbedder=true on a cold daemon whose process-cached verified local semantic model is not loaded. The daemon refuses to load the model on demand so read-only pack clients fall back to canonical local retrieval or warm the daemon first.",
     "setup_commands": [
-      "ee daemon start --no-warm --json"
+      "ee daemon start --json   # in a workspace with no local semantic model installed, so none is ever loaded"
     ],
     "invocation": "DaemonRequest{method=\"ee.daemon.context\", params={\"requireCachedLocalEmbedder\":true}} sent to a cold daemon"
   },

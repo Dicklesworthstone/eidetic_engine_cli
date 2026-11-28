@@ -9,13 +9,13 @@
   "severity": "warning",
   "repair_present": true,
   "trigger": {
-    "description": "SRR6.46.3 auto-enrollment materialized the peer group successfully but the follow-on `--sync-once` invocation (the integrated mesh handshake/sync step) failed — usually because a peer was momentarily unreachable, the discovery view was stale, or a credential rotation interleaved. Materialization is preserved; the degradation surfaces so the operator knows the initial sync did not land and can retry without re-running auto-enrollment from scratch.",
+    "description": "SRR6.46.3 auto-enrollment materialized the peer group successfully but the sync it runs right after materializing (the integrated mesh handshake/sync step) failed — usually because a peer was momentarily unreachable, the discovery view was stale, or a credential rotation interleaved. Materialization is preserved; the degradation surfaces so the operator knows the initial sync did not land and can retry without re-running auto-enrollment from scratch.",
     "setup_commands": [
       "ee init --workspace .",
       "printf '[mesh]\\nenabled = true\\n' >> .ee/config.toml",
-      "ee mesh auto-enroll --workspace . --sync-once --json   # materialize plus initial sync; sync step fails"
+      "ee mesh auto-enroll --workspace . --json   # materializes, then runs one sync; make a peer unreachable so that sync fails"
     ],
-    "invocation": "ee mesh auto-enroll --workspace . --sync-once --json"
+    "invocation": "ee mesh auto-enroll --workspace . --json"
   },
   "expected_emission": {
     "code": "auto_enrollment_sync_once_failed",
