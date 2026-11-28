@@ -4,8 +4,8 @@
   "gateBead": "bd-1n0np.23.1",
   "manifestOwner": "tests/contracts/dueling_wizards_migration_registry.rs",
   "sourceOfTruth": "src/db/mod.rs::MIGRATIONS",
-  "currentLastCompiledMigration": 133,
-  "nextPlannedMigration": 134,
+  "currentLastCompiledMigration": 134,
+  "nextPlannedMigration": 135,
   "boundaryMigrationE2e": "scripts/e2e_boundary_migration.sh",
   "backupCoverageBead": "bd-1n0np.23.2",
   "policy": {
@@ -76,7 +76,8 @@
         "V130": "V130_EVIDENCE_READER_PROJECTIONS (bd-reality-core-convergence-1azkt.45; bounded durable reader projections bound to source bytes and projection revision; derived and rebuilt on migration, recovery, and index rebuild)",
         "V131": "V131_EVIDENCE_ADMISSION_COUNTS (bd-reality-core-convergence-1azkt.47; transactionally maintained workspace admission buckets and versioned readiness; derived, backfilled on migration and repaired by recovery/index rebuild)",
         "V132": "V132_PACK_RULE_FAILURE_SECTIONS (native anti-pattern rules retain the failures section in pack history and replay; preserves historical rows, indexes and workspace guards)",
-        "V133": "V133_MEMORY_CODE_ANCHOR_SOURCES (GH#84 additive validated code anchors retained independently of memory content and rebuildable reverse indexes)"
+        "V133": "V133_MEMORY_CODE_ANCHOR_SOURCES (GH#84 additive validated code anchors retained independently of memory content and rebuildable reverse indexes)",
+        "V134": "V134_MEMORY_SENTINEL_JSON_VALUE_COMPARE (GH#90 rebuilds both sentinel tables to admit the json_value_compare kind; preserves spec and result rows, hashes, polarity and indexes)"
       }
     }
   },
@@ -163,16 +164,6 @@
     },
     {
       "id": "attestation_bundles",
-      "version": 134,
-      "status": "not_stored",
-      "runtimeRule": "delivered_without_table",
-      "migrationConstant": "not_applicable_not_stored",
-      "boundaryMigrationEvidence": "not_applicable_not_stored",
-      "backupCoverageEvidence": "not_applicable_not_stored",
-      "proofPosture": "rch_only_no_local_fallback"
-    },
-    {
-      "id": "query_miss_ledger",
       "version": 135,
       "status": "not_stored",
       "runtimeRule": "delivered_without_table",
@@ -182,8 +173,18 @@
       "proofPosture": "rch_only_no_local_fallback"
     },
     {
-      "id": "source_write_stats",
+      "id": "query_miss_ledger",
       "version": 136,
+      "status": "not_stored",
+      "runtimeRule": "delivered_without_table",
+      "migrationConstant": "not_applicable_not_stored",
+      "boundaryMigrationEvidence": "not_applicable_not_stored",
+      "backupCoverageEvidence": "not_applicable_not_stored",
+      "proofPosture": "rch_only_no_local_fallback"
+    },
+    {
+      "id": "source_write_stats",
+      "version": 137,
       "status": "not_stored",
       "runtimeRule": "delivered_without_table",
       "migrationConstant": "not_applicable_not_stored",
@@ -316,8 +317,8 @@
     },
     {
       "id": "attestation_bundles",
-      "version": 134,
-      "migrationName": "V134_ATTESTATION_BUNDLES",
+      "version": 135,
+      "migrationName": "V135_ATTESTATION_BUNDLES",
       "ownerBead": "bd-1n0np.22.1",
       "ownerSurface": "attestation_bundles",
       "status": "not_stored",
@@ -329,8 +330,8 @@
     },
     {
       "id": "query_miss_ledger",
-      "version": 135,
-      "migrationName": "V135_QUERY_MISS_LEDGER",
+      "version": 136,
+      "migrationName": "V136_QUERY_MISS_LEDGER",
       "ownerBead": "bd-1n0np.6.3",
       "ownerSurface": "gap_honesty",
       "status": "not_stored",
@@ -342,8 +343,8 @@
     },
     {
       "id": "source_write_stats",
-      "version": 136,
-      "migrationName": "V136_SOURCE_WRITE_STATS",
+      "version": 137,
+      "migrationName": "V137_SOURCE_WRITE_STATS",
       "ownerBead": "bd-1n0np.8.5",
       "ownerSurface": "read_fence",
       "status": "not_stored",

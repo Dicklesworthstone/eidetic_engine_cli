@@ -12185,6 +12185,108 @@ END;
     "blake3:v133_memory_code_anchor_sources_2026_10_23",
 );
 
+/// Admits the `json_value_compare` sentinel kind (GH #90) by widening the
+/// `sentinel_kind` CHECK on `memory_sentinel_specs`. SQLite cannot alter a
+/// CHECK in place, so both sentinel tables are rebuilt exactly as V096 did:
+/// `memory_sentinel_results.spec_hash` references the specs table, and a bare
+/// RENAME would drag the child's foreign key along to the retired copy. Every
+/// row is copied unchanged, so stored hashes, polarity, the polarity-aware
+/// uniqueness key and all five indexes survive; the retired copies are dropped
+/// so the table set is unchanged.
+pub const V134_MEMORY_SENTINEL_JSON_VALUE_COMPARE: Migration = Migration::new(
+    134,
+    "memory_sentinel_json_value_compare",
+    r#"
+DROP INDEX IF EXISTS idx_memory_sentinel_specs_memory;
+DROP INDEX IF EXISTS idx_memory_sentinel_specs_safety;
+DROP INDEX IF EXISTS idx_memory_sentinel_specs_polarity;
+DROP INDEX IF EXISTS idx_memory_sentinel_results_spec_checked;
+DROP INDEX IF EXISTS idx_memory_sentinel_results_status;
+
+ALTER TABLE memory_sentinel_results RENAME TO memory_sentinel_results_v096;
+ALTER TABLE memory_sentinel_specs RENAME TO memory_sentinel_specs_v096;
+
+CREATE TABLE memory_sentinel_specs (
+    spec_hash TEXT PRIMARY KEY CHECK (
+        length(spec_hash) = 71 AND substr(spec_hash, 1, 7) = 'blake3:'
+    ),
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    sentinel_kind TEXT NOT NULL CHECK (sentinel_kind IN (
+        'path_exists',
+        'file_hash_or_marker',
+        'json_schema_contains_field',
+        'config_key_exists',
+        'env_var_registered',
+        'degraded_code_fixture_exists',
+        'dependency_capability_present',
+        'command_help_contains_flag',
+        'json_value_compare'
+    )),
+    polarity TEXT NOT NULL DEFAULT 'gate' CHECK (polarity IN ('gate', 'revive')),
+    target TEXT NOT NULL CHECK (length(trim(target)) > 0),
+    expected_predicate TEXT NOT NULL CHECK (length(trim(expected_predicate)) > 0),
+    safety_class TEXT NOT NULL CHECK (safety_class IN (
+        'pure_predicate',
+        'allowlisted_introspection'
+    )),
+    provenance TEXT NOT NULL CHECK (length(trim(provenance)) > 0),
+    stale_threshold_seconds INTEGER CHECK (
+        stale_threshold_seconds IS NULL OR stale_threshold_seconds > 0
+    ),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    UNIQUE (memory_id, sentinel_kind, target, expected_predicate, polarity)
+);
+
+INSERT INTO memory_sentinel_specs (
+    spec_hash, memory_id, sentinel_kind, polarity, target, expected_predicate,
+    safety_class, provenance, stale_threshold_seconds, created_at, updated_at
+)
+SELECT
+    spec_hash, memory_id, sentinel_kind, polarity, target, expected_predicate,
+    safety_class, provenance, stale_threshold_seconds, created_at, updated_at
+FROM memory_sentinel_specs_v096;
+
+CREATE TABLE memory_sentinel_results (
+    result_hash TEXT PRIMARY KEY CHECK (
+        length(result_hash) = 71 AND substr(result_hash, 1, 7) = 'blake3:'
+    ),
+    spec_hash TEXT NOT NULL REFERENCES memory_sentinel_specs(spec_hash) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('pass', 'fail', 'unknown', 'degraded')),
+    checked_at TEXT NOT NULL CHECK (length(trim(checked_at)) > 0),
+    evidence_summary TEXT NOT NULL CHECK (length(trim(evidence_summary)) > 0),
+    stale_threshold_seconds INTEGER CHECK (
+        stale_threshold_seconds IS NULL OR stale_threshold_seconds > 0
+    ),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0)
+);
+
+INSERT INTO memory_sentinel_results (
+    result_hash, spec_hash, status, checked_at, evidence_summary,
+    stale_threshold_seconds, created_at
+)
+SELECT
+    result_hash, spec_hash, status, checked_at, evidence_summary,
+    stale_threshold_seconds, created_at
+FROM memory_sentinel_results_v096;
+
+DROP TABLE memory_sentinel_results_v096;
+DROP TABLE memory_sentinel_specs_v096;
+
+CREATE INDEX idx_memory_sentinel_specs_memory
+    ON memory_sentinel_specs(memory_id, sentinel_kind);
+CREATE INDEX idx_memory_sentinel_specs_safety
+    ON memory_sentinel_specs(safety_class, sentinel_kind);
+CREATE INDEX idx_memory_sentinel_specs_polarity
+    ON memory_sentinel_specs(polarity, memory_id);
+CREATE INDEX idx_memory_sentinel_results_spec_checked
+    ON memory_sentinel_results(spec_hash, checked_at);
+CREATE INDEX idx_memory_sentinel_results_status
+    ON memory_sentinel_results(status, checked_at);
+"#,
+    "blake3:v134_memory_sentinel_json_value_compare_2026_11_27",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -12320,6 +12422,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V131_EVIDENCE_ADMISSION_COUNTS,
     V132_PACK_RULE_FAILURE_SECTIONS,
     V133_MEMORY_CODE_ANCHOR_SOURCES,
+    V134_MEMORY_SENTINEL_JSON_VALUE_COMPARE,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -12375,6 +12478,7 @@ fn migration_requires_foreign_key_relaxation(migration: &Migration) -> bool {
         V102_RETRIEVAL_AFFINITY_PROJECTION.version(),
         V103_SUGGEST_LINK_CANDIDATE_TYPES.version(),
         V121_EVIDENCE_FEEDBACK_TARGETS.version(),
+        V134_MEMORY_SENTINEL_JSON_VALUE_COMPARE.version(),
     ]
     .contains(&migration.version())
 }
@@ -12436,7 +12540,8 @@ impl DbConnection {
                 || migration.version == V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST.version
                 || migration.version == V096_MEMORY_SENTINEL_POLARITY.version
                 || migration.version == V121_EVIDENCE_FEEDBACK_TARGETS.version
-                || migration.version == V132_PACK_RULE_FAILURE_SECTIONS.version;
+                || migration.version == V132_PACK_RULE_FAILURE_SECTIONS.version
+                || migration.version == V134_MEMORY_SENTINEL_JSON_VALUE_COMPARE.version;
             let outcome =
                 if rebuilds_existing_table && matches!(&self.location, DatabaseLocation::File(_)) {
                     self.apply_file_schema_rebuild_migration(migration, &now)?
@@ -48385,6 +48490,129 @@ mod tests {
             }
         }
 
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn v134_sentinel_kind_rebuild_preserves_rows_and_admits_json_value_compare() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 133)?;
+        setup_workspace(&connection)?;
+
+        let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::nil()).to_string();
+        let mut input = test_memory_input(
+            "wsp_01234567890123456789012345",
+            "V134 preserves sentinel rows while admitting json_value_compare.",
+        );
+        input.valid_from = Some("2026-11-27T00:00:00Z".to_owned());
+        connection.insert_memory(&memory_id, &input)?;
+
+        let spec = |raw: &str, polarity: super::MemorySentinelPolarity| {
+            super::MemorySentinelSpec::from_raw(
+                &memory_id,
+                raw,
+                polarity,
+                None,
+                "test://sentinel",
+                Some(600),
+            )
+            .map_err(|error| format!("build spec {raw}: {error:?}"))
+        };
+        let gate = spec(
+            "env_var_registered:EE_PACK_TRACE",
+            super::MemorySentinelPolarity::Gate,
+        )?;
+        let revive = spec(
+            "path_exists:ready.marker",
+            super::MemorySentinelPolarity::Revive,
+        )?;
+        let compare = spec(
+            "json_value_compare:watermark.json#schema_rev==14",
+            super::MemorySentinelPolarity::Gate,
+        )?;
+        connection.upsert_memory_sentinel_spec(&gate)?;
+        connection.upsert_memory_sentinel_spec(&revive)?;
+        ensure(
+            connection.upsert_memory_sentinel_spec(&compare).is_err(),
+            "the V096 sentinel_kind CHECK refuses json_value_compare before V134",
+        )?;
+        let result = super::MemorySentinelResult::new(crate::models::MemorySentinelResultInput {
+            spec_hash: gate.spec_hash.clone(),
+            status: super::MemorySentinelResultStatus::Pass,
+            checked_at: "2026-11-27T00:00:00Z".to_owned(),
+            evidence_summary: "EE_PACK_TRACE registered.".to_owned(),
+            stale_threshold_seconds: Some(600),
+        })
+        .map_err(|error| format!("build result: {error:?}"))?;
+        connection.execute_raw(&format!(
+            "INSERT INTO memory_sentinel_results (result_hash, spec_hash, status, checked_at, evidence_summary, stale_threshold_seconds, created_at) VALUES ('{}', '{}', 'pass', '2026-11-27T00:00:00Z', 'EE_PACK_TRACE registered.', 600, '2026-11-27T00:00:00Z')",
+            result.result_hash, gate.spec_hash,
+        ))?;
+
+        let migration_result = connection.migrate()?;
+        let expected_applied: Vec<u32> = super::MIGRATIONS
+            .iter()
+            .map(super::Migration::version)
+            .filter(|version| *version > 133)
+            .collect();
+        ensure(
+            migration_result.applied() == expected_applied.as_slice()
+                && expected_applied.first() == Some(&134),
+            "production migrate routing applies V134 and every later migration",
+        )?;
+
+        ensure_equal(
+            &table_row_count(&connection, "memory_sentinel_specs")?,
+            &2,
+            "spec rows preserved across the rebuild",
+        )?;
+        ensure_equal(
+            &table_row_count(&connection, "memory_sentinel_results")?,
+            &1,
+            "result rows preserved across the rebuild",
+        )?;
+        let listed = connection.list_memory_sentinel_specs(&memory_id)?;
+        for (expected, polarity) in [
+            (&gate, super::MemorySentinelPolarity::Gate),
+            (&revive, super::MemorySentinelPolarity::Revive),
+        ] {
+            ensure(
+                listed.iter().any(|stored| {
+                    stored.spec_hash == expected.spec_hash && stored.polarity == polarity
+                }),
+                format!("{} keeps its hash and polarity", expected.target),
+            )?;
+        }
+        ensure(
+            connection
+                .latest_memory_sentinel_result(&gate.spec_hash)?
+                .is_some(),
+            "the migrated result still resolves through the rebuilt foreign key",
+        )?;
+
+        connection.upsert_memory_sentinel_spec(&compare)?;
+        let listed = connection.list_memory_sentinel_specs(&memory_id)?;
+        ensure(
+            listed.iter().any(|stored| {
+                stored.spec_hash == compare.spec_hash
+                    && stored.sentinel_kind == super::MemorySentinelKind::JsonValueCompare
+                    && stored.target == "watermark.json#schema_rev==14"
+            }),
+            "a json_value_compare spec stores and decodes after V134",
+        )?;
+
+        let indexes = connection.query(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_memory_sentinel_%' ORDER BY name",
+            &[],
+        )?;
+        ensure_equal(&indexes.len(), &5, "all five sentinel indexes are rebuilt")?;
+        for retired in ["memory_sentinel_specs_v096", "memory_sentinel_results_v096"] {
+            ensure(
+                !table_exists(&connection, retired)?,
+                format!("V134 leaves no retired {retired} table"),
+            )?;
+        }
         connection.close()?;
         Ok(())
     }

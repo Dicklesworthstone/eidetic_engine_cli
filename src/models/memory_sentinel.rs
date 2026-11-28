@@ -35,11 +35,14 @@ pub enum MemorySentinelKind {
     DegradedCodeFixtureExists,
     DependencyCapabilityPresent,
     CommandHelpContainsFlag,
+    /// GH #90: compare one scalar of a workspace JSON file against a literal,
+    /// `<rel_path>#<dotted.field><op><json_scalar>`.
+    JsonValueCompare,
 }
 
 impl MemorySentinelKind {
     #[must_use]
-    pub const fn all() -> [Self; 8] {
+    pub const fn all() -> [Self; 9] {
         [
             Self::PathExists,
             Self::FileHashOrMarker,
@@ -49,6 +52,7 @@ impl MemorySentinelKind {
             Self::DegradedCodeFixtureExists,
             Self::DependencyCapabilityPresent,
             Self::CommandHelpContainsFlag,
+            Self::JsonValueCompare,
         ]
     }
 
@@ -63,6 +67,7 @@ impl MemorySentinelKind {
             Self::DegradedCodeFixtureExists => "degraded_code_fixture_exists",
             Self::DependencyCapabilityPresent => "dependency_capability_present",
             Self::CommandHelpContainsFlag => "command_help_contains_flag",
+            Self::JsonValueCompare => "json_value_compare",
         }
     }
 
@@ -76,6 +81,7 @@ impl MemorySentinelKind {
             Self::DegradedCodeFixtureExists => "fixture_exists",
             Self::DependencyCapabilityPresent => "present",
             Self::CommandHelpContainsFlag => "help_contains_flag",
+            Self::JsonValueCompare => "comparison_holds",
         }
     }
 
@@ -89,7 +95,8 @@ impl MemorySentinelKind {
             | Self::ConfigKeyExists
             | Self::EnvVarRegistered
             | Self::DegradedCodeFixtureExists
-            | Self::DependencyCapabilityPresent => MemorySentinelSafetyClass::PurePredicate,
+            | Self::DependencyCapabilityPresent
+            | Self::JsonValueCompare => MemorySentinelSafetyClass::PurePredicate,
         }
     }
 
@@ -104,6 +111,7 @@ impl MemorySentinelKind {
             "degraded_code_fixture_exists" => Some(Self::DegradedCodeFixtureExists),
             "dependency_capability_present" => Some(Self::DependencyCapabilityPresent),
             "command_help_contains_flag" => Some(Self::CommandHelpContainsFlag),
+            "json_value_compare" => Some(Self::JsonValueCompare),
             _ => None,
         }
     }
@@ -123,6 +131,219 @@ impl FromStr for MemorySentinelKind {
             input: input.to_owned(),
         })
     }
+}
+
+/// Comparison operator of a [`MemorySentinelKind::JsonValueCompare`] target.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum JsonValueCompareOperator {
+    Eq,
+    Ne,
+    Le,
+    Ge,
+    Lt,
+    Gt,
+}
+
+impl JsonValueCompareOperator {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Eq => "==",
+            Self::Ne => "!=",
+            Self::Le => "<=",
+            Self::Ge => ">=",
+            Self::Lt => "<",
+            Self::Gt => ">",
+        }
+    }
+
+    /// Whether the operator orders its operands, so only numbers qualify.
+    #[must_use]
+    pub const fn is_ordered(self) -> bool {
+        matches!(self, Self::Le | Self::Ge | Self::Lt | Self::Gt)
+    }
+
+    const fn holds(self, ordering: std::cmp::Ordering) -> bool {
+        match self {
+            Self::Eq => ordering.is_eq(),
+            Self::Ne => ordering.is_ne(),
+            Self::Le => ordering.is_le(),
+            Self::Ge => ordering.is_ge(),
+            Self::Lt => ordering.is_lt(),
+            Self::Gt => ordering.is_gt(),
+        }
+    }
+}
+
+/// A parsed `json_value_compare` target,
+/// `<rel_path>#<dotted.field><op><json_scalar>` (GH #90).
+#[derive(Clone, Debug, PartialEq)]
+pub struct JsonValueCompareTarget<'a> {
+    /// Workspace-relative path of the JSON file.
+    pub path: &'a str,
+    /// Dotted field path walked from the document root.
+    pub field: &'a str,
+    pub operator: JsonValueCompareOperator,
+    /// The literal JSON scalar on the right-hand side.
+    pub expected: serde_json::Value,
+}
+
+impl JsonValueCompareTarget<'_> {
+    /// Compare the observed value against the expected literal.
+    ///
+    /// `Some(true)` when the comparison holds and `Some(false)` when it
+    /// definitively does not. `None` means the comparison cannot be answered:
+    /// a non-scalar or out-of-range observed value, a type mismatch, or an
+    /// ordered operator on a non-number. Two integers compare exactly (as
+    /// `i128`, so `u64` and `i64` values mix); a float on either side compares
+    /// as `f64`; strings, booleans and null support only `==` and `!=`.
+    #[must_use]
+    pub fn evaluate(&self, actual: &serde_json::Value) -> Option<bool> {
+        use serde_json::Value;
+        let equal = match (actual, &self.expected) {
+            (Value::Number(actual), Value::Number(expected)) => {
+                let ordering = compare_json_numbers(actual, expected)?;
+                return Some(self.operator.holds(ordering));
+            }
+            (Value::String(actual), Value::String(expected)) => actual == expected,
+            (Value::Bool(actual), Value::Bool(expected)) => actual == expected,
+            (Value::Null, Value::Null) => true,
+            _ => return None,
+        };
+        match self.operator {
+            JsonValueCompareOperator::Eq => Some(equal),
+            JsonValueCompareOperator::Ne => Some(!equal),
+            JsonValueCompareOperator::Le
+            | JsonValueCompareOperator::Ge
+            | JsonValueCompareOperator::Lt
+            | JsonValueCompareOperator::Gt => None,
+        }
+    }
+}
+
+/// A JSON number reduced to the operand class the comparison uses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum JsonNumberOperand {
+    Integer(i128),
+    Float(f64),
+}
+
+impl JsonNumberOperand {
+    fn from_number(number: &serde_json::Number) -> Option<Self> {
+        // The spelled form decides the class: `14` is an integer and `14.0`
+        // or `1e3` is a float. Integers outside i128 and non-finite floats
+        // have no exact comparison, so they are unanswerable.
+        let spelled = number.to_string();
+        if spelled.contains(['.', 'e', 'E']) {
+            let value = spelled.parse::<f64>().ok()?;
+            value.is_finite().then_some(Self::Float(value))
+        } else {
+            spelled.parse::<i128>().ok().map(Self::Integer)
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)] // a float operand compares as f64 by contract
+    fn as_f64(self) -> f64 {
+        match self {
+            Self::Integer(value) => value as f64,
+            Self::Float(value) => value,
+        }
+    }
+}
+
+fn compare_json_numbers(
+    actual: &serde_json::Number,
+    expected: &serde_json::Number,
+) -> Option<std::cmp::Ordering> {
+    match (
+        JsonNumberOperand::from_number(actual)?,
+        JsonNumberOperand::from_number(expected)?,
+    ) {
+        (JsonNumberOperand::Integer(actual), JsonNumberOperand::Integer(expected)) => {
+            Some(actual.cmp(&expected))
+        }
+        (actual, expected) => actual.as_f64().partial_cmp(&expected.as_f64()),
+    }
+}
+
+/// Parse a `json_value_compare` target, `<rel_path>#<dotted.field><op><json_scalar>`.
+///
+/// The operator is the first of `=`, `!`, `<` or `>` after the `#`, read as a
+/// two-character operator (`==`, `!=`, `<=`, `>=`) before a one-character one
+/// (`<`, `>`). The scalar after it is parsed as JSON.
+///
+/// # Errors
+///
+/// Returns the reason the target is malformed: a missing `#` or path, an empty
+/// field segment, a missing or unknown operator, a comparison longer than the
+/// predicate cap, a value that is not a JSON scalar, a number with no exact
+/// comparison, or an ordered operator on a non-number.
+pub fn parse_json_value_compare_target(
+    target: &str,
+) -> Result<JsonValueCompareTarget<'_>, &'static str> {
+    let Some((raw_path, selector)) = target.split_once('#') else {
+        return Err("json_value_compare targets must be <path>#<dotted.field><op><json_scalar>");
+    };
+    let path = raw_path.trim();
+    if path.is_empty() {
+        return Err("json_value_compare targets must name a workspace JSON file before `#`");
+    }
+    let Some(operator_at) = selector.find(['=', '!', '<', '>']) else {
+        return Err("json_value_compare targets must include an operator: == != <= >= < >");
+    };
+    let (raw_field, comparison) = selector.split_at(operator_at);
+    let (operator, operator_len) = match comparison.as_bytes() {
+        [b'=', b'=', ..] => (JsonValueCompareOperator::Eq, 2),
+        [b'!', b'=', ..] => (JsonValueCompareOperator::Ne, 2),
+        [b'<', b'=', ..] => (JsonValueCompareOperator::Le, 2),
+        [b'>', b'=', ..] => (JsonValueCompareOperator::Ge, 2),
+        [b'<', ..] => (JsonValueCompareOperator::Lt, 1),
+        [b'>', ..] => (JsonValueCompareOperator::Gt, 1),
+        _ => return Err("json_value_compare operator must be one of == != <= >= < >"),
+    };
+    let field = raw_field.trim();
+    if field.is_empty() || field.split('.').any(str::is_empty) {
+        return Err("json_value_compare field must be a dotted path with no empty segment");
+    }
+    if comparison.len() > MAX_MEMORY_SENTINEL_PREDICATE_BYTES {
+        return Err("json_value_compare comparison exceeds the 512-byte predicate cap");
+    }
+    let Some(scalar) = comparison
+        .get(operator_len..)
+        .filter(|scalar| !scalar.trim().is_empty())
+    else {
+        return Err("json_value_compare targets must give a JSON scalar after the operator");
+    };
+    let Ok(expected) = serde_json::from_str::<serde_json::Value>(scalar) else {
+        return Err(
+            "json_value_compare value must be a JSON scalar such as 14, 4.5, \"done\", true or null",
+        );
+    };
+    match &expected {
+        serde_json::Value::Number(number) => {
+            if JsonNumberOperand::from_number(number).is_none() {
+                return Err(
+                    "json_value_compare numbers must be integers within i128 or finite floats",
+                );
+            }
+        }
+        serde_json::Value::String(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {
+            if operator.is_ordered() {
+                return Err(
+                    "json_value_compare ordered operators (<= >= < >) need a numeric value",
+                );
+            }
+        }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            return Err("json_value_compare value must be a JSON scalar, not an array or object");
+        }
+    }
+    Ok(JsonValueCompareTarget {
+        path,
+        field,
+        operator,
+        expected,
+    })
 }
 
 /// Which direction a sentinel's predicate acts on its memory
@@ -673,6 +894,9 @@ fn validate_target(
         MemorySentinelKind::CommandHelpContainsFlag => {
             validate_command_help_target(kind, target)?;
         }
+        MemorySentinelKind::JsonValueCompare => {
+            validate_json_value_compare_target(kind, target)?;
+        }
     }
     Ok(target.to_owned())
 }
@@ -811,6 +1035,37 @@ fn validate_command_help_target(
             target: target.to_owned(),
             reason: "command-help target must include the expected --flag",
         });
+    }
+    Ok(())
+}
+
+/// `json_value_compare` needs its own envelope: its operators include `<` and
+/// `>`, which the generic declarative check rejects as shell redirections. The
+/// path and field keep every workspace rule; the operator and JSON scalar are
+/// validated by the grammar, so a malformed target is refused at registration
+/// rather than at check time.
+fn validate_json_value_compare_target(
+    kind: MemorySentinelKind,
+    target: &str,
+) -> Result<(), MemorySentinelValidationError> {
+    let invalid = |reason: &'static str| MemorySentinelValidationError::InvalidTarget {
+        kind,
+        target: target.to_owned(),
+        reason,
+    };
+    let parsed = parse_json_value_compare_target(target).map_err(invalid)?;
+    if parsed.path.starts_with('/') || parsed.path.starts_with('~') || parsed.path.contains("://") {
+        return Err(invalid("workspace file targets must be relative paths"));
+    }
+    if parsed.path.split('/').any(|component| component == "..") {
+        return Err(invalid(
+            "workspace file targets must not contain parent traversal",
+        ));
+    }
+    if contains_shell_metacharacter(parsed.path) || contains_shell_metacharacter(parsed.field) {
+        return Err(invalid(
+            "target must be declarative and must not contain shell metacharacters",
+        ));
     }
     Ok(())
 }
@@ -1271,6 +1526,250 @@ mod tests {
         ensure(
             MemorySentinelPolarity::parse("resurrect").is_none(),
             "unknown polarity tokens must be rejected",
+        )
+    }
+
+    fn json_value_compare_spec(
+        target: &str,
+    ) -> Result<MemorySentinelSpec, MemorySentinelValidationError> {
+        MemorySentinelSpec::from_raw(
+            &memory_id(),
+            &format!("json_value_compare:{target}"),
+            MemorySentinelPolarity::Gate,
+            None,
+            "test://sentinel",
+            None,
+        )
+    }
+
+    #[test]
+    fn json_value_compare_registers_as_a_pure_predicate() -> TestResult {
+        ensure(
+            MemorySentinelKind::parse("json_value_compare")
+                == Some(MemorySentinelKind::JsonValueCompare)
+                && MemorySentinelKind::JsonValueCompare.as_str() == "json_value_compare",
+            "json_value_compare must round-trip through parse and as_str",
+        )?;
+        let spec = json_value_compare_spec("watermark.json#schema_rev==14")
+            .map_err(|error| error.to_string())?;
+        ensure(
+            spec.sentinel_kind == MemorySentinelKind::JsonValueCompare
+                && spec.safety_class == MemorySentinelSafetyClass::PurePredicate
+                && spec.target == "watermark.json#schema_rev==14"
+                && spec.expected_predicate == "comparison_holds",
+            format!("unexpected registered spec: {spec:?}"),
+        )
+    }
+
+    #[test]
+    fn json_value_compare_matches_two_character_operators_first() -> TestResult {
+        for (target, operator, expected) in [
+            ("w.json#a==14", JsonValueCompareOperator::Eq, "14"),
+            ("w.json#a!=14", JsonValueCompareOperator::Ne, "14"),
+            ("w.json#a<=14", JsonValueCompareOperator::Le, "14"),
+            ("w.json#a>=14", JsonValueCompareOperator::Ge, "14"),
+            ("w.json#a<14", JsonValueCompareOperator::Lt, "14"),
+            ("w.json#a>14", JsonValueCompareOperator::Gt, "14"),
+            ("w.json#a.b<-1", JsonValueCompareOperator::Lt, "-1"),
+            ("w.json#a==-1", JsonValueCompareOperator::Eq, "-1"),
+            ("w.json#a>=4.5", JsonValueCompareOperator::Ge, "4.5"),
+            (
+                "w.json#a==\"done\"",
+                JsonValueCompareOperator::Eq,
+                "\"done\"",
+            ),
+            (
+                "w.json#a==\"x<=y\"",
+                JsonValueCompareOperator::Eq,
+                "\"x<=y\"",
+            ),
+            ("w.json#a!=true", JsonValueCompareOperator::Ne, "true"),
+            ("w.json#a==null", JsonValueCompareOperator::Eq, "null"),
+        ] {
+            let parsed = parse_json_value_compare_target(target)
+                .map_err(|reason| format!("{target} should parse: {reason}"))?;
+            let expected: serde_json::Value =
+                serde_json::from_str(expected).map_err(|error| error.to_string())?;
+            ensure(
+                parsed.path == "w.json"
+                    && parsed.operator == operator
+                    && parsed.expected == expected,
+                format!("{target} parsed as {parsed:?}"),
+            )?;
+            json_value_compare_spec(target)
+                .map_err(|error| format!("{target} should register: {error}"))?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn json_value_compare_rejects_malformed_targets_at_registration() -> TestResult {
+        let oversize_comparison = format!("w.json#a==\"{}\"", "x".repeat(600));
+        for target in [
+            "watermark.json",
+            "#schema_rev==14",
+            "w.json#==14",
+            "w.json#a..b==14",
+            "w.json#.a==14",
+            "w.json#a.==14",
+            "w.json#schema_rev",
+            "w.json#a=14",
+            "w.json#a!14",
+            "w.json#a=<14",
+            "w.json#a==",
+            "w.json#a==   ",
+            "w.json#a==done",
+            "w.json#a==[1]",
+            "w.json#a=={\"b\":1}",
+            "w.json#a==1e400",
+            "w.json#a<\"done\"",
+            "w.json#a>=true",
+            "w.json#a<null",
+            "/etc/w.json#a==14",
+            "~/w.json#a==14",
+            "file://w.json#a==14",
+            "../w.json#a==14",
+            "dir/../w.json#a==14",
+            "w;rm.json#a==14",
+            "w.json#a|b==14",
+            "w.json#a`b==14",
+            oversize_comparison.as_str(),
+        ] {
+            match json_value_compare_spec(target) {
+                Ok(spec) => {
+                    return Err(format!("{target:?} unexpectedly registered as {spec:?}"));
+                }
+                Err(MemorySentinelValidationError::InvalidTarget { kind, .. })
+                    if kind == MemorySentinelKind::JsonValueCompare => {}
+                Err(other) => {
+                    return Err(format!(
+                        "{target:?} rejected with the wrong error: {other:?}"
+                    ));
+                }
+            }
+        }
+        ensure(
+            parse_json_value_compare_target(&oversize_comparison)
+                == Err("json_value_compare comparison exceeds the 512-byte predicate cap"),
+            "an oversize comparison names the predicate cap",
+        )
+    }
+
+    #[test]
+    fn json_value_compare_operators_hold_and_fail_on_planted_negatives() -> TestResult {
+        let document = serde_json::json!({
+            "schema_rev": 14,
+            "state": "done",
+            "ok": true,
+            "none": null,
+        });
+        for (target, expected) in [
+            ("w.json#schema_rev==14", true),
+            ("w.json#schema_rev==15", false),
+            ("w.json#schema_rev!=15", true),
+            ("w.json#schema_rev!=14", false),
+            ("w.json#schema_rev<=14", true),
+            ("w.json#schema_rev<=13", false),
+            ("w.json#schema_rev>=14", true),
+            ("w.json#schema_rev>=15", false),
+            ("w.json#schema_rev<15", true),
+            ("w.json#schema_rev<14", false),
+            ("w.json#schema_rev>13", true),
+            ("w.json#schema_rev>14", false),
+            ("w.json#state==\"done\"", true),
+            ("w.json#state==\"queued\"", false),
+            ("w.json#state!=\"queued\"", true),
+            ("w.json#state!=\"done\"", false),
+            ("w.json#ok==true", true),
+            ("w.json#ok==false", false),
+            ("w.json#ok!=false", true),
+            ("w.json#none==null", true),
+            ("w.json#none!=null", false),
+        ] {
+            let parsed = parse_json_value_compare_target(target)
+                .map_err(|reason| format!("{target}: {reason}"))?;
+            let field = document
+                .get(parsed.field)
+                .ok_or_else(|| format!("{target}: fixture lacks {}", parsed.field))?;
+            ensure(
+                parsed.evaluate(field) == Some(expected),
+                format!("{target} against {field} should be {expected}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn json_value_compare_mixes_integer_and_float_operands() -> TestResult {
+        let document = serde_json::json!({
+            "rev": 14,
+            "ratio": 4.5,
+            "max_u64": u64::MAX,
+            "min_i64": i64::MIN,
+        });
+        for (target, expected) in [
+            // A float on either side compares as f64.
+            ("w.json#ratio>4", true),
+            ("w.json#ratio<4", false),
+            ("w.json#ratio==4.5", true),
+            ("w.json#rev==14.0", true),
+            ("w.json#rev<14.5", true),
+            ("w.json#rev>14.5", false),
+            ("w.json#rev==1.4e1", true),
+            // Two integers compare exactly as i128, across the u64/i64 split.
+            ("w.json#max_u64>-1", true),
+            ("w.json#min_i64<18446744073709551615", true),
+            ("w.json#max_u64==18446744073709551615", true),
+            // Equal as f64 (both round to 2^64) but not as integers.
+            ("w.json#max_u64==18446744073709551614", false),
+            ("w.json#max_u64>18446744073709551614", true),
+            ("w.json#min_i64==-9223372036854775808", true),
+        ] {
+            let parsed = parse_json_value_compare_target(target)
+                .map_err(|reason| format!("{target}: {reason}"))?;
+            let field = document
+                .get(parsed.field)
+                .ok_or_else(|| format!("{target}: fixture lacks {}", parsed.field))?;
+            ensure(
+                parsed.evaluate(field) == Some(expected),
+                format!("{target} against {field} should be {expected}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn json_value_compare_type_mismatches_are_unanswerable() -> TestResult {
+        for (target, actual) in [
+            ("w.json#a==14", serde_json::json!("14")),
+            ("w.json#a==\"14\"", serde_json::json!(14)),
+            ("w.json#a==1", serde_json::json!(true)),
+            ("w.json#a==true", serde_json::json!(1)),
+            ("w.json#a!=null", serde_json::json!("done")),
+            ("w.json#a>=1", serde_json::json!("2")),
+            ("w.json#a==1", serde_json::json!([1])),
+            ("w.json#a==1", serde_json::json!({"b": 1})),
+        ] {
+            let parsed = parse_json_value_compare_target(target)
+                .map_err(|reason| format!("{target}: {reason}"))?;
+            ensure(
+                parsed.evaluate(&actual).is_none(),
+                format!("{target} against {actual} must be unanswerable"),
+            )?;
+        }
+        // An ordered operator on a non-number cannot register, but the
+        // evaluator stays total for a comparison built in memory.
+        let ordered_on_string = JsonValueCompareTarget {
+            path: "w.json",
+            field: "a",
+            operator: JsonValueCompareOperator::Lt,
+            expected: serde_json::json!("m"),
+        };
+        ensure(
+            ordered_on_string
+                .evaluate(&serde_json::json!("a"))
+                .is_none(),
+            "an ordered operator on strings must be unanswerable",
         )
     }
 

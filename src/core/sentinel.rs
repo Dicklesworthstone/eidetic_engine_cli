@@ -20,7 +20,8 @@
 //!   check` surface (bd-1n0np.16.4); here it is conservatively `Unverifiable`.
 //!
 //! v1 fully implements the registry-free pure kinds (env-var membership, path
-//! existence, file hash/marker, JSON-schema field presence). The kinds that need
+//! existence, file hash/marker, JSON-schema field presence, JSON scalar
+//! comparison). The kinds that need
 //! infrastructure not present in the pure core (config-key registry, dependency
 //! capability resolver, eval fixture discovery) and the allowlisted-introspection
 //! kind resolve to `Unverifiable` with a documented reason — never a silent pass
@@ -38,6 +39,7 @@ use crate::core::source_run::{
 };
 use crate::models::memory_sentinel::{
     MemorySentinelKind, MemorySentinelResultStatus, MemorySentinelSpec, SentinelObservation,
+    parse_json_value_compare_target,
 };
 
 /// Strict per-check I/O cap: a single probe reads at most this many bytes. A
@@ -94,6 +96,7 @@ pub fn observe_sentinel(
         MemorySentinelKind::JsonSchemaContainsField => {
             observe_json_schema_contains_field(&spec.target, ctx)
         }
+        MemorySentinelKind::JsonValueCompare => observe_json_value_compare(&spec.target, ctx),
         // Conservative v1 (no silent cap): these resolve to Unverifiable
         // (-> Unknown) because the pure core lacks the backing infrastructure:
         //  * ConfigKeyExists            — no enumerated config-key registry exists yet.
@@ -239,6 +242,44 @@ fn observe_json_schema_contains_field(
     }
 }
 
+/// GH #90: compare one scalar of a workspace JSON file against a literal.
+///
+/// Only a missing file is a definitive negative, as for
+/// `json_schema_contains_field`. Everything else that stops the comparison --
+/// an unreadable, oversize, non-UTF-8 or unparseable file, a budget overrun, a
+/// missing key, a non-scalar value, a type mismatch, or an ordered operator on
+/// a non-number -- is `Unverifiable`, never `Unsatisfied` (ADR 0060).
+fn observe_json_value_compare(target: &str, ctx: SentinelCheckContext<'_>) -> SentinelObservation {
+    let Ok(comparison) = parse_json_value_compare_target(target) else {
+        return SentinelObservation::Unverifiable;
+    };
+    let mut budget = sentinel_check_budget();
+    let bytes = match read_capped_in_workspace(ctx.workspace_root, comparison.path, &mut budget) {
+        CappedRead::Missing => return SentinelObservation::Unsatisfied,
+        CappedRead::Unreadable => return SentinelObservation::Unverifiable,
+        CappedRead::Contents(bytes) => bytes,
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return SentinelObservation::Unverifiable;
+    };
+    let Ok(document) = serde_json::from_str::<serde_json::Value>(text) else {
+        return SentinelObservation::Unverifiable;
+    };
+    if budget.check().is_err() {
+        return SentinelObservation::Unverifiable;
+    }
+    let verdict =
+        json_dotted_value(&document, comparison.field).and_then(|value| comparison.evaluate(value));
+    if budget.check().is_err() {
+        return SentinelObservation::Unverifiable;
+    }
+    match verdict {
+        Some(true) => SentinelObservation::Satisfied,
+        Some(false) => SentinelObservation::Unsatisfied,
+        None => SentinelObservation::Unverifiable,
+    }
+}
+
 fn observe_command_help_contains_flag(target: &str) -> SentinelObservation {
     let mut parts = target.split_whitespace();
     if parts.next() != Some("ee") {
@@ -345,17 +386,23 @@ fn resolve_in_workspace(root: &Path, relative: &str) -> Option<PathBuf> {
 
 /// Whether a dotted JSON field path resolves to a present value.
 fn json_has_dotted_field(root: &serde_json::Value, dotted: &str) -> bool {
+    json_dotted_value(root, dotted).is_some()
+}
+
+/// The value a dotted JSON field path resolves to, walked from the root one
+/// object key per segment. `None` when any segment is empty or absent.
+fn json_dotted_value<'v>(
+    root: &'v serde_json::Value,
+    dotted: &str,
+) -> Option<&'v serde_json::Value> {
     let mut current = root;
     for segment in dotted.split('.') {
         if segment.is_empty() {
-            return false;
+            return None;
         }
-        match current.get(segment) {
-            Some(next) => current = next,
-            None => return false,
-        }
+        current = current.get(segment)?;
     }
-    true
+    Some(current)
 }
 
 /// Outcome of a budgeted file read.
@@ -784,6 +831,10 @@ mod tests {
                 MemorySentinelKind::JsonSchemaContainsField,
                 "linked-outside/schema.json#outside.secret",
             ),
+            (
+                MemorySentinelKind::JsonValueCompare,
+                "linked-outside/schema.json#outside.secret==true",
+            ),
         ] {
             assert_eq!(
                 observe(kind, target, &workspace),
@@ -831,6 +882,187 @@ mod tests {
                 root
             ),
             SentinelObservation::Unsatisfied
+        );
+    }
+
+    const WATERMARK: &[u8] = br#"{"schema_rev":14,"counters":{"processed_rows":4820},"ratio":4.5,"state":"done","label":"4820","ok":true,"none":null,"tags":["a"]}"#;
+
+    fn compare(target: &str, root: &Path) -> SentinelObservation {
+        observe(MemorySentinelKind::JsonValueCompare, target, root)
+    }
+
+    #[test]
+    fn json_value_compare_reads_the_file_and_holds_each_operator() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("watermark.json"), WATERMARK).expect("write watermark");
+        for (target, expected) in [
+            (
+                "watermark.json#schema_rev==14",
+                SentinelObservation::Satisfied,
+            ),
+            (
+                "watermark.json#schema_rev==15",
+                SentinelObservation::Unsatisfied,
+            ),
+            (
+                "watermark.json#schema_rev!=15",
+                SentinelObservation::Satisfied,
+            ),
+            (
+                "watermark.json#schema_rev!=14",
+                SentinelObservation::Unsatisfied,
+            ),
+            (
+                "watermark.json#schema_rev<=14",
+                SentinelObservation::Satisfied,
+            ),
+            (
+                "watermark.json#schema_rev<=13",
+                SentinelObservation::Unsatisfied,
+            ),
+            (
+                "watermark.json#counters.processed_rows>=4820",
+                SentinelObservation::Satisfied,
+            ),
+            (
+                "watermark.json#counters.processed_rows>=5000",
+                SentinelObservation::Unsatisfied,
+            ),
+            (
+                "watermark.json#schema_rev<15",
+                SentinelObservation::Satisfied,
+            ),
+            (
+                "watermark.json#schema_rev<14",
+                SentinelObservation::Unsatisfied,
+            ),
+            (
+                "watermark.json#schema_rev>13",
+                SentinelObservation::Satisfied,
+            ),
+            (
+                "watermark.json#schema_rev>14",
+                SentinelObservation::Unsatisfied,
+            ),
+            (
+                "watermark.json#state==\"done\"",
+                SentinelObservation::Satisfied,
+            ),
+            (
+                "watermark.json#state!=\"done\"",
+                SentinelObservation::Unsatisfied,
+            ),
+            ("watermark.json#ok==true", SentinelObservation::Satisfied),
+            ("watermark.json#none==null", SentinelObservation::Satisfied),
+            // Integer and float operands mix.
+            ("watermark.json#ratio>4", SentinelObservation::Satisfied),
+            (
+                "watermark.json#schema_rev==14.0",
+                SentinelObservation::Satisfied,
+            ),
+            ("watermark.json#ratio<4", SentinelObservation::Unsatisfied),
+        ] {
+            assert_eq!(compare(target, root), expected, "{target}");
+        }
+    }
+
+    #[test]
+    fn json_value_compare_does_not_match_number_prefixes() {
+        // GH #90: the substring form of file_hash_or_marker finds "482" inside
+        // "4820"; a value comparison must not.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("watermark.json"), WATERMARK).expect("write watermark");
+        for (target, expected) in [
+            (
+                "watermark.json#counters.processed_rows==482",
+                SentinelObservation::Unsatisfied,
+            ),
+            (
+                "watermark.json#counters.processed_rows<=482",
+                SentinelObservation::Unsatisfied,
+            ),
+            (
+                "watermark.json#counters.processed_rows>=482",
+                SentinelObservation::Satisfied,
+            ),
+            (
+                "watermark.json#counters.processed_rows==4820",
+                SentinelObservation::Satisfied,
+            ),
+            (
+                "watermark.json#counters.processed_rows==48200",
+                SentinelObservation::Unsatisfied,
+            ),
+            // A string that spells a number is not that number.
+            (
+                "watermark.json#label==4820",
+                SentinelObservation::Unverifiable,
+            ),
+        ] {
+            assert_eq!(compare(target, root), expected, "{target}");
+        }
+    }
+
+    #[test]
+    fn json_value_compare_maps_only_a_missing_file_to_unsatisfied() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("watermark.json"), WATERMARK).expect("write watermark");
+        fs::write(root.join("broken.json"), b"{\"schema_rev\": 14,").expect("write broken");
+        fs::write(root.join("latin1.json"), b"{\"state\":\"caf\xe9\"}").expect("write latin1");
+        fs::create_dir(root.join("dir.json")).expect("create directory referent");
+        let oversize = vec![
+            b' ';
+            usize::try_from(MAX_SENTINEL_CHECK_IO_BYTES + 1)
+                .expect("sentinel cap fits usize")
+        ];
+        fs::write(root.join("oversize.json"), oversize).expect("write oversize");
+
+        assert_eq!(
+            compare("absent.json#schema_rev==14", root),
+            SentinelObservation::Unsatisfied,
+            "a missing file is the one definitive negative"
+        );
+        for (target, why) in [
+            ("broken.json#schema_rev==14", "unparseable JSON"),
+            ("latin1.json#state==\"cafe\"", "non-UTF-8 bytes"),
+            ("oversize.json#schema_rev==14", "a file over the read cap"),
+            ("watermark.json#counters.absent==1", "a missing key"),
+            (
+                "watermark.json#schema_rev.minor==1",
+                "a path through a scalar",
+            ),
+            ("watermark.json#counters==1", "an object value"),
+            ("watermark.json#tags==1", "an array value"),
+            ("watermark.json#state==1", "a string against a number"),
+            (
+                "watermark.json#schema_rev==\"14\"",
+                "a number against a string",
+            ),
+            ("watermark.json#ok==1", "a boolean against a number"),
+            ("watermark.json#none!=1", "null against a number"),
+            ("watermark.json#state>=1", "an ordered operator on a string"),
+            (
+                "watermark.json#state<\"e\"",
+                "an ordered operator on strings",
+            ),
+            ("watermark.json#schema_rev=14", "a malformed stored target"),
+            ("../watermark.json#schema_rev==14", "parent traversal"),
+            ("/etc/watermark.json#schema_rev==14", "an absolute path"),
+        ] {
+            assert_eq!(
+                compare(target, root),
+                SentinelObservation::Unverifiable,
+                "{why} must be unverifiable, never unsatisfied: {target}"
+            );
+        }
+        // A directory where the file should be is not a JSON document.
+        assert_eq!(
+            compare("dir.json#schema_rev==14", root),
+            SentinelObservation::Unsatisfied,
+            "a non-regular referent reads as missing, as for json_schema_contains_field"
         );
     }
 

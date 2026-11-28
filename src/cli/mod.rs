@@ -10421,9 +10421,9 @@ pub struct RememberArgs {
     /// Attach a deterministic sentinel predicate (`kind:target`); repeatable.
     /// Kinds: `path_exists`, `file_hash_or_marker`,
     /// `json_schema_contains_field`, `config_key_exists`, `env_var_registered`,
-    /// `degraded_code_fixture_exists`, `dependency_capability_present`, and
-    /// `command_help_contains_flag`. Unknown kinds are rejected. Run
-    /// `ee sentinel explain` for target syntax.
+    /// `degraded_code_fixture_exists`, `dependency_capability_present`,
+    /// `command_help_contains_flag`, and `json_value_compare`. Unknown kinds
+    /// are rejected. Run `ee sentinel explain` for target syntax.
     #[arg(long = "sentinel", value_name = "KIND:TARGET", action = ArgAction::Append)]
     pub sentinels: Vec<String>,
 
@@ -60624,6 +60624,9 @@ fn sentinel_target_syntax(kind: MemorySentinelKind) -> &'static str {
         MemorySentinelKind::DegradedCodeFixtureExists => "degraded_code_fixture_id",
         MemorySentinelKind::DependencyCapabilityPresent => "capability:token",
         MemorySentinelKind::CommandHelpContainsFlag => "ee <subcommand> --flag",
+        MemorySentinelKind::JsonValueCompare => {
+            "relative/file.json#dotted.field<op><json_scalar> (op: == != <= >= < >)"
+        }
     }
 }
 
