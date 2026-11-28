@@ -11,12 +11,9 @@
 #
 # The create / verify / restore SURFACE exists today and runs FOR REAL here:
 # manifestHash, recordsHash, artifacts[].hash, verificationStatus, and the
-# degraded[] array are all asserted live. What bd-1n0np.23.2 ADDS — manifest
-# coverage for every NEW durable/derived asset (anchors, sentinels, miss-ledger,
-# typed-fields, attestation, generation, write-stats) — is CAPABILITY-GUARDED:
-# where the manifest does not yet enumerate a new asset class, the step records a
-# visible `log_drop` (the no-silent-cap rule) carrying the exact assertion that
-# activates once the producer (bd-1n0np.16.2 / 4.3 / 8.2 ...) lands. No false pass.
+# degraded[] array are all asserted live. What bd-1n0np.23.2 ADDS, coverage for
+# every NEW durable asset, is asserted through recoveryInventory: every table
+# the binary's migrations create must carry a backup recovery policy.
 #
 # NOTE: no `set -e` — the harness assert_* helpers accumulate pass/fail and
 # `harness_summary` decides the exit code, so a single failing assert must not
@@ -204,20 +201,20 @@ else
     log_drop 1 "records-root sensitivity control unmeasured: no authentication.recordsRoot in the footer (source [$root_source], changed [$root_changed])"
 fi
 
-step "NEW-ASSET coverage: every new durable/derived asset is in the manifest (23.2)"
-# bd-1n0np.23.2's delta: the manifest must enumerate + hash each NEW asset class
-# its producer lands. Until a producer lands, its asset is absent from artifacts/
-# counts; assert-when-present, else log_drop the exact pending assertion.
-for asset in anchors sentinels miss_ledger typed_fields attestation generation write_stats; do
-    if printf '%s' "$cr" | jq -e --arg a "$asset" \
-        '(.data.counts // {}) | has($a) or has(($a | gsub("_";"")))' >/dev/null 2>&1; then
-        assert_jq "$cr" \
-            '[.data.artifacts[]? | select((.kind // "") | test("'"$asset"'"))] | length >= 1' \
-            "manifest enumerates + hashes the '$asset' asset"
-    else
-        log_drop 1 "manifest coverage for '$asset' pending (bd-1n0np.23.2 + its producer): when the producer lands, assert the manifest enumerates + blake3-hashes the '$asset' asset and a backup->restore round-trip reproduces it identically"
-    fi
-done
+step "NEW-ASSET coverage: every durable table carries a backup recovery policy (23.2)"
+# bd-1n0np.23.2 asks that each new asset class be covered. The coverage surface
+# is recoveryInventory, one entry per user table with a disposition. It is not
+# `.data.counts`, which only totals memory/link/tag/audit records: the old loop
+# probed counts for seven asset keys that nothing writes, so it skipped seven
+# times on every binary. A table added without a policy is "unclassified".
+# No policy is built with coverage "not_implemented", so schema coverage is
+# complete exactly when nothing is unclassified. The unit-level twin is
+# assert_recovery_policy_covers_migrated_tables in src/core/backup.rs; this is
+# the same claim against the shipped binary's own migrations.
+assert_jq "$cr" '.data.recoveryInventory.unclassifiedTableCount == 0' \
+    "no durable table lacks a backup recovery policy"
+assert_jq "$cr" '.data.recoveryInventory.schemaCoverageComplete == true' \
+    "backup recovery inventory reports complete schema coverage"
 
 end_temp_workspace
 harness_summary
