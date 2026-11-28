@@ -110,6 +110,43 @@
           "reasons": { "type": "array", "items": { "type": "string" } }
         }
       }
+    },
+    "gitOperationState": {
+      "type": "object",
+      "description": "In-progress git operations and autostash markers found in the workspace (inProgress, operations, autostashMarkers). Omitted when the workspace has none."
+    },
+    "memoryDrift": {
+      "type": "object",
+      "description": "Memory drift summary: how many memories are current, changed, missing their source, stale-anchored or unverifiable, with the most affected memory ids. Omitted when the source was not collected."
+    },
+    "workspaceHygiene": {
+      "type": "object",
+      "description": "Compact workspace-hygiene posture (bd-1eq3l.6). Omitted when the summary was not collected; a failed collection reports status unavailable instead."
+    },
+    "adaptive": {
+      "type": "object",
+      "description": "Adaptive scheduling and speculative CASS pre-fetch report (bd-16pwc.5). Present only with --include-adaptive."
+    },
+    "delta": {
+      "type": "object",
+      "description": "Redaction-safe delta capsule describing what changed since a prior brief or support-bundle snapshot (bd-1zb7k.17.2). Present only with --since <PATH>."
+    },
+    "duplicateWork": {
+      "type": "object",
+      "description": "Duplicate-work advisory joining pending verifications, file reservations and Beads claims (bd-1zb7k.17.4). Present with --fields full or --duplicate-work-input <PATH>."
+    },
+    "ownershipSnapshot": {
+      "type": "object",
+      "description": "Deterministic ownership snapshot (bd-nwzbb). Present with --fields full, --ownership-snapshot <PATH> or --compile-blocker-log <PATH>."
+    },
+    "dirtyFileOwnership": {
+      "type": "array",
+      "description": "Per-dirty-file ownership reports derived from ownershipSnapshot (bd-nwzbb). Omitted when empty.",
+      "items": { "type": "object" }
+    },
+    "compileBlockerAttribution": {
+      "type": "object",
+      "description": "Rust compile-blocker attribution report (ee.compile_blocker_attribution.v1, bd-nwzbb). Present only with --compile-blocker-log <PATH>."
     }
   },
   "field_presets": {
@@ -133,6 +170,12 @@
       "agentInventory",
       "toolchainProvenance",
       "recommendations",
+      "adaptive",
+      "delta",
+      "duplicateWork",
+      "ownershipSnapshot",
+      "dirtyFileOwnership",
+      "compileBlockerAttribution",
       "knowledgeGaps",
       "degraded"
     ],

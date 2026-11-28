@@ -388,6 +388,64 @@ fn claim_gate_summary_preset_uses_gate_safety_fields_bd_kua65_1() -> TestResult 
     Ok(())
 }
 
+/// The summary renderer inserts these keys when they are present, and an
+/// explicit `--fields summary` re-projects through the preset list, so the
+/// list must name every one of them (bd-ubvs0). memoryDrift and
+/// gitOperationState are standard-only and must still be dropped, which is
+/// also what proves the projection ran rather than passing the input through.
+#[test]
+fn swarm_brief_summary_preset_keeps_optional_summary_keys_bd_ubvs0() -> TestResult {
+    let response = json!({
+        "schema": "ee.response.v2",
+        "success": true,
+        "data": {
+            "schema": "ee.swarm.brief.v1",
+            "workspace": ".",
+            "redactionStatus": "paths_counts_subjects_only_no_content",
+            "recommendations": [],
+            "adaptive": {},
+            "delta": {},
+            "duplicateWork": {},
+            "ownershipSnapshot": {},
+            "dirtyFileOwnership": [{}],
+            "compileBlockerAttribution": {},
+            "knowledgeGaps": [{"queryHash": "h", "missCount": 3, "reasons": []}],
+            "memoryDrift": {},
+            "gitOperationState": {},
+            "degraded": []
+        }
+    })
+    .to_string();
+
+    let selected = apply_field_selector_to_json(&response, &FieldSelector::parse("summary"))
+        .map_err(|error| error.to_string())?;
+    let selected_json: Value =
+        serde_json::from_str(&selected).map_err(|error| error.to_string())?;
+    if selected_json.get("fields").and_then(Value::as_str) != Some("summary") {
+        return Err(format!(
+            "swarm brief summary was not projected: {selected_json}"
+        ));
+    }
+    assert_data_keys(
+        &selected_json,
+        &[
+            "schema",
+            "workspace",
+            "redactionStatus",
+            "recommendations",
+            "adaptive",
+            "delta",
+            "duplicateWork",
+            "ownershipSnapshot",
+            "dirtyFileOwnership",
+            "compileBlockerAttribution",
+            "knowledgeGaps",
+            "degraded",
+        ],
+        "swarm brief explicit summary",
+    )
+}
+
 #[test]
 fn status_and_swarm_brief_full_keys_are_preset_reachable() -> TestResult {
     for coverage in [
