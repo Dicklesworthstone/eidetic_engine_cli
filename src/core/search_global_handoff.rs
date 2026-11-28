@@ -117,10 +117,12 @@ pub(super) fn capture(
                 return None;
             }
             hasher.update(b"admitted");
-            // Earlier peers always used a lexical global lane for best-effort
-            // hybrid requests. Their body witness cannot certify vector ranks.
+            // Source rows and their watermark survive a same-generation index
+            // rebuild with a different producer. Even a lexical fallback can
+            // become hybrid before the client reuses it. Capture and validation
+            // share this refusal; the client then runs canonical retrieval.
             if !snapshot.memories.is_empty() && options.execution_source_mode().uses_embeddings() {
-                hasher.update(b"global_vector_selection_v2");
+                return None;
             }
             let connection = snapshot.source.connection();
             let workspace = crate::core::workspace::addressed_workspace_row(

@@ -1119,6 +1119,36 @@ fn explicit_semantic_search_admits_only_compatible_published_global_vectors() {
     assert_global_lexical(&search(&options), "global_live_snapshot_lexical");
     assert!(!global.paths.index_dir.join("meta.json").exists());
 
+    // A daemon that fell back to lexical can have current bodies even when
+    // its rankings will change as soon as the global vectors are published.
+    // Check the same eligibility predicate used by producer and consumer.
+    let policy = crate::config::workspace_memory_policy(&fixture.root).unwrap();
+    let reference_time = Utc::now();
+    let capture = |request: &SearchOptions| {
+        let snapshot = read_global_search_memories(
+            &global.paths,
+            request,
+            SearchMemoryFilters::default(),
+            reference_time,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!snapshot.memories.is_empty());
+        global_handoff::capture(request, &policy, Some((&global.paths, &snapshot)))
+    };
+    assert!(capture(&options).is_none());
+    let instant = SearchOptions {
+        speed: SpeedMode::Instant,
+        ..options.clone()
+    };
+    let lexical = SearchOptions {
+        source_mode: SearchSourceMode::LexicalOnly,
+        ..options.clone()
+    };
+    let lexical_witness = capture(&lexical).expect("lexical source witness");
+    assert_eq!(capture(&instant), Some(lexical_witness.clone()));
+    let source_generation = global.db.get_workspace_generation(&global.workspace).unwrap();
+
     let publish = |dimension| {
         let _guard = crate::core::index::install_test_workspace_embedder(
             &global.workspace,
@@ -1136,6 +1166,19 @@ fn explicit_semantic_search_admits_only_compatible_published_global_vectors() {
         publish(256).status,
         crate::core::index::IndexRebuildStatus::Success
     );
+    assert_eq!(
+        global.db.get_workspace_generation(&global.workspace).unwrap(),
+        source_generation,
+    );
+    assert_eq!(capture(&lexical), Some(lexical_witness.clone()));
+    assert!(global_handoff::validate(
+        &lexical_witness,
+        &options,
+        reference_time,
+        &fixture.db,
+        &[],
+    )
+    .is_none());
     for (mode, strict) in [
         (SearchSourceMode::SemanticOnly, true),
         (SearchSourceMode::Hybrid, true),
@@ -1143,6 +1186,7 @@ fn explicit_semantic_search_admits_only_compatible_published_global_vectors() {
     ] {
         options.source_mode = mode;
         options.strict_source_mode = strict;
+        assert!(capture(&options).is_none());
         let report = search(&options);
         assert_eq!(report.source_mode_applied, mode);
         assert!(!report.source_mode_fallback);
