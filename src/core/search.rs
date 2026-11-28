@@ -12095,7 +12095,9 @@ async fn run_search_inner_with_performance(
                 scoring_reference_time,
                 &mut trace,
                 GlobalSearchExecution {
-                    mode: if options.strict_source_mode || options.source_mode == SearchSourceMode::SemanticOnly {
+                    mode: if options.strict_source_mode
+                        || options.source_mode == SearchSourceMode::SemanticOnly
+                    {
                         source_mode.applied
                     } else {
                         SearchSourceMode::LexicalOnly
@@ -12108,7 +12110,9 @@ async fn run_search_inner_with_performance(
             )
             .await;
             search_checkpoint(cx)?;
-            let embed_backend = if empty_generation && global_hits.iter().any(|hit| hit.fast_score.is_some()) {
+            let embed_backend = if empty_generation
+                && global_hits.iter().any(|hit| hit.fast_score.is_some())
+            {
                 EmbedBackend::NeuralLocal
             } else {
                 embed_backend
@@ -15861,7 +15865,9 @@ async fn global_store_frankensearch_hits(
     if let Some(pack_witness) = pack_witness.filter(|_| {
         memory_filters.is_empty()
             && (!execution.mode.uses_embeddings()
-                || admitted.as_ref().is_none_or(|(_, snapshot)| snapshot.memories.is_empty()))
+                || admitted
+                    .as_ref()
+                    .is_none_or(|(_, snapshot)| snapshot.memories.is_empty()))
     }) {
         *pack_witness = global_handoff::capture(
             options,
@@ -16010,7 +16016,10 @@ async fn global_store_snapshot_frankensearch_hits(
     #[cfg(unix)]
     let selected_index = if let Some(model) = producer {
         match generation_lease.index_for_snapshot_with_embedder(
-            cx, &paths.index_dir, source_generation, model.as_ref(),
+            cx,
+            &paths.index_dir,
+            source_generation,
+            model.as_ref(),
         ) {
             Ok(selected) => Ok(selected),
             Err(error) => {
@@ -16021,7 +16030,12 @@ async fn global_store_snapshot_frankensearch_hits(
             }
         }
     } else {
-        generation_lease.index_for_snapshot_with_identity(cx, &paths.index_dir, source_generation, None)
+        generation_lease.index_for_snapshot_with_identity(
+            cx,
+            &paths.index_dir,
+            source_generation,
+            None,
+        )
     };
     #[cfg(unix)]
     let index_dir = match selected_index {
@@ -16072,9 +16086,9 @@ async fn global_store_snapshot_frankensearch_hits(
     // view is incapable of certifying the bodies, sidecars and feedback that
     // were admitted above. The guard owns this snapshot through collection.
     let status_options = IndexStatusOptions {
-            workspace_path: paths.root.clone(),
-            database_path: Some(paths.database_path.clone()),
-            index_dir: Some(index_dir.clone()),
+        workspace_path: paths.root.clone(),
+        database_path: Some(paths.database_path.clone()),
+        index_dir: Some(index_dir.clone()),
     };
     let status = match producer {
         Some(model) => crate::core::index::get_index_status_with_embedder(

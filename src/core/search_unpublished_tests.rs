@@ -1264,9 +1264,9 @@ fn global_snapshot_overtaken_by_first_publication_keeps_fallback_policy_and_inte
     let before = index_file_hashes(&paths.root);
     for (label, options, captured) in captures {
         let result = retrieve_captured_global_search(&paths, &options, captured);
-        // The separate global lane is lexical for both native retrieval and
-        // source fallback, including a strict semantic workspace request.
-        if matches!(label, "current" | "new terms" | "strict semantic") {
+        // Only current lexical reads can recover the overtaken source from
+        // its pinned bodies. Strict vector reads require the matching index.
+        if matches!(label, "current" | "new terms") {
             assert!(
                 result
                     .degraded
@@ -1377,6 +1377,7 @@ fn retrieve_captured_global_search(
         let mut degraded = Vec::new();
         let mut memories = BTreeMap::new();
         let mut feedback = None;
+        let producer: Arc<dyn Embedder> = Arc::new(FirstPublicationEmbedder::new(false));
         let hits = global_store_snapshot_frankensearch_hits(
             &cx,
             options,
@@ -1388,8 +1389,8 @@ fn retrieve_captured_global_search(
             &mut feedback,
             &mut SearchPerformanceTrace::default(),
             GlobalSearchExecution {
-                mode: SearchSourceMode::LexicalOnly,
-                producer: None,
+                mode: options.execution_source_mode(),
+                producer: Some(&producer),
                 fusion_weights: SearchFusionWeights::default(),
             },
             false,
