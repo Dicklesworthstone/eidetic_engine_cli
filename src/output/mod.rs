@@ -14783,7 +14783,7 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
             },
             CommandArg {
                 name: "--sentinel",
-                description: "Attach a deterministic sentinel predicate (`KIND:TARGET`). Supported kinds: path_exists, file_hash_or_marker, json_schema_contains_field, config_key_exists, env_var_registered, degraded_code_fixture_exists, dependency_capability_present, command_help_contains_flag. Unknown kinds are rejected; run `ee sentinel explain` for target syntax.",
+                description: "Attach a deterministic sentinel predicate (`KIND:TARGET`). Supported kinds: path_exists, file_hash_or_marker, json_schema_contains_field, config_key_exists, env_var_registered, degraded_code_fixture_exists, dependency_capability_present, command_help_contains_flag, json_value_compare. Unknown kinds are rejected; run `ee sentinel explain` for target syntax.",
                 required: false,
                 default: None,
             },

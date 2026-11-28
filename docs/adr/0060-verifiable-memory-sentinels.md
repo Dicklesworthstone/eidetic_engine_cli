@@ -27,9 +27,26 @@ referents): a sentinel is a **user-declared predicate** over any memory.
   never alias.
 - Conservative kinds (pure/read-only first): `path_exists`, `file_hash_or_marker`,
   `json_schema_contains_field`, `config_key_exists`, `env_var_registered`,
-  `degraded_code_fixture_exists`, `dependency_capability_present`, and
-  `command_help_contains_flag` (**allowlisted local commands only**, run **only**
-  on an explicit `ee sentinel check`).
+  `degraded_code_fixture_exists`, `dependency_capability_present`,
+  `json_value_compare`, and `command_help_contains_flag` (**allowlisted local
+  commands only**, run **only** on an explicit `ee sentinel check`).
+- `json_value_compare` (GH #90) compares one scalar of a workspace JSON file
+  with a literal: `<rel_path>#<dotted.field><op><json_scalar>`, where `op` is
+  `==`, `!=`, `<=`, `>=`, `<` or `>` (the two-character operators are matched
+  first) and the scalar is JSON (`14`, `4.5`, `"done"`, `true`, `null`). Two
+  integers compare exactly as `i128`, so `u64` and `i64` values mix; a float on
+  either side compares as `f64`; strings, booleans and null support only `==`
+  and `!=`. A malformed target, an ordered operator on a non-number, or an
+  operator-and-value part over the 512-byte predicate cap is refused at
+  registration. The check reuses the 1 MiB / 250 ms per-check budget and the
+  dotted lookup of `json_schema_contains_field`. A comparison that does not
+  hold is `fail`, and so is a missing file, as for `json_schema_contains_field`;
+  an unreadable, oversize, non-UTF-8 or unparseable file, a budget overrun, a
+  missing key, a non-scalar value, or a type mismatch is `unknown`, never
+  `fail`. Unlike the substring form of `file_hash_or_marker`, it does not
+  match number prefixes: `==482` does not hold for `4820`. Storing the kind
+  needed `V134_MEMORY_SENTINEL_JSON_VALUE_COMPARE`, which rebuilds both sentinel
+  tables to widen the `sentinel_kind` check.
 - Surfaces: `ee remember --sentinel <kind>:<target>`, `ee remember --revive-when
   <kind>:<target>`, `ee sentinel check`, `ee tripwire check --revivals`, `ee why
   --include-sentinel`, `ee pack --require-fresh-sentinels`. Sentinel state

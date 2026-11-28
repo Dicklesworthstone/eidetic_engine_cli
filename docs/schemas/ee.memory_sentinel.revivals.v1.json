@@ -220,7 +220,8 @@
             "env_var_registered",
             "degraded_code_fixture_exists",
             "dependency_capability_present",
-            "command_help_contains_flag"
+            "command_help_contains_flag",
+            "json_value_compare"
           ]
         },
         "polarity": {

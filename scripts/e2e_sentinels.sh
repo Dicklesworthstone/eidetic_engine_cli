@@ -136,7 +136,7 @@ mem="$(ee_json remember \
     "The demo.v1 schema defines the memoryId field." \
     --workspace "$WS" --level procedural --kind fact \
     `# The selector is a DOTTED PATH FROM THE ROOT, not a field name to search` \
-    `# for. json_has_dotted_field (src/core/sentinel.rs:347) walks each segment` \
+    `# for. json_has_dotted_field (src/core/sentinel.rs:388) walks each segment` \
     `# with .get(), and its own unit test pins that: "schema.json#a.b" against` \
     `# {"a":{"b":1}} is Satisfied. The fixture seeded at line 47 declares the` \
     `# field under "properties", so "#memoryId" asked for a ROOT key that never` \

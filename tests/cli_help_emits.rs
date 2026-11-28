@@ -9,6 +9,7 @@ const SENTINEL_KINDS: &[&str] = &[
     "degraded_code_fixture_exists",
     "dependency_capability_present",
     "command_help_contains_flag",
+    "json_value_compare",
 ];
 
 const TYPED_FIELD_FILTER_TOKENS: &[&str] = &["NAME=VALUE", "NAME~VALUE", "NAME^VALUE"];
