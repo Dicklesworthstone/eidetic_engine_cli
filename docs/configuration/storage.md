@@ -16,8 +16,11 @@ acquire_timeout_ms = 5000
 pin_snapshot = true
 ```
 
-`database_path` is the FrankenSQLite source of truth. `index_dir` contains
-derived search assets that can be rebuilt from storage.
+`database_path`, `index_dir` and `jsonl_export` are parsed but not yet read.
+Workspace commands open `<workspace>/.ee/ee.db` (or `--database`) as the
+FrankenSQLite source of truth and keep derived search assets, which can be
+rebuilt from storage, under `.ee/index`. Nothing writes a JSONL export on its
+own; run `ee export` for one.
 
 `[storage.read_pool]` controls read-side connection reuse for read-heavy
 surfaces. The default `size = 1` preserves the single-connection behavior until
