@@ -57,6 +57,11 @@
       "surface": "swarm_brief",
       "command": "swarm brief",
       "schema_file": "swarm/ee.swarm.brief.v1.json"
+    },
+    {
+      "surface": "orient",
+      "command": "orient",
+      "schema_file": "ee.orient.v1.json"
     }
   ]
 }
