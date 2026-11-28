@@ -11555,10 +11555,40 @@ pub enum OutcomeCommand {
     /// Read-only report joining one memory's feedback events with the
     /// bayes posterior updates and trust transitions they triggered.
     Trace(OutcomeTraceArgs),
+    /// Compare historical confidence with observed outcomes in an explicit time window.
+    Calibration(OutcomeCalibrationArgs),
     /// Preview promotion candidates from authoritative verification tied directly to packs.
     /// Defaults to dry-run; --apply saves pending candidates for review and
     /// does not promote memories. Only eligible episodic native memories qualify.
     Harvest(OutcomeHarvestArgs),
+}
+
+/// Arguments for the read-only historical calibration report.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct OutcomeCalibrationArgs {
+    /// Inclusive start of the observation window, as RFC3339 with an explicit offset.
+    #[arg(long, value_name = "RFC3339")]
+    pub since: String,
+
+    /// Exclusive end of the observation window, as RFC3339 with an explicit offset.
+    #[arg(long, value_name = "RFC3339")]
+    pub until: String,
+
+    /// Number of confidence buckets (1..=100).
+    #[arg(long, default_value_t = crate::core::outcome::DEFAULT_CALIBRATION_BUCKET_COUNT)]
+    pub buckets: u32,
+
+    /// Maximum candidate events scanned, including neighboring dates (1..=100000).
+    #[arg(long, default_value_t = crate::core::outcome::DEFAULT_OUTCOME_CALIBRATION_EVENT_LIMIT)]
+    pub event_limit: u32,
+
+    /// Report per-class hit rates, Wilson intervals, and abstention for sparse classes.
+    #[arg(long)]
+    pub honesty: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee outcome harvest`.
@@ -53736,6 +53766,9 @@ where
             OutcomeCommand::Trace(trace_args) => {
                 handle_outcome_trace(cli, trace_args, stdout, stderr)
             }
+            OutcomeCommand::Calibration(calibration) => {
+                handle_outcome_calibration(cli, args, calibration, stdout, stderr)
+            }
             OutcomeCommand::Harvest(harvest_args) => {
                 handle_outcome_harvest(cli, args, harvest_args, stdout, stderr)
             }
@@ -53896,6 +53929,62 @@ where
     }
 }
 
+fn outcome_has_record_flags(parent: &OutcomeArgs) -> bool {
+    parent.target_id.is_some()
+        || parent.batch
+        || parent.stdin
+        || parent.pack.is_some()
+        || parent.item.is_some()
+        || parent.signal.is_some()
+        || parent.weight.is_some()
+        || parent.workspace_id.is_some()
+        || parent.source_id.is_some()
+        || parent.reason.is_some()
+        || parent.evidence_json.is_some()
+        || parent.session_id.is_some()
+        || parent.event_id.is_some()
+        || parent.target_type != "memory"
+        || parent.source_type != "outcome_observed"
+        || parent.harmful_per_source_per_hour.is_some()
+        || parent.harmful_burst_window_seconds.is_some()
+}
+
+fn handle_outcome_calibration<W: Write, E: Write>(
+    cli: &Cli,
+    parent: &OutcomeArgs,
+    args: &OutcomeCalibrationArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode {
+    if outcome_has_record_flags(parent) || parent.actor.is_some() {
+        return write_domain_error(
+            &DomainError::Usage {
+                message: "calibration cannot be combined with single-target or batch outcome flags"
+                    .to_owned(),
+                repair: Some("ee outcome calibration --help".to_owned()),
+            },
+            cli.renderer(),
+            stdout,
+            stderr,
+        );
+    }
+    let options = crate::core::outcome::OutcomeCalibrationOptions {
+        workspace_path: cli.resolve_workspace(),
+        database_path: args.database.clone().or_else(|| parent.database.clone()),
+        since: args.since.clone(),
+        until: args.until.clone(),
+        bucket_count: args.buckets,
+        event_limit: args.event_limit,
+        honesty: args.honesty,
+    };
+    match crate::core::outcome::run_outcome_calibration(&options) {
+        Ok(report) => {
+            write_remember_data_payload(cli, &report.data_json(), &report.human_summary(), stdout)
+        }
+        Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
+    }
+}
+
 fn handle_outcome_harvest<W, E>(
     cli: &Cli,
     parent: &OutcomeArgs,
@@ -53921,24 +54010,7 @@ where
             stderr,
         );
     }
-    if parent.target_id.is_some()
-        || parent.batch
-        || parent.stdin
-        || parent.pack.is_some()
-        || parent.item.is_some()
-        || parent.signal.is_some()
-        || parent.weight.is_some()
-        || parent.workspace_id.is_some()
-        || parent.source_id.is_some()
-        || parent.reason.is_some()
-        || parent.evidence_json.is_some()
-        || parent.session_id.is_some()
-        || parent.event_id.is_some()
-        || parent.target_type != "memory"
-        || parent.source_type != "outcome_observed"
-        || parent.harmful_per_source_per_hour.is_some()
-        || parent.harmful_burst_window_seconds.is_some()
-    {
+    if outcome_has_record_flags(parent) {
         return write_domain_error(
             &usage("harvest cannot be combined with single-target or batch outcome flags"),
             cli.renderer(),
@@ -73531,6 +73603,7 @@ impl NormalizedInvocation {
                     ModelCommand::Fetch(_) => "model fetch".to_string(),
                 },
                 Command::Outcome(args) => match &args.command {
+                    Some(OutcomeCommand::Calibration(_)) => "outcome calibration".to_string(),
                     Some(OutcomeCommand::Harvest(harvest)) if harvest.apply => {
                         "outcome harvest --apply".to_string()
                     }

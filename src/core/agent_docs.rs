@@ -1178,6 +1178,12 @@ pub const JOURNAL_CAPTURE_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     },
 ];
 
+const OUTCOME_CALIBRATION_RECIPE_FAILURES: &[FailureBranchEntry] = &[FailureBranchEntry {
+    condition: "the window contains no feedback with a historical prediction",
+    jq: r#".data | select(.sampleCount == 0) | {eventsInWindow, exclusions}"#,
+    next_action: "Inspect exclusions and retry with an explicit window containing applied feedback.",
+}];
+
 const OUTCOME_HARVEST_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     FailureBranchEntry {
         condition: "the bounded scan has no eligible corroborated promotion candidates",
@@ -1371,6 +1377,16 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         jq: r#"{status: .data.status, targetId: .data.targetId, targetType: .data.targetType, feedback: .data.feedback, degraded: (.data.degraded // .degraded // [])}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: JOURNAL_CAPTURE_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "calibrate-outcome-confidence",
+        title: "Compare historical confidence with later feedback",
+        description: "Inspect reliability buckets and Brier scores for admitted memory and rule feedback. Add --honesty for per-class intervals and sparse-class abstention.",
+        category: "feedback",
+        command: "ee outcome calibration --since <RFC3339-start> --until <RFC3339-end> --workspace . --json",
+        jq: r#".data | {sampleCount, brierScore, classes, exclusions, tableHash}"#,
+        success_check: r#".data.schema == "ee.outcome.calibration.v1" and .data.readOnly == true"#,
+        failure_branches: OUTCOME_CALIBRATION_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
         id: "harvest-pack-outcomes",

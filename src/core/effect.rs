@@ -1794,6 +1794,10 @@ impl EffectManifest {
             CommandEffect::read_only_db("model list", "List model registry entries"),
             CommandEffect::read_only_db("model status", "Inspect model registry status"),
             CommandEffect::read_only_db(
+                "outcome calibration",
+                "Compare historical predictions with accepted feedback",
+            ),
+            CommandEffect::read_only_db(
                 "outcome harvest",
                 "Preview bounded promotion candidates from verification tied directly to packs without writing storage",
             ),
