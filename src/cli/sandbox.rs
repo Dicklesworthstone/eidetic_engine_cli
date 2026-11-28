@@ -140,8 +140,45 @@ pub struct ProposeOutcome {
     pub notes: Vec<String>,
 }
 
-fn load_session(workspace: &Path, name: &str) -> SandboxSession {
-    SandboxSession::load(&SandboxSession::session_path(workspace, name))
+fn load_session(workspace: &Path, name: &str) -> Result<SandboxSession, DomainError> {
+    SandboxSession::try_load(&SandboxSession::session_path(workspace, name)).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Cannot read sandbox session `{name}`: {error}"),
+            repair: Some(format!("Inspect .ee/sandbox/{name}.json before retrying.")),
+        }
+    })
+}
+
+/// Hold a stable sidecar inode across load, mutation and atomic replacement.
+/// Applying proposals takes the same lock through the durable writes and the
+/// final checkpoint. Readers only need the atomically published JSON.
+fn lock_session(workspace: &Path, name: &str) -> Result<std::fs::File, DomainError> {
+    let directory = workspace.join(".ee").join("sandbox");
+    let acquire = || -> std::io::Result<std::fs::File> {
+        std::fs::create_dir_all(&directory)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(
+                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+            );
+        }
+        let file = options.open(directory.join(format!("{name}.lock")))?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "sandbox writer lock must be a regular file",
+            ));
+        }
+        file.lock()?;
+        Ok(file)
+    };
+    acquire().map_err(|error| DomainError::Storage {
+        message: format!("Cannot lock sandbox session `{name}`: {error}"),
+        repair: Some("Check that <workspace>/.ee/sandbox is writable.".to_owned()),
+    })
 }
 
 fn save_session(workspace: &Path, name: &str, session: &SandboxSession) -> Result<(), DomainError> {
@@ -159,7 +196,8 @@ pub fn propose_remember(
     args: &SandboxRememberArgs,
 ) -> Result<ProposeOutcome, DomainError> {
     let name = session_name(&args.session)?;
-    let mut session = load_session(workspace, &name);
+    let _writer = lock_session(workspace, &name)?;
+    let mut session = load_session(workspace, &name)?;
     session.proposals.push(SandboxProposal::Remember {
         memory_id: synthetic_memory_id(&args.content),
         content: args.content.clone(),
@@ -189,8 +227,9 @@ pub fn propose_import(
     args: &SandboxImportArgs,
 ) -> Result<ProposeOutcome, DomainError> {
     let name = session_name(&args.session)?;
+    let _writer = lock_session(workspace, &name)?;
     let screen = screen_session_import(workspace, &name, &args.content)?;
-    let mut session = load_session(workspace, &name);
+    let mut session = load_session(workspace, &name)?;
     session.proposals.push(SandboxProposal::Import {
         memory_id: synthetic_memory_id(&screen.content),
         content_hash: content_hash(&screen.content),
@@ -292,7 +331,8 @@ pub fn propose_curate(
         });
     }
     let name = session_name(&args.session)?;
-    let mut session = load_session(workspace, &name);
+    let _writer = lock_session(workspace, &name)?;
+    let mut session = load_session(workspace, &name)?;
     let mut added_retire_proposals = 0_usize;
     for memory_id in &args.retire {
         let trimmed = memory_id.trim();
@@ -324,7 +364,7 @@ pub fn build_diff(
     args: &SandboxDiffArgs,
 ) -> Result<(String, SandboxDiffSurface), DomainError> {
     let name = session_name(&args.session)?;
-    let session = load_session(workspace, &name);
+    let session = load_session(workspace, &name)?;
     let baseline = baseline_memories(workspace)?;
     Ok((name, assemble_sandbox_diff(&baseline, &session)))
 }
@@ -336,7 +376,7 @@ fn baseline_memories(workspace: &Path) -> Result<Vec<(String, String)>, DomainEr
         return Ok(Vec::new());
     }
     let connection =
-        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+        DbConnection::open_file_read_only(&database_path).map_err(|error| DomainError::Storage {
             message: format!("Failed to open workspace database: {error}"),
             repair: Some("ee doctor --workspace . --json".to_owned()),
         })?;
@@ -380,7 +420,8 @@ pub fn apply_session(
     args: &SandboxApplyArgs,
 ) -> Result<ApplyOutcome, DomainError> {
     let name = session_name(&args.session)?;
-    let mut session = load_session(workspace, &name);
+    let _writer = lock_session(workspace, &name)?;
+    let mut session = load_session(workspace, &name)?;
     if preflight_session_imports(workspace, &name, &mut session)? {
         // Replace legacy raw secrets in scratch before the authoritative write.
         // A denied preflight leaves the original session available for review.
@@ -667,6 +708,53 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_proposals_preserve_every_writer_in_the_same_session() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for ordinal in 0..8 {
+                let workspace = workspace.path();
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    propose_curate(workspace, &SandboxCurateArgs {
+                        retire: vec![format!("mem_{ordinal}")],
+                        session: None,
+                    }).expect("append proposal");
+                });
+            }
+        });
+        let stored = load_session(workspace.path(), "default").expect("complete session");
+        let mut ids = Vec::new();
+        for proposal in stored.proposals {
+            let SandboxProposal::Retire { memory_id } = proposal else {
+                panic!("unexpected proposal");
+            };
+            ids.push(memory_id);
+        }
+        ids.sort();
+        assert_eq!(ids, (0..8).map(|n| format!("mem_{n}")).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn unreadable_session_is_preserved_by_proposal_and_apply() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let path = SandboxSession::session_path(workspace.path(), "default");
+        std::fs::create_dir_all(path.parent().expect("session directory")).expect("mkdir");
+        let damaged = b"{\"proposals\":[";
+        std::fs::write(&path, damaged).expect("damaged fixture");
+        let result = propose_curate(workspace.path(), &SandboxCurateArgs {
+            retire: vec!["mem_a".to_owned()],
+            session: None,
+        });
+        assert!(matches!(result, Err(DomainError::Storage { .. })));
+        let result = apply_session(workspace.path(), &SandboxApplyArgs { session: None });
+        assert!(matches!(result, Err(DomainError::Storage { .. })));
+        assert_eq!(std::fs::read(path).expect("original session").as_slice(), damaged);
+        assert!(!workspace.path().join(".ee/ee.db").exists());
+    }
+
+    #[test]
     fn sandbox_import_admits_benign_evidence_and_command_warnings_without_db_mutation() {
         let workspace = tempfile::tempdir().expect("tempdir");
         for content in [
@@ -838,7 +926,7 @@ mod tests {
         )
         .expect("manual proposal");
         let secret = format!("ghp_{}", "Q".repeat(36));
-        let mut legacy_session = load_session(workspace.path(), "default");
+        let mut legacy_session = load_session(workspace.path(), "default").expect("valid sandbox session");
         legacy_session.proposals.push(SandboxProposal::Import {
             memory_id: "sandbox_mem_legacy".to_owned(),
             content: format!("Build succeeded; fixture credential label-{secret}."),
@@ -899,7 +987,7 @@ mod tests {
             "sandbox_import_ingestion_security"
         );
         assert_eq!(details["ingestionSecurity"]["redacted"], true);
-        let session = load_session(workspace.path(), "default");
+        let session = load_session(workspace.path(), "default").expect("valid sandbox session");
         assert!(session.proposals.is_empty());
         assert!(!render_apply_json(&outcome).contains(&secret));
     }
@@ -1001,7 +1089,7 @@ mod tests {
             ]
         );
 
-        let stored = load_session(workspace.path(), "trim-retire");
+        let stored = load_session(workspace.path(), "trim-retire").expect("valid sandbox session");
         assert_eq!(stored.proposals, outcome.session.proposals);
     }
 

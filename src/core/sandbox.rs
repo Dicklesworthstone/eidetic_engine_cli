@@ -250,15 +250,39 @@ impl SandboxSession {
             .unwrap_or_default()
     }
 
-    /// Persist the session to its scratch file (creating `.ee/sandbox/`).
-    ///
-    /// This writes only the non-durable overlay scratch, never a memory row.
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+    /// Load the session for an operation that needs the complete proposal set.
+    /// Only an absent file represents a new session.
+    pub fn try_load(path: &Path) -> std::io::Result<Self> {
+        match std::fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => return Err(error),
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "sandbox session must be a regular file",
+                ));
+            }
+            Ok(_) => {}
         }
-        let body = serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_owned());
-        std::fs::write(path, body)
+        let body = std::fs::read(path)?;
+        serde_json::from_slice(&body)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    }
+
+    /// Publish a complete session atomically. Readers can keep reading the
+    /// previous version until the replacement is ready.
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let parent = path.parent().filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+        serde_json::to_writer_pretty(staged.as_file_mut(), self)
+            .map_err(std::io::Error::other)?;
+        staged.as_file().sync_all()?;
+        staged.persist(path).map_err(|error| error.error)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
     }
 
     /// Build the [`SandboxOverlay`] this session's proposals describe.
