@@ -5834,7 +5834,8 @@ fn collect_outcome_calibration(
                 options.event_limit
             ),
             repair: Some(
-                "Narrow --since/--until or raise --event-limit (maximum 100000).".to_owned(),
+                "Narrow the since/until window or raise the event limit (maximum 100000)."
+                    .to_owned(),
             ),
         });
     }
@@ -5892,7 +5893,7 @@ fn collect_outcome_calibration(
             if audits.len() > remaining as usize {
                 return Err(DomainError::Usage {
                     message: format!("Outcome calibration historical-audit scan exceeds its {audit_limit}-row budget (four times event-limit); no partial report was returned."),
-                    repair: Some("Raise --event-limit (maximum 100000), or narrow the window to include fewer distinct targets. A target's lifetime prediction history is scanned regardless of the window.".to_owned()),
+                    repair: Some("Raise the event limit (maximum 100000), or narrow the window to include fewer distinct targets. A target's lifetime prediction history is scanned regardless of the window.".to_owned()),
                 });
             }
             scanned_audit_rows += audits.len() as u32;
@@ -5996,7 +5997,7 @@ fn collect_outcome_calibration(
                     "Outcome calibration exceeds its {MAX_OUTCOME_CALIBRATION_CLASSES}-class report budget; no partial report was returned."
                 ),
                 repair: Some(
-                    "Narrow --since/--until to include fewer distinct recorded situation classes."
+                    "Narrow the since/until window to include fewer distinct recorded situation classes."
                         .to_owned(),
                 ),
             });
