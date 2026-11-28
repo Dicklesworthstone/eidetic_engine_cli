@@ -20,7 +20,8 @@
 | Profile | Recommendation | Why |
 | --- | --- | --- |
 | Single-developer laptop | **OFF** | One agent, no fan-out, no swarm workload to analyse. The disk + CPU cost is not amortised. |
-| Daemon / `ee serve` mode | **OFF by default; ON via `EE_FLIGHT_RECORDER=1`** | Stable daemon process is the right substrate for the recorder's append-only log. |
+| `ee mcp serve-stdio` | **ON via `EE_FLIGHT_RECORDER=1`** in the server's environment | Each MCP tool call runs through the CLI path, so each is recorded. |
+| `ee serve` / `ee daemon` | Not covered | Their requests call handlers directly, so none is recorded. The server process records one row when it exits. |
 | 64-agent swarm host | **ON** | The whole point — workload analysis, prompt-budget diet, 64-agent playback all need the trace. |
 
 The default is off so a stock developer install does not write
@@ -122,10 +123,10 @@ The recorder reads only these environment variables; there are no
 `obs.flight_recorder.*` config keys. The 256 MiB quota and the `strict`
 redaction level are fixed.
 
-`ee status --json` and `ee doctor --json` surface recorder posture
-(enabled / retention / quota / redaction level / current log
-bytes) so an agent can confirm the recorder is running without
-inspecting the workspace directly.
+`ee status --json` and `ee doctor --json` report the recorder's posture
+(enabled, writing, directory, retention, quota and redaction level), so
+an agent can confirm the recorder can write without inspecting the
+workspace. They do not report the log's current size.
 
 ## How to read traces
 
@@ -144,30 +145,27 @@ There is no tail command; read the JSONL file directly. Automatic capture,
 
 ## Failure modes
 
-| Condition | Degraded code | Recovery |
+| Condition | What happens | Recovery |
 | --- | --- | --- |
-| Trace directory not writable (read-only mount, permission denied). | `flight_recorder_dir_unwritable` | Set `EE_FLIGHT_RECORDER_DIR` to a writable path, or disable the recorder. |
-| Quota exceeded (current bytes >= `[obs.flight_recorder] max_bytes`). | `flight_recorder_quota_exceeded` | Raise `max_bytes`, lower `retention_days`, or run `ee obs flight-recorder prune`. |
-| Recorder disabled at startup but env override set at runtime. | `flight_recorder_env_override_ignored` | Restart the daemon to pick up the env override, or use `ee config set`. |
+| Trace directory not writable (read-only mount, permission denied). | `ee status` and `ee doctor` report the recorder as not writing, with degraded code `flight_recorder_directory_unwritable`. No rows are appended. | Set `EE_FLIGHT_RECORDER_DIR` to a writable path, or disable the recorder. |
+| Trace directory under the workspace's `.git/`. | Not writing, with `flight_recorder_directory_inside_git`. No rows are appended. | Point `EE_FLIGHT_RECORDER_DIR` outside `.git/`. |
+| `EE_FLIGHT_RECORDER_RETENTION_DAYS` outside 1 to 30. | Not writing, with `flight_recorder_retention_out_of_range`. No rows are appended. | Set it to a value from 1 to 30, or unset it. |
+| An append would pass the quota: a fixed 256 MiB for automatic capture, `--max-bytes` for `ee recorder flight append`. | Automatic capture drops the row. `ee recorder flight append` fails with a storage error. | Move `agent-workload-trace.jsonl` aside, since nothing rotates or prunes it, or point `EE_FLIGHT_RECORDER_DIR` at a fresh directory. |
 
-All three are advisory; the recorder never blocks the foreground
-command path. A failure to append a trace row is logged via the
-existing `tracing` surface and surfaces in `ee status`, but the
-underlying `ee pack` / `ee search` / `ee why` call returns its
-normal response unchanged.
+Recording never blocks or changes a command. A failed automatic append
+is dropped, and the command's output and exit code are what they would
+have been with the recorder off. `ee status` reports whether the
+recorder can write, not individual append failures.
 
 ## Privacy and retention
 
-- The recorder log lives only on the local host. It is never
-  exported through `ee mesh`, `ee export`, or `ee backup` by default.
-  The `--include-flight-recorder` flag must be passed explicitly,
-  and the support-bundle redaction layer scrubs every raw-value
-  candidate (which the schema guarantees is absent anyway).
-- Retention is enforced by a daemon prune pass. The default 7-day
-  window matches the support-bundle retention.
-- Each row's `retainedUntil` is `recordedAt + retentionDays`. After
-  that timestamp the row is eligible for pruning; nothing in `ee`
-  reads past-retention rows from disk.
+- The recorder log lives only on the local host. No `ee` export path
+  reads `obs/flight_recorder/`: `ee mesh`, `ee export`, `ee backup` and
+  `ee support bundle` all leave it out. Rows carry shape only, never
+  raw values.
+- Nothing prunes the log. `EE_FLIGHT_RECORDER_RETENTION_DAYS` (1 to 30,
+  default 7) is validated and reported by `ee status` and `ee doctor`,
+  but rows stay in the file until you move or delete it.
 
 ## When to disable
 
@@ -178,8 +176,10 @@ normal response unchanged.
   agents and cannot guarantee they trust the redaction contract.
 - A short-lived CLI workflow that never replays traces.
 
-Set `EE_FLIGHT_RECORDER=0` and restart the daemon. Existing trace
-rows are retained until their `retainedUntil` timestamp.
+Unset `EE_FLIGHT_RECORDER` or set it to `0`. It is read on every
+invocation, so the next command stops recording. A running
+`ee mcp serve-stdio` keeps the environment it started with, so restart
+it too. Existing rows stay in the trace file until you move or delete it.
 
 ## Distinguishability from neighboring features
 
