@@ -177,7 +177,7 @@
       "redactionStatus": "passed",
       "rawSecretsIncluded": false,
       "promptInjectionQuarantined": false,
-      "degradedCodes": ["index_stale", "graph_projection_unavailable"],
+      "degradedCodes": ["index_stale", "graph_snapshot_stale"],
       "mutationPosture": "dry-run",
       "expectedPreconditionStatus": "partial_fail",
       "expectedMutationRiskLevel": "unknown",

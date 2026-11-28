@@ -67,37 +67,40 @@ The skill accepts JSON output from these `ee rehearse` subcommands:
 }
 ```
 
-### From `ee.response.v2` (degraded)
+### Degraded rehearsal output
+
+Rehearse reports carry their own `degradation_codes` array. A run whose
+sandbox had no `ee` binary to execute plans the commands without running them:
 
 ```json
 {
-  "schema": "ee.response.v2",
-  "command": "rehearse",
-  "status": "degraded",
-  "degraded": [
-    {
-      "code": "rehearsal_unavailable",
-      "message": "Rehearsal commands not yet wired.",
-      "severity": "high",
-      "repair": "ee doctor --json"
-    }
-  ]
+  "schema": "ee.rehearse.run.v1",
+  "degradation_codes": ["executor_unavailable"]
 }
 ```
 
 ## Degradation Codes
 
-| Code | Meaning | Skill Behavior |
-|------|---------|----------------|
-| `rehearsal_unavailable` | ee rehearse not wired | Refuse with unavailable template |
-| `rehearsal_parse_error` | Malformed artifact JSON | Refuse with diagnosis |
-| `index_stale` | Search index out of sync | Needs-escalation |
-| `graph_projection_unavailable` | Graph metrics unavailable | Partial review |
-| `redaction_failed` | Sensitive data not redacted | Refuse |
+Every row whose source names an `ee` surface is a code that surface emits.
+`rehearsal_unavailable` and `rehearsal_parse_error` are this skill's own
+labels for states it detects itself; no `ee` command emits them.
+
+| Code | Source | Meaning | Skill Behavior |
+|------|--------|---------|----------------|
+| `unsupported_rehearsal_command` | `ee rehearse plan` | Plan has `can_proceed: false` | Refuse with diagnosis |
+| `external_io` | `ee rehearse run` | A command needs external I/O or is not rehearsable | No-go for that command; its real `--dry-run` is the fallback |
+| `workspace_escape` | `ee rehearse run` | Arguments point workspace, database, index or output outside the sandbox | Refuse |
+| `executor_unavailable` | `ee rehearse run` | No `ee` binary in the sandbox; commands were planned, not run | Refuse with unavailable template |
+| `index_stale` | `ee index status` | Search index generation is behind the database | Needs-escalation |
+| `graph_snapshot_stale` | graph export, feature enrichment | Graph-derived output may lag memory links | Needs-escalation |
+| `rehearsal_unavailable` | this skill | Installed `ee` has no `rehearse` command | Refuse with unavailable template |
+| `rehearsal_parse_error` | this skill | Malformed artifact JSON | Refuse with diagnosis |
 
 ## Redaction Status
 
-The skill checks `redaction_status` in inspect output:
+`ee rehearse run` writes `redaction_status`: `redacted` under
+`--profile privacy`, otherwise `none`. `ee rehearse inspect` repeats it as
+`redaction_summary.policy`. The skill classifies each artifact from that:
 
 - `passed`: All sensitive content redacted; safe to review
 - `failed`: Redaction incomplete; refuse to review

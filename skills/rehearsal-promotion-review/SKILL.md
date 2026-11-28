@@ -71,7 +71,8 @@ Acceptable input schemas:
 Do not proceed if:
 
 - Rehearsal JSON is missing or malformed
-- Command returned `rehearsal_unavailable` degradation
+- A run reported `executor_unavailable`, or `ee rehearse` is missing
+  (`rehearsal_unavailable`)
 - Evidence lacks workspace or artifact provenance
 - Redaction status is unknown for sensitive artifacts
 
@@ -188,18 +189,22 @@ When `ee rehearse` returns degraded output:
 
 ## Unavailable Handling
 
-If `ee rehearse` is entirely unavailable (nd65 not yet wired):
+`rehearsal_unavailable` is this skill's own status label; `ee` never emits it.
+Use it when the installed `ee` has no `rehearse` command (`ee rehearse --help`
+fails), or when a run reports `executor_unavailable`, which means the sandbox
+had no `ee` binary to execute and the commands were planned but not run:
 
 ```text
 ## Rehearsal Review Unavailable
 
 **Status:** rehearsal_unavailable
 
-Rehearsal commands are not yet wired to real dry-run isolation.
-This skill cannot review artifacts that do not exist.
+The rehearsal produced no executed commands, so there are no run artifacts
+to review.
 
-**Repair:** Wait for ee rehearse implementation or check ee doctor --json
-**Follow-up Bead:** eidetic_engine_cli-nd65
+**Repair:** Check `ee --version`, then rerun
+`ee rehearse run --commands <spec.json> --workspace <workspace> --json`
+from an installed ee binary.
 ```
 
 ## Unsupported Claims
