@@ -24,17 +24,26 @@
 | 64-agent swarm host | **ON** | The whole point — workload analysis, prompt-budget diet, 64-agent playback all need the trace. |
 
 The default is off so a stock developer install does not write
-anything to disk the operator did not ask for. The recorder log
-lives under the workspace's `obs/flight_recorder/` subtree (or the
-`EE_FLIGHT_RECORDER_DIR` override).
+anything to disk the operator did not ask for. The recorder log is
+`agent-workload-trace.jsonl` under the workspace's `obs/flight_recorder/`
+subtree (or the `EE_FLIGHT_RECORDER_DIR` override). While it is on, every
+command appends there, read-only commands included.
 
 ## Env registry
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `EE_FLIGHT_RECORDER` | `0` | When `1`, every agent-facing `ee` command appends one `ee.agent_workload_trace.v1` row to the recorder log. |
+| `EE_FLIGHT_RECORDER` | `0` | When `1`, every `ee` invocation that parses appends one `ee.agent_workload_trace.v1` row after it finishes, unless `ee status` would not report the recorder as writing. `ee recorder flight` is skipped: append writes its own row and replay reads the log. |
 | `EE_FLIGHT_RECORDER_DIR` | `<workspace>/obs/flight_recorder/` | Override the log directory. Useful for read-only test workspaces. |
-| `EE_FLIGHT_RECORDER_RETENTION_DAYS` | `7` | Maximum age of trace rows before the daemon prunes them. The prune pass also enforces `[obs.flight_recorder] max_bytes`. |
+| `EE_FLIGHT_RECORDER_RETENTION_DAYS` | `7` | Retention window reported by `ee status` and `ee doctor`. Nothing prunes the log: the recorder never deletes trace files. An append that would pass the fixed 256 MiB quota is refused. |
+
+An automatically captured row records the verb chain, the names of the
+flags given, the positional count, the output format, the exit code, the
+elapsed time and the stdout byte count (with a bytes/4 token estimate). It
+carries no memory references or degraded codes, and its harness program is
+`unknown`; a harness that knows those can write richer rows with
+`ee recorder flight append`. A failed append never changes the command's
+output or exit code.
 
 ## Trace row shape
 
@@ -100,15 +109,18 @@ The contract is:
 ## How to enable
 
 ```bash
-# Per-invocation override
+# Per-invocation
 EE_FLIGHT_RECORDER=1 ee pack "prepare release" --json
 
-# Persistent (for ee daemon / ee serve)
-ee config set obs.flight_recorder.enabled true
-ee config set obs.flight_recorder.retention_days 7
-ee config set obs.flight_recorder.max_bytes 268435456  # 256 MiB
-ee config set obs.flight_recorder.redaction strict
+# Persistent: set these in the environment that runs ee (or ee daemon)
+export EE_FLIGHT_RECORDER=1
+export EE_FLIGHT_RECORDER_RETENTION_DAYS=7     # the default
+export EE_FLIGHT_RECORDER_DIR=/path/to/traces  # optional; overrides the default directory
 ```
+
+The recorder reads only these environment variables; there are no
+`obs.flight_recorder.*` config keys. The 256 MiB quota and the `strict`
+redaction level are fixed.
 
 `ee status --json` and `ee doctor --json` surface recorder posture
 (enabled / retention / quota / redaction level / current log
@@ -118,20 +130,17 @@ inspecting the workspace directly.
 ## How to read traces
 
 ```bash
-# Stream the most recent traces
-ee obs flight-recorder tail --since 1h --json | jq
-
-# Replay a slice into a fresh deterministic harness (AFR2)
-ee obs flight-recorder replay --from-trace trc_abc... --json
+# Replay a trace file into deterministic aggregates (AFR2)
+ee recorder flight replay --trace ./obs/flight_recorder/agent-workload-trace.jsonl --json
 
 # Pack-diet report from a captured workload (AFR3)
-ee perf prompt-budget --trace ./obs/flight_recorder/2026-05-20.jsonl --json
+ee perf prompt-budget --trace ./obs/flight_recorder/agent-workload-trace.jsonl --json
 ```
 
-The `ee obs flight-recorder tail` and `replay` surfaces are owned by
-follow-up beads bd-1zb7k.19.2 (AFR2) and bd-1zb7k.19.3 (AFR3); the
-core `record_workload()` / `append_workload_trace()` / `replay_workload_trace()`
-in `src/obs/flight_recorder.rs` is the substrate they all share.
+There is no tail command; read the JSONL file directly. Automatic capture,
+`ee recorder flight append` and replay share `record_workload()` /
+`append_workload_trace()` / `replay_workload_trace()` in
+`src/obs/flight_recorder.rs`.
 
 ## Failure modes
 

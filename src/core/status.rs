@@ -3212,12 +3212,18 @@ fn u32_saturating_from_u64(value: u64) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+/// Whether `EE_FLIGHT_RECORDER` asks for traces: one env read, so a command
+/// pays nothing more for the recorder while it is off.
+#[must_use]
+pub(crate) fn flight_recorder_enabled() -> bool {
+    flight_recorder_enabled_from_env_value(read_env_var(EnvVar::FlightRecorder).as_deref())
+}
+
 #[must_use]
 pub(crate) fn gather_flight_recorder_status(
     workspace_path: Option<&Path>,
 ) -> FlightRecorderStatusReport {
-    let enabled =
-        flight_recorder_enabled_from_env_value(read_env_var(EnvVar::FlightRecorder).as_deref());
+    let enabled = flight_recorder_enabled();
     let retention_days = flight_recorder_retention_days_from_env_value(
         read_env_var_or_default(EnvVar::FlightRecorderRetentionDays).as_deref(),
     );

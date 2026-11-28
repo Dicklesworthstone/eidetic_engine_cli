@@ -14046,13 +14046,181 @@ impl CliProcess {
         W: Write,
         E: Write,
     {
+        let args: Vec<OsString> = args.into_iter().collect();
+        let recorded_args = crate::core::status::flight_recorder_enabled().then(|| args.clone());
+        let started = Instant::now();
+        let mut counted_stdout = ByteCountingWriter {
+            inner: stdout,
+            bytes: 0,
+        };
         let advisory_checkpoint = self.search_advisory_session.clone();
-        let exit = run_in_process(self, args, stdout, stderr);
+        let exit = run_in_process(self, args, &mut counted_stdout, stderr);
         if exit != ProcessExitCode::Success {
             self.search_advisory_session = advisory_checkpoint;
         }
+        if let Some(args) = recorded_args {
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            record_invocation_workload(&args, exit, elapsed_ms, counted_stdout.bytes);
+        }
         exit
     }
+}
+
+/// Stdout wrapper that counts what a command wrote, for the flight recorder's
+/// `responseByteCount`.
+struct ByteCountingWriter<'a, W: Write> {
+    inner: &'a mut W,
+    bytes: u64,
+}
+
+impl<W: Write> Write for ByteCountingWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.bytes = self
+            .bytes
+            .saturating_add(u64::try_from(written).unwrap_or(u64::MAX));
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// The shape of one invocation: the subcommand chain, the long names of the
+/// flags given on the command line, and how many positional values there
+/// were. Never a value, so no task or query text can reach a trace row.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct InvocationShape {
+    verbs: Vec<String>,
+    flag_names: Vec<String>,
+    positional_arity: u32,
+}
+
+impl InvocationShape {
+    /// `command` must be the command `matches` was parsed with, after the
+    /// parse built it, so its subcommands carry the propagated global flags.
+    fn from_matches(command: &clap::Command, matches: &clap::ArgMatches) -> Self {
+        let mut shape = Self::default();
+        shape.collect(command, matches);
+        shape
+    }
+
+    fn collect(&mut self, command: &clap::Command, matches: &clap::ArgMatches) {
+        for arg in command.get_arguments() {
+            let id = arg.get_id().as_str();
+            if matches.value_source(id) != Some(clap::parser::ValueSource::CommandLine) {
+                continue;
+            }
+            if arg.is_positional() {
+                let values = matches.get_raw(id).map_or(0, Iterator::count);
+                self.positional_arity = self
+                    .positional_arity
+                    .saturating_add(u32::try_from(values).unwrap_or(u32::MAX));
+            } else if let Some(long) = arg.get_long() {
+                self.flag_names.push(format!("--{long}"));
+            }
+        }
+        if let Some((name, sub_matches)) = matches.subcommand()
+            && let Some(subcommand) = command.find_subcommand(name)
+        {
+            self.verbs.push(name.to_owned());
+            self.collect(subcommand, sub_matches);
+        }
+    }
+}
+
+/// Append one shape-only `ee.agent_workload_trace.v1` row for an invocation
+/// made while `EE_FLIGHT_RECORDER` is on (bd-1zb7k.19.1). Best effort: an
+/// unparseable invocation, a posture `ee status` would not call writing, or a
+/// failed append records nothing and leaves the command's output and exit
+/// code alone. `ee status` and `ee doctor` report the posture.
+fn record_invocation_workload(
+    args: &[OsString],
+    exit: ProcessExitCode,
+    elapsed_ms: u64,
+    response_bytes: u64,
+) {
+    let args = normalize_outcome_quarantine_args(args.to_vec());
+    let mut command = Cli::command();
+    let Ok(matches) = command.try_get_matches_from_mut(&args) else {
+        return;
+    };
+    let Ok(mut cli) = Cli::from_arg_matches(&matches) else {
+        return;
+    };
+    cli.format_explicit = args_contain_format_flag(&args);
+    let shape = InvocationShape::from_matches(&command, &matches);
+    // `ee recorder flight` appends its own row or reads the log being written.
+    if shape.verbs.first().is_some_and(|verb| verb == "recorder")
+        && shape.verbs.get(1).is_some_and(|verb| verb == "flight")
+    {
+        return;
+    }
+    resolve_workspace_inputs_global(&mut cli);
+    let workspace = cli.resolve_workspace();
+    let status = crate::core::status::gather_flight_recorder_status(Some(workspace.as_path()));
+    if !status.writing {
+        return;
+    }
+    let storage = crate::obs::flight_recorder::FlightRecorderStorageOptions {
+        directory: status.directory,
+        retention_days: status.retention_days,
+        max_bytes: status.max_bytes,
+    };
+    // `ee context` renders through context_renderer(), which defaults to Markdown.
+    let renderer = if shape.verbs.first().is_some_and(|verb| verb == "context") {
+        cli.context_renderer()
+    } else {
+        cli.renderer()
+    };
+    let recorded_at = chrono::Utc::now().to_rfc3339();
+    let _ = append_invocation_trace(
+        &storage,
+        &shape,
+        renderer,
+        exit,
+        elapsed_ms,
+        response_bytes,
+        &recorded_at,
+    );
+}
+
+fn append_invocation_trace(
+    storage: &crate::obs::flight_recorder::FlightRecorderStorageOptions,
+    shape: &InvocationShape,
+    renderer: output::Renderer,
+    exit: ProcessExitCode,
+    elapsed_ms: u64,
+    response_bytes: u64,
+    recorded_at: &str,
+) -> Result<
+    crate::obs::flight_recorder::FlightRecorderAppendReport,
+    crate::obs::flight_recorder::FlightRecorderError,
+> {
+    use crate::obs::flight_recorder as recorder;
+    let verbs: Vec<&str> = shape.verbs.iter().map(String::as_str).collect();
+    let flag_names: Vec<&str> = shape.flag_names.iter().map(String::as_str).collect();
+    let trace = recorder::record_workload(&recorder::FlightRecorderInputs {
+        redaction_level: recorder::RedactionLevel::Strict,
+        recorded_at_rfc3339: recorded_at,
+        command: recorder::CommandShapeInput {
+            verbs: &verbs,
+            positional_arity: shape.positional_arity,
+            flag_names: &flag_names,
+            output_format: Some(renderer.as_str()),
+        },
+        exit_code: exit as u8,
+        elapsed_ms,
+        response_byte_count: response_bytes,
+        response_token_estimate: Some(response_bytes / 4),
+        token_estimator_id: Some(recorder::TokenEstimatorId::BytesDiv4),
+        harness_program: recorder::HarnessProgram::Unknown,
+        harness_model_family: None,
+        memory_hashes: &[],
+        degraded_codes: &[],
+    })?;
+    recorder::append_workload_trace(storage, &trace)
 }
 
 pub fn run<I, W, E>(args: I, stdout: &mut W, stderr: &mut E) -> ProcessExitCode
@@ -106247,6 +106415,108 @@ demos:
             &super::did_you_mean("clustring", Some("analyze")),
             &Some("clustering".to_string()),
             "analyze clustring -> clustering",
+        )
+    }
+
+    fn parsed_invocation_shape(args: &[&str]) -> Result<super::InvocationShape, String> {
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        let mut command = Cli::command();
+        let matches = command
+            .try_get_matches_from_mut(&args)
+            .map_err(|error| error.to_string())?;
+        Ok(super::InvocationShape::from_matches(&command, &matches))
+    }
+
+    /// bd-1zb7k.19.1: the recorder sees which flags were set and how many
+    /// positionals there were, never what any of them said.
+    #[test]
+    fn invocation_shape_carries_verbs_flags_and_arity_but_no_values() -> TestResult {
+        let shape = parsed_invocation_shape(&[
+            "ee",
+            "--json",
+            "context",
+            "fix the flaky retry sk-proj-canary",
+            "--max-tokens",
+            "500",
+        ])?;
+        ensure_equal(&shape.verbs, &vec!["context".to_owned()], "verb chain")?;
+        ensure_equal(&shape.positional_arity, &1, "one positional query")?;
+        for flag in ["--json", "--max-tokens"] {
+            ensure(
+                shape.flag_names.iter().any(|name| name == flag),
+                format!("{flag} must be recorded: {:?}", shape.flag_names),
+            )?;
+        }
+        let rendered = format!("{shape:?}");
+        ensure(
+            !rendered.contains("flaky")
+                && !rendered.contains("canary")
+                && !rendered.contains("500"),
+            format!("the shape must carry no values: {rendered}"),
+        )
+    }
+
+    #[test]
+    fn invocation_trace_appends_one_shape_only_row() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let storage = crate::obs::flight_recorder::FlightRecorderStorageOptions {
+            directory: directory.path().join("flight_recorder"),
+            retention_days: 7,
+            max_bytes: 1_048_576,
+        };
+        let shape =
+            parsed_invocation_shape(&["ee", "memory", "show", "mem_canary_value", "--json"])?;
+        let report = super::append_invocation_trace(
+            &storage,
+            &shape,
+            crate::output::Renderer::Json,
+            crate::models::ProcessExitCode::Success,
+            12,
+            400,
+            "2026-11-28T00:00:00Z",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let text = fs::read_to_string(storage.trace_path()).map_err(|error| error.to_string())?;
+        ensure(
+            !text.contains("mem_canary_value"),
+            "the positional value must not reach the trace",
+        )?;
+        let rows: Vec<&str> = text.lines().collect();
+        ensure_equal(&rows.len(), &1, "one row per invocation")?;
+        let row: serde_json::Value = serde_json::from_str(rows.first().copied().unwrap_or(""))
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &row["command"]["verbs"],
+            &serde_json::json!(["memory", "show"]),
+            "verbs",
+        )?;
+        ensure_equal(
+            &row["command"]["flagNames"],
+            &serde_json::json!(["--json"]),
+            "deduplicated flag names",
+        )?;
+        ensure_equal(
+            &row["command"]["positionalArity"],
+            &serde_json::json!(1),
+            "arity",
+        )?;
+        ensure_equal(
+            &row["command"]["outputFormat"],
+            &serde_json::json!("json"),
+            "format",
+        )?;
+        ensure_equal(&row["exitCode"], &serde_json::json!(0), "exit code")?;
+        ensure_equal(&row["responseByteCount"], &serde_json::json!(400), "bytes")?;
+        ensure_equal(
+            &row["responseTokenEstimate"],
+            &serde_json::json!(100),
+            "tokens",
+        )?;
+        ensure_equal(
+            &row["traceId"],
+            &serde_json::json!(report.trace_id),
+            "the report names the row it wrote",
         )
     }
 
