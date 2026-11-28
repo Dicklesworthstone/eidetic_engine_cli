@@ -415,6 +415,42 @@ fn docs_schema_refs_resolve() -> TestResult {
     }
 }
 
+/// A closed object (`additionalProperties: false` and no `patternProperties`)
+/// that requires a key it never declares accepts no instance at all.
+/// 9058cd8d6 added `calibrationId` to the required list of both
+/// ee.daemon.search.response.v2 and v3 without declaring it. #56 (2bed64be3)
+/// repaired v3 and left v2 unsatisfiable.
+#[test]
+fn docs_schema_closed_objects_declare_their_required_keys() -> TestResult {
+    let paths = docs_schema_json_paths()?;
+    let mut checked = 0_usize;
+    let mut failures = Vec::new();
+    for path in &paths {
+        let schema = read_json(path)?;
+        collect_undeclared_required_keys(
+            &schema,
+            &path.display().to_string(),
+            &mut checked,
+            &mut failures,
+        );
+    }
+    if checked == 0 {
+        return Err(format!(
+            "found no closed objects with a required list in {} schema files; the walk is broken",
+            paths.len()
+        ));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} closed objects (of {checked}) require keys they do not declare:\n{}",
+            failures.len(),
+            failures.join("\n")
+        ))
+    }
+}
+
 /// Every `docs/schemas/*.json`, sorted so failures list in a stable order.
 fn docs_schema_json_paths() -> Result<Vec<PathBuf>, String> {
     let schema_dir = repo_root().join("docs").join("schemas");
@@ -488,6 +524,63 @@ fn collect_pattern_failures(
         Value::Array(items) => {
             for (index, item) in items.iter().enumerate() {
                 collect_pattern_failures(item, &format!("{location}/{index}"), checked, failures);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_undeclared_required_keys(
+    value: &Value,
+    location: &str,
+    checked: &mut usize,
+    failures: &mut Vec<String>,
+) {
+    match value {
+        Value::Object(map) => {
+            let closed = map.get("additionalProperties") == Some(&Value::Bool(false))
+                && map
+                    .get("patternProperties")
+                    .and_then(Value::as_object)
+                    .is_none_or(serde_json::Map::is_empty);
+            if closed && let Some(required) = map.get("required").and_then(Value::as_array) {
+                *checked += 1;
+                let properties = map.get("properties").and_then(Value::as_object);
+                for key in required.iter().filter_map(Value::as_str) {
+                    if !properties.is_some_and(|properties| properties.contains_key(key)) {
+                        failures.push(format!("{location}: requires undeclared {key:?}"));
+                    }
+                }
+            }
+            for (key, child) in map {
+                let keyword = key.as_str();
+                let child_location = format!("{location}/{key}");
+                match child {
+                    Value::Object(subschemas) if SUBSCHEMA_MAP_KEYWORDS.contains(&keyword) => {
+                        for (name, subschema) in subschemas {
+                            collect_undeclared_required_keys(
+                                subschema,
+                                &format!("{child_location}/{name}"),
+                                checked,
+                                failures,
+                            );
+                        }
+                    }
+                    _ if INSTANCE_DATA_KEYWORDS.contains(&keyword) => {}
+                    _ => {
+                        collect_undeclared_required_keys(child, &child_location, checked, failures)
+                    }
+                }
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_undeclared_required_keys(
+                    item,
+                    &format!("{location}/{index}"),
+                    checked,
+                    failures,
+                );
             }
         }
         _ => {}
