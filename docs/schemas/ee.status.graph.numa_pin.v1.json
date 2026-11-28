@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.status.graph.numa_pin.v1.json",
   "title": "ee.status.graph.numa_pin.v1",
-  "description": "NUMA-aware graph snapshot pinning posture surfaced under `ee status --json` at `data.graph.numaPin`. Scaffold contract for bd-ldstd / bd-1prrl.3 (swarmx.4); the wiring slice consumes this schema verbatim.",
+  "description": "Reserved; no command emits this yet. Planned NUMA-aware graph snapshot pinning posture for `data.graph.numaPin` in `ee status --json`. Scaffold contract for bd-ldstd / bd-1prrl.3 (swarmx.4); a wiring slice would consume this schema verbatim.",
   "type": "object",
   "required": [
     "schema",

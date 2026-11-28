@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.mesh.disable_result.v1.json",
   "title": "ee.mesh.disable_result.v1",
-  "description": "Result envelope emitted by the SRR6.46.9 `ee mesh disable [--workspace .] [--reason \"...\"] [--dry-run] [--json]` command. Reports the rollback the command performed (or would have performed under --dry-run): peer-group binding removed, peer-group row deleted IFF no other workspace bindings retain it, trust assignments cleared, audit row id. The reversal path SRR6.46.5's reversalCommand field promises operators.",
+  "description": "Reserved; no command emits this yet. `ee mesh disable` shipped from SRR6.38 and emits ee.mesh.emergency_disable.v1 instead. Planned result envelope for the SRR6.46.9 `ee mesh disable [--workspace .] [--reason \"...\"] [--dry-run] [--json]` rollback. It would report the rollback the command performed (or would have performed under --dry-run): peer-group binding removed, peer-group row deleted IFF no other workspace bindings retain it, trust assignments cleared, audit row id. The reversal path SRR6.46.5's reversalCommand field promises operators.",
   "type": "object",
   "required": [
     "schema",

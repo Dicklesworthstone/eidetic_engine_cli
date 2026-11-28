@@ -12181,7 +12181,7 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
         SchemaEntry {
             id: "ee.mesh.disable_result.v1",
             version: "1",
-            description: "Result envelope for `ee mesh disable [--reason \"...\"] [--dry-run] [--json]`.",
+            description: "Reserved; no command emits it. `ee mesh disable` emits ee.mesh.emergency_disable.v1.",
             category: "ops",
             definition: mesh_disable_result_schema_definition,
         },
@@ -12265,7 +12265,7 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
         SchemaEntry {
             id: "ee.mesh.revoke_result.v1",
             version: "1",
-            description: "Result envelope for `ee mesh revoke <node-key>`.",
+            description: "Reserved; no command emits it. There is no `ee mesh revoke`; per-peer revocation is `ee mesh peer revoke <peer-id>`.",
             category: "ops",
             definition: mesh_revoke_result_schema_definition,
         },
@@ -12474,7 +12474,7 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
         SchemaEntry {
             id: "ee.status.graph.numa_pin.v1",
             version: "1",
-            description: "NUMA-aware graph snapshot pinning posture surfaced under `ee status --json` at `data.graph.numaPin`.",
+            description: "Reserved; no command emits it. Planned NUMA pinning posture for `data.graph.numaPin` in `ee status --json`.",
             category: "ops",
             definition: status_graph_numa_pin_schema_definition,
         },
