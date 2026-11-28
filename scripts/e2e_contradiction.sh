@@ -118,12 +118,15 @@ else
 fi
 
 step "pack suppresses the losing side; why-not confirms (bd-1n0np.7.5)"
-packed="$(ee_json pack "should I retry failed network calls" --workspace "$WS" --json)"
+# The guard shipped (PackDraft::apply_contradiction_guard, called from context
+# assembly). A suppressed side is a skipped item whose REASON is
+# "contradiction_suppressed", listed only by profiles that include skipped items,
+# so this asks for standard and matches the value. An earlier probe looked for a
+# KEY of that name, which no output has, so it skipped on every binary.
+packed="$(ee_json pack "should I retry failed network calls" --workspace "$WS" --pack-profile standard --json)"
 assert_jq "$packed" '.success == true' "pack on the contested topic succeeds"
-if printf '%s' "$packed" | jq -e '.. | objects | has("contradictionSuppressed") or has("contradiction_suppressed")' >/dev/null 2>&1; then
-    assert_jq "$packed" \
-        '[.. | objects | (.contradictionSuppressed // .contradiction_suppressed // empty)] | length >= 1' \
-        "pack records contradiction_suppressed for the losing side"
+if printf '%s' "$packed" | jq -e '[.. | objects | select(.reason? == "contradiction_suppressed")] | length >= 1' >/dev/null 2>&1; then
+    _harness_pass "pack skipped the losing side as contradiction_suppressed"
     if ee_supports why-not; then
         whynot="$(ee_json why-not "$id_b" --workspace "$WS" --json)"
         assert_jq "$whynot" '.success == true' "why-not explains the suppression"
@@ -131,7 +134,7 @@ if printf '%s' "$packed" | jq -e '.. | objects | has("contradictionSuppressed") 
         log_drop 1 "ee why-not surface unavailable: suppression confirmation skipped"
     fi
 else
-    log_drop 1 "pack contradiction guard pending (bd-1n0np.7.5): suppression assertions skipped"
+    log_drop 1 "no contradiction_suppressed skip in this pack (the guard acts only when retrieval selects both linked sides): suppression assertions skipped"
 fi
 
 step "forced-mode pack surfaces BOTH sides under a Contradictions header, capped (bd-1n0np.7.5)"
@@ -143,7 +146,10 @@ if ee_pack_forced_mode_available; then
         '[.. | objects | select((.header // .section // "") | test("ontradiction"))] | length >= 1' \
         "forced-mode pack carries a Contradictions header"
 else
-    log_drop 1 "pack --contradiction-forced pending (bd-1n0np.7.5): forced-mode assertions skipped"
+    # apply_contradiction_guard takes a `forced` switch, but context assembly
+    # passes false and nothing renders the both-sides view
+    # (forced_contradiction_view has no non-test caller).
+    log_drop 1 "pack --contradiction-forced not built (deferred when bd-1n0np.7.5 closed): forced-mode assertions skipped"
 fi
 
 end_temp_workspace

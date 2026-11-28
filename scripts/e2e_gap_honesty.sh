@@ -8,13 +8,13 @@
 #   2. `ee insights --section blindSpots --json` reports the uncovered
 #      high-importance nodes + a coverageRatio (bd-1n0np.6.1 / 6.2).
 #   3. repeated low-utility / missed searches feed the query-miss ledger
-#      (bd-1n0np.6.3); the miss-cluster steward turns a tight cluster into a
-#      knowledge_gap candidate (bd-1n0np.6.4) ...
+#      (bd-1n0np.6.3); `ee learn gaps` clusters repeated misses into
+#      knowledge_gap candidates (bd-1n0np.6.4) ...
 #   4. ... which surfaces in `ee swarm brief`.
 #   5. a pack on an uncovered target carries `coverage: thin` (bd-1n0np.6.2).
 #
-# The gap-honesty surfaces (blindSpots section, coverageRatio, the miss-cluster
-# steward + knowledge_gap candidate, swarm-brief surfacing, pack coverage flag)
+# The gap-honesty surfaces (blindSpots section, coverageRatio, `learn gaps`
+# knowledge_gap candidates, swarm-brief surfacing, pack coverage flag)
 # are CAPABILITY-GUARDED: where a surface is absent in the binary under test, the
 # step records a visible log_drop (the no-silent-cap rule) instead of a false
 # pass, and its assertions activate automatically once the binary provides it.
@@ -134,27 +134,36 @@ for q in "kubernetes pod eviction policy" "pod eviction policy kubernetes" "evic
     assert_jq "$s" '.success == true' "search miss runs: $q"
 done
 
-step "miss-cluster steward -> knowledge_gap candidate (6.4)"
-if ee_supports steward && ee_help_lists steward knowledge_gap; then
-    kg="$(ee_json steward --job miss-cluster --workspace "$WS" --json)"
-    assert_jq "$kg" '.success == true' "miss-cluster steward runs"
-    assert_jq "$kg" \
-        '((.data.candidates // .data.knowledgeGaps // []) | type) == "array"' \
-        "steward emits a knowledge_gap candidate array"
+step "learn gaps clusters the misses into knowledge_gap candidates (6.4)"
+# 6.4 shipped the clustering as `ee learn gaps`, not as a steward job: there
+# is no miss-cluster StewardJobType, so a `steward --job miss-cluster` probe
+# could never pass. Its envelope is flat (no `.data`). Whether these three
+# searches leave miss rows depends on index state, so the cluster count is
+# logged, not asserted.
+if ee_help_lists learn gaps; then
+    kg="$(ee_json learn gaps --workspace "$WS" --json)"
+    assert_jq "$kg" '.success == true' "learn gaps runs"
+    assert_jq "$kg" '(.gaps | type) == "array"' "learn gaps emits a gaps array"
+    assert_jq "$kg" '(.scannedMissCount | type) == "number"' "learn gaps reports scannedMissCount"
+    e2e_log_note "learn_gaps clusterCount=$(printf '%s' "$kg" | jq -r '.clusterCount // "<absent>"')"
 else
-    log_drop 1 "miss-cluster steward pending (bd-1n0np.6.4 wiring): knowledge_gap assertions skipped"
+    log_drop 1 "ee learn gaps absent in binary under test: knowledge_gap assertions skipped"
 fi
 
 step "knowledge_gap surfaces in swarm brief (6.4)"
 if ee_supports swarm brief; then
-    brief="$(ee_json swarm brief --workspace "$WS" --fields summary --json)"
+    # `--fields summary` is a hand-built projection with no knowledgeGaps key,
+    # so the probe needs standard. The key is also omitted when empty, and the
+    # brief clusters by exact query hash: three paraphrases are three hashes and
+    # never reach KNOWLEDGE_GAP_MIN_CLUSTER_MISSES (3).
+    brief="$(ee_json swarm brief --workspace "$WS" --fields standard --json)"
     assert_jq "$brief" '.success == true' "swarm brief succeeds"
-    if printf '%s' "$brief" | jq -e '.. | objects | has("knowledgeGaps") or has("knowledge_gaps")' >/dev/null 2>&1; then
+    if printf '%s' "$brief" | jq -e '.data | has("knowledgeGaps")' >/dev/null 2>&1; then
         assert_jq "$brief" \
-            '[.. | objects | (.knowledgeGaps // .knowledge_gaps // empty)] | length >= 0' \
-            "swarm brief carries a knowledge_gaps surface"
+            '(.data.knowledgeGaps | type) == "array" and (.data.knowledgeGaps | length) >= 1' \
+            "swarm brief carries at least one knowledge gap"
     else
-        log_drop 1 "swarm brief knowledge_gaps surfacing pending (bd-1n0np.6.4)"
+        log_drop 1 "swarm brief has no knowledgeGaps (omitted when empty; no exact query hash missed 3 times): surfacing assertion skipped"
     fi
 else
     log_drop 1 "ee swarm brief surface unavailable in binary under test"
@@ -163,14 +172,19 @@ fi
 step "pack on an uncovered target carries coverage: thin (6.2)"
 packed="$(ee_json pack "kubernetes pod eviction policy" --workspace "$WS" --json)"
 assert_jq "$packed" '.success == true' "pack on uncovered target succeeds"
-if printf '%s' "$packed" | jq -e '.. | objects | has("coverage")' >/dev/null 2>&1; then
-    assert_jq "$packed" \
-        '[.. | objects | select(has("coverage")) | .coverage] | length >= 1' \
-        "pack emits a coverage signal on a thin target"
-    covflag="$(printf '%s' "$packed" | jq -r 'first(.. | objects | select(has("coverage")) | .coverage)')"
-    e2e_log_note "pack coverage signal=$covflag"
+# The coverage signal shipped as `pack --explain-gaps` (CoverageGapReport,
+# src/pack/mod.rs), not as a `coverage` key on the ordinary pack, so probing
+# the plain pack for one could never pass. Which quality this fixture earns
+# depends on what retrieval selects, so the value is logged, not pinned.
+if ee_help_lists pack explain-gaps; then
+    gaps="$(ee_json pack "kubernetes pod eviction policy" --workspace "$WS" --explain-gaps --json)"
+    assert_jq "$gaps" '.success == true' "pack --explain-gaps succeeds"
+    assert_jq "$gaps" \
+        '.data.packSummary.quality as $q | ["empty", "thin", "partial", "covered"] | index($q) != null' \
+        "pack --explain-gaps reports a packSummary.quality"
+    e2e_log_note "pack coverage quality=$(printf '%s' "$gaps" | jq -r '.data.packSummary.quality // "<absent>"') posture=$(printf '%s' "$gaps" | jq -r '.data.posture // "<absent>"')"
 else
-    log_drop 1 "pack 'coverage: thin' flag pending (bd-1n0np.6.2): coverage assertion skipped"
+    log_drop 1 "ee pack --explain-gaps absent in binary under test: coverage assertion skipped"
 fi
 
 end_temp_workspace

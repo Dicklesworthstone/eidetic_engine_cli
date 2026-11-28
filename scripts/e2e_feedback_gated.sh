@@ -51,7 +51,7 @@ if ee_lists_outcome_sub calibration; then
     assert_jq "$cold" '((.data.buckets // []) | length) == 0' \
         "cold-start calibration emits no falsely-confident buckets"
 else
-    log_drop 1 "calibration CLI absent (bd-1n0np.2.6): cold-start honesty assertion skipped"
+    log_drop 1 "calibration CLI not built (bd-p5wa2; the core shipped in bd-1n0np.2.6): cold-start honesty assertion skipped"
 fi
 
 step "seed memories + pack (records pack_candidate_impressions, bd-1n0np.2.2)"
@@ -79,17 +79,18 @@ if ee_lists_top roi; then
     assert_jq "$roi" '(.data.buckets | type) == "array"' \
         "roi report emits buckets (utility-per-token with sample counts)"
 else
-    log_drop 1 "ee roi CLI absent (bd-1n0np.13.1 reporting surface pending): utility-per-token assertions skipped"
+    log_drop 1 "ee roi CLI not built (deferred when bd-1n0np.13.1 closed; compute_token_roi has no non-test caller): utility-per-token assertions skipped"
 fi
 
 step "regime-shift surfaces a DEMOTION CANDIDATE, never an auto-demote (bd-1n0np.13.2)"
 # The SPRT regime-shift core proposes a demotion curation candidate; nothing is
-# auto-demoted. Until the proposal is wired into the curation surface, guard it.
+# auto-demoted. bd-1n0np.13.2 closed with that wiring deferred: detect_regime_shift
+# (src/core/outcome.rs) has no non-test caller, so this guard stays false.
 cand="$(ee_json curate candidates --workspace "$WS" --json)"
 if printf '%s' "$cand" | jq -e '[.data.candidates[]? | select((.source // "") == "regime_shift" or ((.rationale // "") | test("regime"; "i")))] | length >= 1' >/dev/null 2>&1; then
     _harness_pass "regime-shift demotion proposal surfaced as a curation candidate (not auto-applied)"
 else
-    log_drop 1 "regime-shift demotion-candidate surface pending (bd-1n0np.13.2 curation wiring): proposal assertion skipped"
+    log_drop 1 "regime-shift proposals not wired into curate (deferred when bd-1n0np.13.2 closed): proposal assertion skipped"
 fi
 
 step "calibration-honesty: empirical recall + wide CIs + loud abstention (bd-1n0np.13.3)"
@@ -100,7 +101,7 @@ if "$EE_BIN" outcome calibration --help 2>&1 | grep -q -- "--honesty"; then
         '((.data.classes // []) | length) == 0 or any(.data.classes[]?; has("abstained"))' \
         "honesty report carries per-class abstention flags (loud abstention on sparse)"
 else
-    log_drop 1 "calibration-honesty surface absent (bd-1n0np.13.3 CLI pending): honesty/abstention assertions skipped"
+    log_drop 1 "calibration --honesty not built (bd-p5wa2 owns the command; the core shipped in bd-1n0np.13.3): honesty/abstention assertions skipped"
 fi
 
 end_temp_workspace
