@@ -1791,6 +1791,7 @@ impl CassImportGuidance {
 pub struct IntegrityDiagnosticsOptions {
     pub workspace_path: PathBuf,
     pub database_path: Option<PathBuf>,
+    /// Supply a known workspace ID, or an empty string to resolve the addressed workspace.
     pub workspace_id: String,
     pub sample_size: u32,
     pub create_canary: bool,
@@ -2136,6 +2137,62 @@ impl IntegrityDiagnosticsReport {
             }
         }
 
+        let resolved;
+        let options = if options.workspace_id.is_empty() {
+            // Resolve on the inspected connection, after schema checks. A
+            // shared --database must not silently sample a different workspace.
+            let binding = crate::core::workspace::addressed_workspace_row(
+                &connection,
+                &options.workspace_path,
+                &database_path,
+            )
+            .map_err(|error| error.message())
+            .and_then(|row| {
+                row.map(|workspace| workspace.id).ok_or_else(|| {
+                    "The selected database has no binding for this workspace.".to_owned()
+                })
+            });
+            let workspace_id = match binding {
+                Ok(id) => id,
+                Err(message) => {
+                    let repair = Some("Pass --workspace for a workspace registered in this database.");
+                    checks.push(IntegrityDiagnosticCheck::warning(
+                        "workspace_binding",
+                        message.clone(),
+                        repair,
+                    ));
+                    degraded.push(IntegrityDiagnosticDegradation {
+                        code: "integrity_workspace_unresolved",
+                        severity: "medium",
+                        message,
+                        repair,
+                    });
+                    let canary = if options.create_canary {
+                        IntegrityCanaryReport {
+                            requested: true,
+                            dry_run: options.dry_run,
+                            memory_id: INTEGRITY_CANARY_MEMORY_ID,
+                            status: IntegrityCanaryStatus::Skipped,
+                            message: "Canary skipped because its workspace could not be resolved.".to_owned(),
+                            repair,
+                        }
+                    } else {
+                        IntegrityCanaryReport::not_requested()
+                    };
+                    return Self::finalize(
+                        options, database_path, checks, provenance_sample, canary, degraded,
+                    );
+                }
+            };
+            resolved = IntegrityDiagnosticsOptions {
+                workspace_id,
+                ..options.clone()
+            };
+            &resolved
+        } else {
+            options
+        };
+
         match connection
             .inspect_sampled_memory_provenance(&options.workspace_id, options.sample_size)
         {
@@ -2365,18 +2422,27 @@ fn maybe_create_canary(
         return IntegrityCanaryReport::not_requested();
     }
 
-    if options.dry_run {
-        return IntegrityCanaryReport {
+    match connection.get_memory(INTEGRITY_CANARY_MEMORY_ID) {
+        Ok(Some(memory)) if memory.workspace_id != options.workspace_id => IntegrityCanaryReport {
+            requested: true,
+            dry_run: options.dry_run,
+            memory_id: INTEGRITY_CANARY_MEMORY_ID,
+            status: IntegrityCanaryStatus::Failed,
+            message: "The store's existing integrity canary belongs to another workspace.".to_owned(),
+            repair: None,
+        },
+        Ok(existing) if options.dry_run => IntegrityCanaryReport {
             requested: true,
             dry_run: true,
             memory_id: INTEGRITY_CANARY_MEMORY_ID,
             status: IntegrityCanaryStatus::DryRun,
-            message: "Would create the integrity canary memory.".to_string(),
+            message: if existing.is_some() {
+                "Integrity canary memory already exists.".to_string()
+            } else {
+                "Would create the integrity canary memory.".to_string()
+            },
             repair: None,
-        };
-    }
-
-    match connection.get_memory(INTEGRITY_CANARY_MEMORY_ID) {
+        },
         Ok(Some(_)) => IntegrityCanaryReport {
             requested: true,
             dry_run: false,
@@ -2388,7 +2454,7 @@ fn maybe_create_canary(
         Ok(None) => insert_canary_memory(connection, &options.workspace_id),
         Err(error) => IntegrityCanaryReport {
             requested: true,
-            dry_run: false,
+            dry_run: options.dry_run,
             memory_id: INTEGRITY_CANARY_MEMORY_ID,
             status: IntegrityCanaryStatus::Failed,
             message: format!("Could not check for existing canary memory: {error}"),
@@ -7516,12 +7582,22 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
+        let alternate_path = temp.path().join("other");
+        connection
+            .insert_workspace(
+                "wsp_98765432109876543210987654",
+                &crate::db::CreateWorkspaceInput {
+                    path: alternate_path.to_string_lossy().into_owned(),
+                    name: Some("other".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
 
         let options = IntegrityDiagnosticsOptions {
             workspace_path: temp.path().to_path_buf(),
             database_path: Some(database_path.clone()),
-            workspace_id: TEST_WORKSPACE_ID.to_string(),
+            workspace_id: String::new(),
             sample_size: 8,
             create_canary: true,
             dry_run: false,
@@ -7535,12 +7611,30 @@ mod tests {
         )?;
 
         let second = IntegrityDiagnosticsReport::gather(&options);
+        ensure(first.workspace_id.as_str(), TEST_WORKSPACE_ID, "resolved canary owner")?;
+        ensure(
+            second.provenance_sample.as_ref().map(|sample| sample.checked_count),
+            Some(1),
+            "second run samples the canary in the addressed workspace",
+        )?;
         ensure(
             second.canary.status,
             IntegrityCanaryStatus::AlreadyExists,
             "second run is idempotent",
         )?;
 
+        for dry_run in [true, false] {
+            let other = IntegrityDiagnosticsReport::gather(&IntegrityDiagnosticsOptions {
+                workspace_path: alternate_path.clone(),
+                dry_run,
+                ..options.clone()
+            });
+            ensure(
+                other.canary.status,
+                IntegrityCanaryStatus::Failed,
+                "a foreign canary cannot verify this workspace",
+            )?;
+        }
         let connection = crate::db::DbConnection::open_file(&database_path)
             .map_err(|error| error.to_string())?;
         let memory = connection
@@ -7741,7 +7835,7 @@ mod tests {
         let report = IntegrityDiagnosticsReport::gather(&IntegrityDiagnosticsOptions {
             workspace_path: temp.path().to_path_buf(),
             database_path: Some(database_path),
-            workspace_id: TEST_WORKSPACE_ID.to_string(),
+            workspace_id: String::new(),
             sample_size: 8,
             create_canary: false,
             dry_run: false,
@@ -7752,6 +7846,21 @@ mod tests {
             true,
             "reference issues must not report an ok integrity status",
         )?;
+        ensure(
+            report.provenance_sample.as_ref().map(|sample| sample.checked_count),
+            Some(1),
+            "the shared store samples only the addressed workspace",
+        )?;
+        let unmatched = IntegrityDiagnosticsReport::gather(&IntegrityDiagnosticsOptions {
+            workspace_path: temp.path().join("unregistered"),
+            database_path: Some(temp.path().join("ee.db")),
+            workspace_id: String::new(),
+            sample_size: 8,
+            create_canary: true,
+            dry_run: false,
+        });
+        ensure(unmatched.provenance_sample.is_none(), true, "no unscoped sample")?;
+        ensure(unmatched.canary.status, IntegrityCanaryStatus::Skipped, "no unscoped write")?;
         let reference_check = report
             .checks
             .iter()

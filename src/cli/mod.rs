@@ -34503,7 +34503,7 @@ where
     let report = IntegrityDiagnosticsReport::gather(&IntegrityDiagnosticsOptions {
         workspace_path,
         database_path: args.database.clone(),
-        workspace_id: "default".to_string(),
+        workspace_id: String::new(),
         sample_size: args.sample_size,
         create_canary: args.create_canary,
         dry_run: args.dry_run,
