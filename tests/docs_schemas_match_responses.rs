@@ -343,6 +343,78 @@ fn docs_schema_examples_validate_against_their_own_schema() -> TestResult {
     }
 }
 
+/// Every `$ref` in a published schema must resolve. From b2070fcdf onward,
+/// ee.graph.diff.v1 pointed `communities.births` and `.deaths` at an undefined
+/// `#/$defs/communityEndpoint`. A validator that resolves references (ee's own
+/// says "unresolved $ref") therefore rejected every diff with a community birth
+/// or death. Nothing noticed, because no test validated such an instance.
+/// Local fragments resolve against their own document, a file name against
+/// docs/schemas, and an absolute URI against a document's `$id`.
+#[test]
+fn docs_schema_refs_resolve() -> TestResult {
+    let mut documents = Vec::new();
+    for path in docs_schema_json_paths()? {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("non-UTF-8 schema file name {}", path.display()))?
+            .to_owned();
+        let schema = read_json(&path)?;
+        documents.push((name, schema));
+    }
+    let by_name = documents
+        .iter()
+        .map(|(name, schema)| (name.as_str(), schema))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let by_id = documents
+        .iter()
+        .filter_map(|(_, schema)| Some((schema.get("$id")?.as_str()?, schema)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut checked = 0_usize;
+    let mut failures = Vec::new();
+    for (name, schema) in &documents {
+        let mut refs = Vec::new();
+        collect_schema_refs(schema, name, &mut refs);
+        for (location, reference) in refs {
+            checked += 1;
+            let (target, fragment) = reference
+                .split_once('#')
+                .unwrap_or((reference.as_str(), ""));
+            let document = if target.is_empty() {
+                Some(schema)
+            } else {
+                by_name.get(target).or_else(|| by_id.get(target)).copied()
+            };
+            match document {
+                None => failures.push(format!(
+                    "{location}: {reference}: no docs/schemas file or $id {target}"
+                )),
+                Some(document) if !fragment.is_empty() && document.pointer(fragment).is_none() => {
+                    failures.push(format!(
+                        "{location}: {reference}: {fragment} is not defined"
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    if checked == 0 {
+        return Err(format!(
+            "found no $ref in {} schema files; the walk is broken",
+            documents.len()
+        ));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} of {checked} schema $ref values do not resolve:\n{}",
+            failures.len(),
+            failures.join("\n")
+        ))
+    }
+}
+
 /// Every `docs/schemas/*.json`, sorted so failures list in a stable order.
 fn docs_schema_json_paths() -> Result<Vec<PathBuf>, String> {
     let schema_dir = repo_root().join("docs").join("schemas");
@@ -416,6 +488,41 @@ fn collect_pattern_failures(
         Value::Array(items) => {
             for (index, item) in items.iter().enumerate() {
                 collect_pattern_failures(item, &format!("{location}/{index}"), checked, failures);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect `(location, $ref)` pairs, skipping instance data the same way
+/// `collect_pattern_failures` does: a `$ref` key inside an example is a value.
+fn collect_schema_refs(value: &Value, location: &str, refs: &mut Vec<(String, String)>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let keyword = key.as_str();
+                let child_location = format!("{location}/{key}");
+                match child {
+                    Value::Object(subschemas) if SUBSCHEMA_MAP_KEYWORDS.contains(&keyword) => {
+                        for (name, subschema) in subschemas {
+                            collect_schema_refs(
+                                subschema,
+                                &format!("{child_location}/{name}"),
+                                refs,
+                            );
+                        }
+                    }
+                    _ if INSTANCE_DATA_KEYWORDS.contains(&keyword) => {}
+                    Value::String(reference) if keyword == "$ref" => {
+                        refs.push((child_location, reference.clone()));
+                    }
+                    _ => collect_schema_refs(child, &child_location, refs),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_schema_refs(item, &format!("{location}/{index}"), refs);
             }
         }
         _ => {}

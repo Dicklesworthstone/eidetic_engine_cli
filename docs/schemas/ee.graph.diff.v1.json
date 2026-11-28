@@ -161,6 +161,16 @@
         "relation": { "type": "string" },
         "directed": { "type": "boolean" }
       }
+    },
+    "communityEndpoint": {
+      "type": "object",
+      "required": ["fingerprint", "size", "members"],
+      "additionalProperties": false,
+      "properties": {
+        "fingerprint": { "type": "string" },
+        "size": { "type": "integer", "minimum": 0 },
+        "members": { "type": "array", "items": { "type": "string" } }
+      }
     }
   }
 }
