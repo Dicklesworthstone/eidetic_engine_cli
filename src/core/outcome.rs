@@ -24,12 +24,12 @@
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use asupersync::Outcome;
 use asupersync::types::{CancelKind, CancelReason, PanicPayload};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Datelike, Duration, SecondsFormat, Utc};
 use serde::Serialize;
 
 use crate::core::bayes::{
@@ -5363,8 +5363,7 @@ pub fn compute_calibration(observations: &[(f64, bool)], bucket_count: u32) -> C
     }
 }
 
-/// Schema id for the calibration-honesty report (bd-1n0np.13.3).
-pub const CALIBRATION_HONESTY_SCHEMA_V1: &str = "ee.calibration_honesty.v1";
+pub use crate::models::{CALIBRATION_HONESTY_SCHEMA_V1, OUTCOME_CALIBRATION_SCHEMA_V1};
 
 /// Minimum per-class sample count below which the calibration-honesty report
 /// abstains loudly instead of asserting a hit rate.
@@ -5472,6 +5471,925 @@ pub fn calibration_honesty_report(
         sample_count: observations.len() as u32,
         classes,
         table_hash,
+    }
+}
+
+/// Default feedback candidate budget for the historical calibration report.
+pub const DEFAULT_OUTCOME_CALIBRATION_EVENT_LIMIT: u32 = 10_000;
+/// Maximum feedback candidate budget. Audit reads have a separate fourfold cap.
+pub const MAX_OUTCOME_CALIBRATION_EVENT_LIMIT: u32 = 100_000;
+/// Bounds the cross product of caller-supplied classes and confidence buckets.
+pub const MAX_OUTCOME_CALIBRATION_CLASSES: usize = 256;
+
+/// A deterministic, read-only comparison of historical predictions and outcomes.
+#[derive(Clone, Debug)]
+pub struct OutcomeCalibrationOptions {
+    pub workspace_path: PathBuf,
+    pub database_path: Option<PathBuf>,
+    /// Inclusive RFC3339 observation time, with an explicit offset.
+    pub since: String,
+    /// Exclusive RFC3339 observation time, with an explicit offset.
+    pub until: String,
+    pub bucket_count: u32,
+    /// Bounds candidate rows, including the calendar-date offset guard.
+    pub event_limit: u32,
+    pub honesty: bool,
+}
+
+/// The feedback population and the measurements derived from that exact set.
+/// No current memory score, current class, or wall-clock time enters this report.
+#[derive(Clone, Debug)]
+pub struct OutcomeCalibrationReport {
+    pub workspace_id: String,
+    pub since: String,
+    pub until: String,
+    pub event_limit: u32,
+    pub scanned_events: u32,
+    pub outside_window_count: u32,
+    pub invalid_timestamp_count: u32,
+    pub events_in_window: u32,
+    pub audit_limit: u32,
+    pub scanned_audit_rows: u32,
+    pub exclusions: BTreeMap<String, u32>,
+    pub source_counts: BTreeMap<String, u32>,
+    pub calibration: CalibrationReport,
+    pub classes: BTreeMap<String, CalibrationReport>,
+    pub honesty: CalibrationHonestyReport,
+    pub honesty_mode: bool,
+    /// Binds the admitted observations, including their historical audit IDs.
+    pub table_hash: String,
+}
+
+impl OutcomeCalibrationReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        use serde_json::json;
+
+        let mut data = json!({
+            "schema": if self.honesty_mode { CALIBRATION_HONESTY_SCHEMA_V1 } else { OUTCOME_CALIBRATION_SCHEMA_V1 },
+            "command": "outcome calibration",
+            "workspaceId": self.workspace_id,
+            "since": self.since,
+            "until": self.until,
+            "readOnly": true,
+            "predictionBasis": "historical_pre_outcome_audit",
+            "situationClassBasis": "recorded_evidence_situation_class",
+            "eventLimit": self.event_limit,
+            "classLimit": MAX_OUTCOME_CALIBRATION_CLASSES,
+            "scannedEvents": self.scanned_events,
+            "outsideWindowCount": self.outside_window_count,
+            "invalidTimestampCount": self.invalid_timestamp_count,
+            "eventsInWindow": self.events_in_window,
+            "auditLimit": self.audit_limit,
+            "scannedAuditRows": self.scanned_audit_rows,
+            "sampleCount": self.calibration.sample_count,
+            "excludedCount": self.exclusions.values().sum::<u32>(),
+            "exclusions": self.exclusions.iter().map(|(reason, count)| json!({"reason": reason, "count": count})).collect::<Vec<_>>(),
+            "sourceCounts": self.source_counts.iter().map(|(source, count)| json!({"sourceType": source, "count": count})).collect::<Vec<_>>(),
+            "tableHash": self.table_hash,
+            "degraded": [],
+        });
+        if self.honesty_mode {
+            data["minSamples"] = json!(self.honesty.min_samples);
+            data["classes"] = json!(
+                self.honesty
+                    .classes
+                    .iter()
+                    .map(|class| json!({
+                        "situationClass": class.situation_class,
+                        "sampleCount": class.sample_count,
+                        "empiricalHitRate": class.empirical_hit_rate,
+                        "intervalLower": class.interval_lower,
+                        "intervalUpper": class.interval_upper,
+                        "abstained": class.abstained,
+                    }))
+                    .collect::<Vec<_>>()
+            );
+        } else {
+            if let (Some(object), Some(metrics)) = (
+                data.as_object_mut(),
+                outcome_calibration_metrics_json(&self.calibration).as_object(),
+            ) {
+                object.extend(metrics.clone());
+            }
+            data["classes"] = json!(
+                self.classes
+                    .iter()
+                    .map(|(class, report)| {
+                        let mut row = outcome_calibration_metrics_json(report);
+                        row["situationClass"] = json!(class);
+                        row
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
+        data
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let score = self.calibration.brier_score.map_or_else(
+            || "insufficient data".to_owned(),
+            |score| format!("Brier score {score:.6}"),
+        );
+        let mut summary = format!(
+            "Outcome calibration: {} admitted observations, {} excluded, {score}.\nWindow: [{}, {}). Historical pre-outcome predictions only; no scores changed.\n",
+            self.calibration.sample_count,
+            self.exclusions.values().sum::<u32>(),
+            self.since,
+            self.until,
+        );
+        if self.honesty_mode {
+            for class in &self.honesty.classes {
+                summary.push_str(&format!(
+                    "  {}: {} observations, hit rate {:.3}, interval [{:.3}, {:.3}]{}.\n",
+                    class.situation_class,
+                    class.sample_count,
+                    class.empirical_hit_rate,
+                    class.interval_lower,
+                    class.interval_upper,
+                    if class.abstained {
+                        "; insufficient samples"
+                    } else {
+                        ""
+                    },
+                ));
+            }
+        } else {
+            for (class, report) in &self.classes {
+                summary.push_str(&format!(
+                    "  {class}: {} observations in {} confidence buckets; mean prediction {:.3}, observed helpful rate {:.3}; {}.\n",
+                    report.sample_count,
+                    report.bucket_count,
+                    report.mean_predicted,
+                    report.observed_positive_rate,
+                    report.recalibration.as_str(),
+                ));
+            }
+        }
+        summary
+    }
+}
+
+fn outcome_calibration_metrics_json(report: &CalibrationReport) -> serde_json::Value {
+    serde_json::json!({
+        "sampleCount": report.sample_count,
+        "assessment": if report.sample_count == 0 { "insufficient_data" } else { "observed" },
+        "bucketCount": report.bucket_count,
+        "brierScore": report.brier_score,
+        "meanPredicted": report.mean_predicted,
+        "observedPositiveRate": report.observed_positive_rate,
+        "calibrationGap": report.calibration_gap,
+        "recalibration": (report.sample_count > 0).then(|| report.recalibration.as_str()),
+        "buckets": report.buckets.iter().map(|bucket| serde_json::json!({
+            "lower": bucket.lower,
+            "upper": bucket.upper,
+            "count": bucket.count,
+            "meanPredicted": bucket.mean_predicted,
+            "observedPositiveRate": bucket.observed_positive_rate,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn outcome_calibration_usage(message: impl Into<String>) -> DomainError {
+    DomainError::Usage {
+        message: message.into(),
+        repair: Some(
+            "ee outcome calibration --since <RFC3339> --until <RFC3339> --help".to_owned(),
+        ),
+    }
+}
+
+fn outcome_calibration_storage(operation: &str) -> DomainError {
+    DomainError::Storage {
+        message: format!(
+            "Could not {operation} for outcome calibration; no partial report was returned."
+        ),
+        repair: Some("Inspect the workspace database with ee doctor --json and retry.".to_owned()),
+    }
+}
+
+fn outcome_calibration_instant(raw: &str, flag: &str) -> Result<DateTime<Utc>, DomainError> {
+    let instant = DateTime::parse_from_rfc3339(raw)
+        .map(|instant| instant.with_timezone(&Utc))
+        .map_err(|_| {
+            outcome_calibration_usage(format!("{flag} must be an explicit RFC3339 instant"))
+        })?;
+    if !(0..=9999).contains(&instant.year()) {
+        return Err(outcome_calibration_usage(format!(
+            "{flag} must resolve to a four-digit UTC year"
+        )));
+    }
+    Ok(instant)
+}
+
+fn outcome_calibration_timestamp(instant: DateTime<Utc>) -> String {
+    instant.to_rfc3339_opts(SecondsFormat::AutoSi, true)
+}
+
+/// Compare accepted observations with their recorded pre-outcome prediction.
+///
+/// The report admits positive-weight human, agent, and observed feedback for
+/// memories and native rules. Weight is eligibility, never a fabricated count
+/// of independent trials. Derived signals, unapplied events, and missing,
+/// invalid, or ambiguous historical predictions are counted as exclusions.
+/// Both report modes use precisely the same population and population hash.
+pub fn run_outcome_calibration(
+    options: &OutcomeCalibrationOptions,
+) -> Result<OutcomeCalibrationReport, DomainError> {
+    let since = outcome_calibration_instant(&options.since, "since")?;
+    let until = outcome_calibration_instant(&options.until, "until")?;
+    if since >= until {
+        return Err(outcome_calibration_usage(
+            "since must be strictly earlier than until",
+        ));
+    }
+    if !(1..=100).contains(&options.bucket_count) {
+        return Err(outcome_calibration_usage(
+            "buckets must be between 1 and 100",
+        ));
+    }
+    if !(1..=MAX_OUTCOME_CALIBRATION_EVENT_LIMIT).contains(&options.event_limit) {
+        return Err(outcome_calibration_usage(
+            "event-limit must be between 1 and 100000",
+        ));
+    }
+    let workspace = options
+        .workspace_path
+        .canonicalize()
+        .map_err(|_| outcome_calibration_usage("workspace must exist"))?;
+    let database = options
+        .database_path
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee/ee.db"));
+    if !database.exists() {
+        return Err(crate::core::storeless_workspace_error(&database));
+    }
+    let connection = DbConnection::open_file_read_only(&database)
+        .map_err(|_| outcome_calibration_storage("open the existing database"))?;
+    if connection
+        .needs_migration()
+        .map_err(|_| outcome_calibration_storage("inspect the schema"))?
+    {
+        return Err(DomainError::MigrationRequired {
+            message: "Outcome calibration requires the current workspace schema.".to_owned(),
+            repair: Some("ee migrate run --workspace . --json".to_owned()),
+        });
+    }
+    crate::core::curate::source_admission::with_snapshot(&connection, || {
+        let workspace_id =
+            crate::core::workspace::addressed_workspace_row(&connection, &workspace, &database)?
+                .ok_or_else(|| {
+                    outcome_calibration_usage("workspace is not registered in this database")
+                })?
+                .id;
+        collect_outcome_calibration(&connection, &workspace_id, options, since, until)
+    })
+}
+
+fn outcome_calibration_eligibility(event: &StoredFeedbackEvent) -> Option<&'static str> {
+    if !matches!(event.target_type.as_str(), "memory" | "rule") {
+        return Some("unsupported_target");
+    }
+    if !matches!(
+        event.source_type.as_str(),
+        "human_explicit" | "agent_inference" | "outcome_observed"
+    ) {
+        return Some("non_observational_source");
+    }
+    if !event.weight.is_finite() || event.weight <= 0.0 {
+        return Some("non_positive_or_invalid_weight");
+    }
+    if !HELPFUL_SIGNALS.contains(&event.signal.as_str())
+        && !HARMFUL_SIGNALS.contains(&event.signal.as_str())
+    {
+        return Some("non_binary_signal");
+    }
+    match event.applied_at.as_deref() {
+        None => Some("unapplied_event"),
+        Some(applied) if DateTime::parse_from_rfc3339(applied).is_err() => {
+            Some("invalid_application_timestamp")
+        }
+        Some(_) => None,
+    }
+}
+
+fn outcome_calibration_class(event: &StoredFeedbackEvent) -> String {
+    let label = event
+        .evidence_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| {
+            value
+                .get("situationClass")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
+    label
+        .filter(|label| {
+            !label.is_empty()
+                && label.len() <= 64
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+                && redact_outcome_public_source_ref(label) == label.as_str()
+        })
+        .unwrap_or_else(|| "unclassified".to_owned())
+}
+
+fn collect_outcome_calibration(
+    connection: &DbConnection,
+    workspace_id: &str,
+    options: &OutcomeCalibrationOptions,
+    since: DateTime<Utc>,
+    until: DateTime<Utc>,
+) -> Result<OutcomeCalibrationReport, DomainError> {
+    // A legal RFC3339 offset can move the stored calendar date by one day.
+    // Keep both neighboring dates, then compare full instants in Rust so
+    // nanosecond boundaries and equivalent offsets retain their exact meaning.
+    let earliest = since - Duration::days(1);
+    let latest = until + Duration::days(2);
+    let earliest_date = if earliest.year() < 0 {
+        String::new()
+    } else {
+        earliest.format("%Y-%m-%d").to_string()
+    };
+    let latest_date = if latest.year() > 9999 {
+        "9999-12-32".to_owned()
+    } else {
+        latest.format("%Y-%m-%d").to_string()
+    };
+    let candidates = connection
+        .list_feedback_calibration_candidates(
+            workspace_id,
+            &earliest_date,
+            &latest_date,
+            options.event_limit + 1,
+        )
+        .map_err(|_| outcome_calibration_storage("read bounded feedback candidates"))?;
+    if candidates.len() > options.event_limit as usize {
+        return Err(DomainError::Usage {
+            message: format!(
+                "Outcome calibration candidate scan exceeds event-limit {} (including neighboring dates required for RFC3339 offsets); no partial report was returned.",
+                options.event_limit
+            ),
+            repair: Some(
+                "Narrow --since/--until or raise --event-limit (maximum 100000).".to_owned(),
+            ),
+        });
+    }
+    let scanned_events = candidates.len() as u32;
+    let mut outside_window_count = 0;
+    let mut invalid_timestamp_count = 0;
+    let mut events = Vec::new();
+    for event in candidates {
+        let Ok(created) = DateTime::parse_from_rfc3339(&event.created_at) else {
+            invalid_timestamp_count += 1;
+            continue;
+        };
+        let created = created.with_timezone(&Utc);
+        if created < since || created >= until {
+            outside_window_count += 1;
+            continue;
+        }
+        events.push((created, event));
+    }
+    events.sort_by(|(left_time, left), (right_time, right)| {
+        left_time
+            .cmp(right_time)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let events_in_window = events.len() as u32;
+    let mut exclusions = BTreeMap::<String, u32>::new();
+    let mut eligible = Vec::new();
+    for (created, event) in events {
+        if let Some(reason) = outcome_calibration_eligibility(&event) {
+            *exclusions.entry(reason.to_owned()).or_default() += 1;
+        } else {
+            eligible.push((created, event));
+        }
+    }
+
+    let audit_limit = options.event_limit * 4;
+    let mut scanned_audit_rows = 0;
+    let mut prediction_audits =
+        BTreeMap::<(String, String, String), Vec<(String, Option<f64>)>>::new();
+    for target_type in ["memory", "rule"] {
+        let target_ids = eligible
+            .iter()
+            .filter(|(_, event)| event.target_type == target_type)
+            .map(|(_, event)| event.target_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        for batch in target_ids.chunks(128) {
+            let remaining = audit_limit - scanned_audit_rows;
+            let audits = connection
+                .list_feedback_calibration_audits(workspace_id, target_type, batch, remaining + 1)
+                .map_err(|_| {
+                    outcome_calibration_storage("read bounded historical prediction audits")
+                })?;
+            if audits.len() > remaining as usize {
+                return Err(DomainError::Usage {
+                    message: format!("Outcome calibration historical-audit scan exceeds its {audit_limit}-row budget (four times event-limit); no partial report was returned."),
+                    repair: Some("Raise --event-limit (maximum 100000), or narrow the window to include fewer distinct targets. A target's lifetime prediction history is scanned regardless of the window.".to_owned()),
+                });
+            }
+            scanned_audit_rows += audits.len() as u32;
+            for audit in audits {
+                let expected_action = if target_type == "memory" {
+                    audit_actions::OUTCOME_BAYES_UPDATE
+                } else {
+                    audit_actions::RULE_MARK
+                };
+                if audit.workspace_id.as_deref() != Some(workspace_id)
+                    || audit.target_type.as_deref() != Some(target_type)
+                    || audit.action != expected_action
+                {
+                    continue;
+                }
+                let Some(target_id) = audit.target_id else {
+                    continue;
+                };
+                let Some(details) = audit
+                    .details
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                else {
+                    continue;
+                };
+                let Some(event_id) = details
+                    .get("feedbackEventId")
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                let field = if target_type == "memory" {
+                    "priorMean"
+                } else {
+                    "confidenceBefore"
+                };
+                let prediction = details
+                    .get(field)
+                    .and_then(serde_json::Value::as_f64)
+                    .filter(|value| value.is_finite() && (0.0..=1.0).contains(value));
+                prediction_audits
+                    .entry((target_type.to_owned(), target_id, event_id.to_owned()))
+                    .or_default()
+                    .push((audit.id, prediction));
+            }
+        }
+    }
+
+    let mut observations = Vec::new();
+    let mut class_observations = BTreeMap::<String, Vec<(f64, bool)>>::new();
+    let mut honesty_observations = Vec::new();
+    let mut source_counts = BTreeMap::<String, u32>::new();
+    let mut table_hasher = blake3::Hasher::new();
+    table_hasher.update(b"ee.outcome.calibration.population.v1\0");
+    for field in [
+        workspace_id.to_owned(),
+        outcome_calibration_timestamp(since),
+        outcome_calibration_timestamp(until),
+    ] {
+        table_hasher.update(&(field.len() as u64).to_be_bytes());
+        table_hasher.update(field.as_bytes());
+    }
+    for (created, event) in eligible {
+        let key = (
+            event.target_type.clone(),
+            event.target_id.clone(),
+            event.id.clone(),
+        );
+        let matched = prediction_audits
+            .get(&key)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let (audit_id, prediction) = match matched {
+            [] => {
+                *exclusions
+                    .entry("missing_prediction_audit".to_owned())
+                    .or_default() += 1;
+                continue;
+            }
+            [(audit_id, Some(prediction))] => (audit_id, *prediction),
+            [(_, None)] => {
+                *exclusions
+                    .entry("invalid_prediction_audit".to_owned())
+                    .or_default() += 1;
+                continue;
+            }
+            _ => {
+                *exclusions
+                    .entry("ambiguous_prediction_audit".to_owned())
+                    .or_default() += 1;
+                continue;
+            }
+        };
+        let helpful = HELPFUL_SIGNALS.contains(&event.signal.as_str());
+        let class = outcome_calibration_class(&event);
+        if !class_observations.contains_key(&class)
+            && class_observations.len() >= MAX_OUTCOME_CALIBRATION_CLASSES
+        {
+            return Err(DomainError::Usage {
+                message: format!(
+                    "Outcome calibration exceeds its {MAX_OUTCOME_CALIBRATION_CLASSES}-class report budget; no partial report was returned."
+                ),
+                repair: Some(
+                    "Narrow --since/--until to include fewer distinct recorded situation classes."
+                        .to_owned(),
+                ),
+            });
+        }
+        observations.push((prediction, helpful));
+        class_observations
+            .entry(class.clone())
+            .or_default()
+            .push((prediction, helpful));
+        honesty_observations.push((class.clone(), helpful));
+        *source_counts.entry(event.source_type.clone()).or_default() += 1;
+        let canonical = serde_json::json!({
+            "workspaceId": workspace_id,
+            "eventId": event.id,
+            "targetType": event.target_type,
+            "targetId": event.target_id,
+            "sourceType": event.source_type,
+            "recordedAt": outcome_calibration_timestamp(created),
+            "auditId": audit_id,
+            "predicted": prediction,
+            "helpful": helpful,
+            "situationClass": class,
+        })
+        .to_string();
+        table_hasher.update(&(canonical.len() as u64).to_be_bytes());
+        table_hasher.update(canonical.as_bytes());
+    }
+    let calibration = compute_calibration(&observations, options.bucket_count);
+    let classes = class_observations
+        .into_iter()
+        .map(|(class, observations)| {
+            (
+                class,
+                compute_calibration(&observations, options.bucket_count),
+            )
+        })
+        .collect();
+    Ok(OutcomeCalibrationReport {
+        workspace_id: crate::models::public_workspace_id(workspace_id),
+        since: outcome_calibration_timestamp(since),
+        until: outcome_calibration_timestamp(until),
+        event_limit: options.event_limit,
+        scanned_events,
+        outside_window_count,
+        invalid_timestamp_count,
+        events_in_window,
+        audit_limit,
+        scanned_audit_rows,
+        exclusions,
+        source_counts,
+        calibration,
+        classes,
+        honesty: calibration_honesty_report(&honesty_observations, CALIBRATION_HONESTY_MIN_SAMPLES),
+        honesty_mode: options.honesty,
+        table_hash: format!("blake3:{}", table_hasher.finalize().to_hex()),
+    })
+}
+
+#[cfg(test)]
+mod outcome_calibration_tests {
+    use super::*;
+    use serde_json::json;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+    const WORKSPACE: &str = "wsp_00000000000000000000000001";
+    const OTHER_WORKSPACE: &str = "wsp_00000000000000000000000002";
+    const SINCE: &str = "2026-01-01T00:00:00.000000001Z";
+    const UNTIL: &str = "2026-01-02T00:00:00.000000001Z";
+
+    fn fixture() -> crate::db::Result<DbConnection> {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        for (id, path) in [
+            (WORKSPACE, "/calibration"),
+            (OTHER_WORKSPACE, "/other-calibration"),
+        ] {
+            connection.insert_workspace(
+                id,
+                &crate::db::CreateWorkspaceInput {
+                    path: path.to_owned(),
+                    name: Some("calibration".to_owned()),
+                },
+            )?;
+        }
+        Ok(connection)
+    }
+
+    fn options() -> OutcomeCalibrationOptions {
+        OutcomeCalibrationOptions {
+            workspace_path: PathBuf::from("/calibration"),
+            database_path: None,
+            since: SINCE.to_owned(),
+            until: UNTIL.to_owned(),
+            bucket_count: 5,
+            event_limit: 1000,
+            honesty: false,
+        }
+    }
+
+    fn event(number: u32) -> StoredFeedbackEvent {
+        StoredFeedbackEvent {
+            id: format!("fb_{number:026}"),
+            workspace_id: WORKSPACE.to_owned(),
+            target_type: "memory".to_owned(),
+            target_id: format!("mem_{number:026}"),
+            signal: "helpful".to_owned(),
+            weight: 1.0,
+            source_type: "outcome_observed".to_owned(),
+            source_id: None,
+            reason: None,
+            evidence_json: Some(json!({"situationClass": "release"}).to_string()),
+            session_id: None,
+            applied_at: Some("2026-01-03T00:00:00Z".to_owned()),
+            created_at: "2026-01-01T12:00:00Z".to_owned(),
+        }
+    }
+
+    fn prediction(
+        connection: &DbConnection,
+        event: &StoredFeedbackEvent,
+        number: u32,
+        value: serde_json::Value,
+    ) -> crate::db::Result<()> {
+        let (action, field) = if event.target_type == "memory" {
+            (audit_actions::OUTCOME_BAYES_UPDATE, "priorMean")
+        } else {
+            (audit_actions::RULE_MARK, "confidenceBefore")
+        };
+        connection.insert_audit(
+            &format!("audit_{number:026}"),
+            &CreateAuditInput {
+                workspace_id: Some(event.workspace_id.clone()),
+                actor: None,
+                action: action.to_owned(),
+                target_type: Some(event.target_type.clone()),
+                target_id: Some(event.target_id.clone()),
+                details: Some(json!({"feedbackEventId": event.id, (field): value}).to_string()),
+            },
+        )
+    }
+
+    fn collect(
+        connection: &DbConnection,
+        options: &OutcomeCalibrationOptions,
+    ) -> Result<OutcomeCalibrationReport, DomainError> {
+        collect_outcome_calibration(
+            connection,
+            WORKSPACE,
+            options,
+            outcome_calibration_instant(&options.since, "since")?,
+            outcome_calibration_instant(&options.until, "until")?,
+        )
+    }
+
+    #[test]
+    fn calibration_joins_historical_memory_and_rule_predictions_in_exact_offset_window()
+    -> TestResult {
+        let connection = fixture()?;
+        let mut first = event(1);
+        first.created_at = "2025-12-31T19:00:00.000000001-05:00".to_owned();
+        first.weight = 10.0;
+        first.source_type = "human_explicit".to_owned();
+        let mut second = event(2);
+        second.target_type = "rule".to_owned();
+        second.target_id = "rule_00000000000000000000000002".to_owned();
+        second.created_at = "2026-01-01T14:00:00.000000002+14:00".to_owned();
+        second.signal = "harmful".to_owned();
+        second.source_type = "agent_inference".to_owned();
+        second.evidence_json = Some(json!({"situationClass": "testing"}).to_string());
+        let mut before = event(3);
+        before.created_at = "2026-01-01T00:00:00Z".to_owned();
+        let mut at_until = event(4);
+        at_until.created_at = "2026-01-01T19:00:00.000000001-05:00".to_owned();
+        let mut other = event(5);
+        other.workspace_id = OTHER_WORKSPACE.to_owned();
+        for row in [&at_until, &second, &before, &first, &other] {
+            connection.insert_feedback_event_for_recovery(row)?;
+        }
+        // These audits are recorded after the observation window. Predictions
+        // remain usable even without a current live memory/rule row.
+        prediction(&connection, &first, 1, json!(0.8))?;
+        prediction(&connection, &second, 2, json!(0.4))?;
+        let options = options();
+        let report = collect(&connection, &options)?;
+        assert_eq!(report.scanned_events, 4);
+        assert_eq!(report.outside_window_count, 2);
+        assert_eq!(report.events_in_window, 2);
+        assert_eq!(
+            report.calibration.sample_count, 2,
+            "weight is not trial multiplicity"
+        );
+        assert!(
+            (report
+                .calibration
+                .brier_score
+                .ok_or("missing Brier score")?
+                - 0.1)
+                .abs()
+                < 1e-12
+        );
+        assert_eq!(report.classes.len(), 2);
+        assert_eq!(report.source_counts["human_explicit"], 1);
+        assert_eq!(report.source_counts["agent_inference"], 1);
+        assert_eq!(
+            report.data_json(),
+            collect(&connection, &options)?.data_json()
+        );
+        let honesty = collect(
+            &connection,
+            &OutcomeCalibrationOptions {
+                honesty: true,
+                ..options
+            },
+        )?;
+        assert_eq!(
+            report.table_hash, honesty.table_hash,
+            "both modes use the same population"
+        );
+        assert!(honesty.honesty.classes.iter().all(|class| class.abstained));
+        assert_eq!(connection.list_feedback_events(WORKSPACE)?.len(), 4);
+        assert_eq!(
+            connection.list_audit_entries(Some(WORKSPACE), None)?.len(),
+            2
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn calibration_accounts_for_ineligible_and_unproved_events_without_current_score_fallback()
+    -> TestResult {
+        let connection = fixture()?;
+        let mut rows = (1..=15).map(event).collect::<Vec<_>>();
+        rows[4].weight = 0.0;
+        rows[5].signal = "neutral".to_owned();
+        rows[6].source_type = "automated_check".to_owned();
+        rows[7].applied_at = None;
+        rows[8].target_type = "pack".to_owned();
+        rows[9].applied_at = Some("invalid".to_owned());
+        rows[13].created_at = "2026-01-01Tinvalid".to_owned();
+        rows[14].created_at = "2026-01-01T00:00:00Z".to_owned();
+        for row in &rows {
+            connection.insert_feedback_event_for_recovery(row)?;
+        }
+        prediction(&connection, &rows[0], 1, json!(0.2))?;
+        prediction(&connection, &rows[2], 2, json!(0.5))?;
+        prediction(&connection, &rows[2], 3, json!(0.5))?;
+        prediction(&connection, &rows[3], 4, json!(1.1))?;
+        let mut foreign = rows[10].clone();
+        foreign.workspace_id = OTHER_WORKSPACE.to_owned();
+        prediction(&connection, &foreign, 5, json!(0.9))?;
+        let mut wrong_type = rows[11].clone();
+        wrong_type.target_type = "rule".to_owned();
+        prediction(&connection, &wrong_type, 6, json!(0.9))?;
+        let mut wrong_target = rows[12].clone();
+        wrong_target.target_id = "mem_00000000000000000000000999".to_owned();
+        prediction(&connection, &wrong_target, 7, json!(0.9))?;
+        let report = collect(&connection, &options())?;
+        assert_eq!(report.scanned_events, 15);
+        assert_eq!(report.events_in_window, 13);
+        assert_eq!(report.invalid_timestamp_count, 1);
+        assert_eq!(report.outside_window_count, 1);
+        assert_eq!(report.calibration.sample_count, 1);
+        assert_eq!(report.exclusions.values().sum::<u32>(), 12);
+        for (reason, count) in [
+            ("missing_prediction_audit", 4),
+            ("ambiguous_prediction_audit", 1),
+            ("invalid_prediction_audit", 1),
+            ("non_positive_or_invalid_weight", 1),
+            ("non_binary_signal", 1),
+            ("non_observational_source", 1),
+            ("unapplied_event", 1),
+            ("unsupported_target", 1),
+            ("invalid_application_timestamp", 1),
+        ] {
+            assert_eq!(report.exclusions.get(reason), Some(&count), "{reason}");
+        }
+        assert_eq!(
+            report.events_in_window,
+            report.calibration.sample_count + report.exclusions.values().sum::<u32>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn calibration_refuses_candidate_and_lifetime_audit_overflow() -> TestResult {
+        let connection = fixture()?;
+        let first = event(1);
+        connection.insert_feedback_event_for_recovery(&first)?;
+        connection.insert_feedback_event_for_recovery(&event(2))?;
+        let mut options = options();
+        options.event_limit = 1;
+        let error = collect(&connection, &options)
+            .expect_err("candidate overflow must not yield partial calibration");
+        assert!(
+            error
+                .to_string()
+                .contains("candidate scan exceeds event-limit 1")
+        );
+        options.event_limit = 2;
+        for number in 1..=9 {
+            prediction(&connection, &first, number, json!(0.5))?;
+        }
+        let error =
+            collect(&connection, &options).expect_err("lifetime audit overflow must be explicit");
+        assert!(
+            error
+                .to_string()
+                .contains("historical-audit scan exceeds its 8-row budget")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn calibration_classes_withhold_secret_shaped_labels_without_discarding_the_observation()
+    -> TestResult {
+        let connection = fixture()?;
+        let secret_shape = format!("ghp_{}", "Q".repeat(36));
+        let labels = [
+            "rust_ci.v2".to_owned(),
+            "path/to/private".to_owned(),
+            secret_shape.clone(),
+            "x".repeat(65),
+            String::new(),
+        ];
+        for (index, label) in labels.iter().enumerate() {
+            let number = index as u32 + 1;
+            let mut row = event(number);
+            row.evidence_json = Some(json!({"situationClass": label}).to_string());
+            connection.insert_feedback_event_for_recovery(&row)?;
+            prediction(&connection, &row, number, json!(0.5))?;
+        }
+        let report = collect(&connection, &options())?;
+        assert_eq!(report.calibration.sample_count, 5);
+        assert_eq!(report.classes["rust_ci.v2"].sample_count, 1);
+        assert_eq!(report.classes["unclassified"].sample_count, 4);
+        let output = report.data_json().to_string();
+        assert!(!output.contains(&secret_shape));
+        assert!(!report.human_summary().contains(&secret_shape));
+        Ok(())
+    }
+
+    #[test]
+    fn calibration_refuses_class_bucket_cross_product_overflow() -> TestResult {
+        let connection = fixture()?;
+        for number in 0..=MAX_OUTCOME_CALIBRATION_CLASSES as u32 {
+            let mut row = event(number);
+            row.evidence_json =
+                Some(json!({"situationClass": format!("class_{number}")}).to_string());
+            connection.insert_feedback_event_for_recovery(&row)?;
+            prediction(&connection, &row, number, json!(0.5))?;
+        }
+        for honesty in [false, true] {
+            let error = collect(
+                &connection,
+                &OutcomeCalibrationOptions {
+                    honesty,
+                    ..options()
+                },
+            )
+            .expect_err("both modes must refuse too many admitted classes");
+            assert!(error.to_string().contains("256-class report budget"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn empty_calibration_abstains_and_binds_its_workspace_and_window() -> TestResult {
+        let connection = fixture()?;
+        let options = options();
+        let first = collect(&connection, &options)?;
+        let output = first.data_json();
+        assert_eq!(output["assessment"], "insufficient_data");
+        assert!(output["brierScore"].is_null());
+        assert!(output["recalibration"].is_null());
+        assert_eq!(output["sampleCount"], 0);
+        assert!(first.classes.is_empty());
+        let changed_window = collect(
+            &connection,
+            &OutcomeCalibrationOptions {
+                since: "2026-01-01T01:00:00Z".to_owned(),
+                ..options.clone()
+            },
+        )?;
+        assert_ne!(first.table_hash, changed_window.table_hash);
+        let other = collect_outcome_calibration(
+            &connection,
+            OTHER_WORKSPACE,
+            &options,
+            outcome_calibration_instant(SINCE, "since")?,
+            outcome_calibration_instant(UNTIL, "until")?,
+        )?;
+        assert_ne!(first.table_hash, other.table_hash);
+        Ok(())
     }
 }
 
