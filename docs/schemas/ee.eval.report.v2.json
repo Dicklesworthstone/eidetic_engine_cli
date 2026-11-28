@@ -73,6 +73,14 @@
         }
       }
     },
+    "semantic_recall": {
+      "type": "object",
+      "description": "Semantic recall report (schema ee.eval.semantic_recall_report.v1) comparing semantic recall@k against the hash baseline. Omitted unless the fixture declares semantic recall expectations."
+    },
+    "ask_quality": {
+      "type": "object",
+      "description": "Ask quality report (schema ee.eval.ask_report.v1) with the aggregate verdict and per-case drift and regression counts. Omitted unless the fixture declares ask quality expectations."
+    },
     "duration_ms": { "type": "number", "minimum": 0 },
     "data_hash": { "type": "string" }
   },

@@ -68,6 +68,10 @@
         "fallbackReason": { "type": ["string", "null"] }
       }
     },
+    "selectorAdmission": {
+      "type": "object",
+      "description": "RCH worker-selection admission evidence: status, required runtime, workers reported, selected worker or failure reason, remote-required and local-fallback-refused flags, and an admissionBlocker when admission was refused. Omitted when no selector evidence was recorded."
+    },
     "outputSummary": {
       "type": "object",
       "required": ["stdoutTail", "stderrTail", "redacted"],

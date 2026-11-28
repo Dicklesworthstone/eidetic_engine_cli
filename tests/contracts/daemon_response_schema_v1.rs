@@ -732,6 +732,13 @@ fn daemon_search_request_v2_schema_accepts_only_canonical_enum_values() -> TestR
         }
     }
 
+    // DaemonSearchParams serializes failIfWarming when true and the server
+    // accepts it under deny_unknown_fields, so the strict schema must too.
+    let mut fail_if_warming = base.clone();
+    fail_if_warming["failIfWarming"] = serde_json::json!(true);
+    validate_json_schema(&fail_if_warming, &schema, "$")
+        .map_err(|error| format!("request schema rejected failIfWarming: {error}"))?;
+
     let mut blank_query = base;
     blank_query["query"] = serde_json::json!("   \t");
     if validate_json_schema(&blank_query, &schema, "$").is_ok() {

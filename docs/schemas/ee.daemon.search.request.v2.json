@@ -16,6 +16,11 @@
     "speed": { "type": "string", "enum": ["instant", "default", "quality"] },
     "explain": { "type": "boolean" },
     "explainPerformance": { "type": "boolean" },
+    "failIfWarming": {
+      "type": "boolean",
+      "default": false,
+      "description": "Refuse an embedding-backed request while the daemon is still warming, unless requireCachedLocalEmbedder lets a current hybrid request run model-free from an admitted lexical source snapshot. Omitted when false."
+    },
     "requireCachedLocalEmbedder": {
       "type": "boolean",
       "default": false,
