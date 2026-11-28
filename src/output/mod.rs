@@ -11704,6 +11704,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: outcome_harvest_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::outcome::OUTCOME_TRACE_SCHEMA_V1,
+            version: "1",
+            description: "Accepted memory feedback, learning updates, and quarantine review receipts",
+            category: "memory",
+            definition: outcome_trace_schema_definition,
+        },
+        SchemaEntry {
             id: crate::models::OUTCOME_CALIBRATION_SCHEMA_V1,
             version: "1",
             description: "Read-only reliability buckets and Brier scores from historical pre-outcome predictions in an explicit window",
@@ -13559,6 +13566,10 @@ fn learn_gaps_schema_definition() -> String {
 
 fn outcome_harvest_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.outcome.harvest.v1.json").to_string()
+}
+
+fn outcome_trace_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.outcome.trace.v1.json").to_string()
 }
 
 fn outcome_calibration_schema_definition() -> String {

@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.outcome.trace.v1.json",
+  "title": "ee.outcome.trace.v1",
+  "description": "The data object from ee outcome trace. Accepted events and quarantine receipts have distinct lifecycles. Each array is present even when empty.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "memoryId", "eventCount", "quarantinedCount",
+    "bayesUpdatesApplied", "trustTransitions", "events", "quarantine"
+  ],
+  "properties": {
+    "schema": { "const": "ee.outcome.trace.v1" },
+    "version": { "type": "string" },
+    "memoryId": { "type": "string" },
+    "eventCount": { "type": "integer", "minimum": 0, "description": "Number of accepted events in events." },
+    "quarantinedCount": { "type": "integer", "minimum": 0, "description": "Number of accepted events released from quarantine." },
+    "bayesUpdatesApplied": { "type": "integer", "minimum": 0 },
+    "trustTransitions": { "type": "integer", "minimum": 0 },
+    "events": { "type": "array", "items": { "$ref": "#/$defs/event" } },
+    "quarantine": { "type": "array", "items": { "$ref": "#/$defs/quarantineReceipt" } }
+  },
+  "$defs": {
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eventId", "signal", "weight", "sourceType", "recordedAt", "reasonPresent", "quarantined"],
+      "properties": {
+        "eventId": { "type": "string" },
+        "signal": { "type": "string" },
+        "weight": { "type": "number" },
+        "sourceType": { "type": "string" },
+        "recordedAt": { "type": "string" },
+        "reasonPresent": { "type": "boolean" },
+        "quarantined": { "type": "boolean" },
+        "priorMean": { "type": "number" },
+        "posteriorMean": { "type": "number" },
+        "trustTransition": { "type": "string" }
+      }
+    },
+    "quarantineReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["quarantineId", "status", "proposedEventId", "releasedFeedbackEventId", "recordedAt", "reviewedAt"],
+      "properties": {
+        "quarantineId": { "type": "string" },
+        "status": { "enum": ["pending", "released", "rejected"] },
+        "proposedEventId": { "type": ["string", "null"] },
+        "releasedFeedbackEventId": { "type": ["string", "null"] },
+        "recordedAt": { "type": "string" },
+        "reviewedAt": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

@@ -834,3 +834,52 @@ fn trace_never_creates_a_missing_custom_database() -> TestResult {
     assert!(!database.exists());
     Ok(())
 }
+
+#[test]
+fn trace_schema_export_covers_the_golden_and_an_empty_live_trace() -> TestResult {
+    let schema_id = crate::core::outcome::OUTCOME_TRACE_SCHEMA_V1;
+    assert!(crate::models::schema::is_known_schema(schema_id));
+    let (exit, stdout, stderr) = invoke(&["ee", "schema", "export", schema_id, "--json"]);
+    assert_eq!(exit, ProcessExitCode::Success, "{stdout}\n{stderr}");
+    let schema: serde_json::Value = serde_json::from_str(&stdout)?;
+    let documented: serde_json::Value = serde_json::from_str(include_str!(
+        "../../docs/schemas/ee.outcome.trace.v1.json"
+    ))?;
+    assert_eq!(schema, documented);
+    let golden: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/golden/journal_capture/outcome_trace.json.golden"
+    ))?;
+    let data = &golden["data"];
+    assert_eq!(data["schema"], schema["properties"]["schema"]["const"]);
+    assert_exported_fields(&schema, data)?;
+    for event in data["events"].as_array().ok_or("missing golden events")? {
+        assert_exported_fields(&schema["$defs"]["event"], event)?;
+    }
+    for receipt in data["quarantine"]
+        .as_array()
+        .ok_or("missing golden receipts")?
+    {
+        assert_exported_fields(&schema["$defs"]["quarantineReceipt"], receipt)?;
+    }
+
+    let fixture = HarvestFixture::new()?;
+    let (exit, stdout, stderr) = invoke(&[
+        "ee",
+        "--workspace",
+        fixture.workspace.to_str().ok_or("non-UTF-8 workspace")?,
+        "--json",
+        "outcome",
+        "trace",
+        &fixture.memory_id,
+        "--database",
+        fixture.database.to_str().ok_or("non-UTF-8 database")?,
+    ]);
+    assert_eq!(exit, ProcessExitCode::Success, "{stdout}\n{stderr}");
+    let empty: serde_json::Value = serde_json::from_str(&stdout)?;
+    assert_exported_fields(&schema, &empty["data"])?;
+    assert_eq!(empty["data"]["events"], serde_json::json!([]));
+    assert_eq!(empty["data"]["quarantine"], serde_json::json!([]));
+    assert_eq!(empty["data"]["eventCount"], 0);
+    assert_eq!(empty["data"]["quarantinedCount"], 0);
+    Ok(())
+}
