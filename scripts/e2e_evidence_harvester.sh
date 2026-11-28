@@ -115,7 +115,7 @@ if ee_lists_outcome_sub calibration; then
         '(.data.brierScore == null) or ((.data.brierScore | type) == "number")' \
         "calibration emits a Brier score field"
 else
-    log_drop 1 "calibration CLI pending (bd-1n0np.2.6): reliability-bucket + Brier assertions skipped"
+    log_drop 1 "calibration CLI not built (bd-p5wa2; the core shipped in bd-1n0np.2.6): reliability-bucket + Brier assertions skipped"
 fi
 
 end_temp_workspace

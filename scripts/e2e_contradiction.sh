@@ -7,7 +7,8 @@
 #      contradiction edge (the explicit-evidence the detector keys on, 7.2).
 #   2. `ee conflict list` ranks the conflicting pair (bd-1n0np.7.3).
 #   3. `ee curate contradictions` proposes a resolution; resolve via scope-split
-#      then supersede (bd-1n0np.7.4).
+#      then supersede (bd-1n0np.7.4). That subcommand was never built, so this
+#      step skips; resolution ships as `ee conflict resolve`.
 #   4. a pack on the topic suppresses the losing side (contradiction_suppressed),
 #      confirmed via `ee why-not` (bd-1n0np.7.5).
 #   5. forced-mode pack surfaces BOTH sides under a Contradictions header, capped
@@ -110,7 +111,10 @@ if ee_supports curate contradictions; then
     won_side="$(printf '%s' "$curated" | jq -r 'first(.. | objects | (.winner // .supersededBy // empty)) // "<unresolved>"')"
     e2e_log_note "resolution winner=$won_side"
 else
-    log_drop 1 "ee curate contradictions pending (bd-1n0np.7.4): resolution assertions skipped"
+    # No `curate contradictions` subcommand was built. Audited resolution
+    # ships as `ee conflict resolve <a> <b> --verb ...` (bd-3a1op.4),
+    # covered by tests/e2e_curate_review_actions.rs.
+    log_drop 1 "ee curate contradictions absent (resolution is ee conflict resolve): resolution assertions skipped"
 fi
 
 step "pack suppresses the losing side; why-not confirms (bd-1n0np.7.5)"
