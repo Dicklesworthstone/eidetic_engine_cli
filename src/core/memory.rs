@@ -1916,22 +1916,19 @@ fn remember_memory_outcome_inner_with_store_and_batch_session(
         observed_at_ms: u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
     };
     let is_batch_session = owned_session.is_none();
-    // Outside the workspace lock, like the embedding work above: a concurrent
-    // write still in flight is missed, which can only withhold a hold.
+    // The write that wins the workspace lock publishes before the next writer
+    // decides whether to hold its memory. Keep the decision (including its
+    // hold ID) stable across retries of that memory's primary transaction.
+    let workspace_write_lock =
+        acquire_remember_workspace_lock(&connection, &prepared.workspace_id, &memory_id)?;
     let write_immune_hold = remember_write_immune_hold(
-        &connection,
+        &workspace_write_lock,
         &write_operation,
         origin,
         is_batch_session,
         &session.write_immune_thresholds,
         &memory_id,
     )?;
-    // Serialize only source-of-truth mutations. Expensive embedding
-    // preparation above and derived index publication below have their own
-    // consistency boundaries and must not consume another writer's
-    // workspace-lock budget.
-    let workspace_write_lock =
-        acquire_remember_workspace_lock(&connection, &prepared.workspace_id, &memory_id)?;
     let embed_dedup_decision = remember_embed_dedup_decision_from_probe_with_batch_session(
         &connection,
         &memory_input,
@@ -5490,7 +5487,7 @@ struct PreparedRememberWriteImmuneHold {
 /// `--batch` session is bulk capture too, so in one only the near-duplicate
 /// ratio can trip, never the write ceiling.
 fn remember_write_immune_hold(
-    connection: &DbConnection,
+    guard: &RememberWorkspaceWriteLock<'_>,
     write_operation: &crate::core::write_owner::WriteOperation,
     origin: RememberWriteOrigin,
     is_batch_session: bool,
@@ -5510,13 +5507,16 @@ fn remember_write_immune_hold(
     let WriteOperation::MemoryCreate { workspace_id, .. } = write_operation else {
         return Ok(None);
     };
-    let Some(current) = write_operation.write_stream_observation() else {
+    let Some(mut current) = write_operation.write_stream_observation() else {
         return Ok(None);
     };
     // A whitelisted agent's decision is always allow, which holds nothing.
     if thresholds.source_whitelist.contains(&current.source_id) {
         return Ok(None);
     }
+    // The intake timestamp may precede writes committed while this writer
+    // waited. Use the time at which it can actually observe its predecessors.
+    current.observed_at_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
     let window_end_ms = current.observed_at_ms;
     let window_start_ms = window_end_ms.saturating_sub(DEFAULT_WRITE_STREAM_WINDOW_MS);
     // Count this source's writes, independent of other agents sharing the
@@ -5526,13 +5526,19 @@ fn remember_write_immune_hold(
     let limit = thresholds
         .max_writes_per_window
         .max(REMEMBER_WRITE_IMMUNE_MIN_WRITES) as usize;
-    let min_id = memory_id_bound_at_ms(window_start_ms, false);
+    // IDs are minted before acquiring the lease, while created_at is stamped
+    // on insertion. Include the queue wait allowance in the indexed candidate
+    // range; the timestamp check below still enforces the exact hour.
+    let candidate_start_ms =
+        window_start_ms.saturating_sub(REMEMBER_WORKSPACE_LOCK_MAX_WAIT.as_millis() as u64);
+    let min_id = memory_id_bound_at_ms(candidate_start_ms, false);
     let max_id = memory_id_bound_at_ms(window_end_ms, true);
     let page_size = limit.min(PAGE_ROWS as usize) as u32;
     let mut before_id = None;
     let mut prior = Vec::new();
     while prior.len() < limit {
-        let rows = connection
+        let rows = guard
+            .connection
             .list_write_source_candidates(
                 workspace_id,
                 &min_id,
@@ -25075,6 +25081,46 @@ mod tests {
             released.status.as_str(),
             "released",
             "the hold is reviewable",
+        )
+    }
+
+    #[test]
+    fn queued_remember_observes_writes_committed_after_its_intake() -> TestResult {
+        let workspace = upgrade_test_workspace()?;
+        let content = "Retry the flaky upload step.";
+        let first = remember_as(workspace.path(), content, Some("queued-agent"))?;
+        let operation = crate::core::write_owner::WriteOperation::MemoryCreate {
+            workspace_id: first.workspace_id.clone(),
+            content: content.to_owned(),
+            level: first.level.as_str().to_owned(),
+            kind: first.kind.as_str().to_owned(),
+            tags: Vec::new(),
+            source_id: Some("queued-agent".to_owned()),
+            trust_class: "agent_asserted".to_owned(),
+            provenance_uri: None,
+            // Deterministically place intake before the other writers' IDs.
+            observed_at_ms: 0,
+        };
+        for _ in 1..crate::core::write_owner::REMEMBER_WRITE_IMMUNE_MIN_WRITES - 1 {
+            remember_as(workspace.path(), content, Some("queued-agent"))?;
+        }
+        let db = open_upgrade_test_db(workspace.path())?;
+        let id = MemoryId::now().to_string();
+        let guard = acquire_remember_workspace_lock(&db, &first.workspace_id, &id)
+            .map_err(|error| error.message())?;
+        let held = remember_write_immune_hold(
+            &guard,
+            &operation,
+            RememberWriteOrigin::Manual,
+            false,
+            &crate::core::write_owner::remember_write_immune_config(),
+            &id,
+        )
+        .map_err(|error| error.message())?;
+        ensure(
+            held.map(|hold| hold.report.reason_codes),
+            Some(vec!["near_duplicate_ratio_exceeded".to_owned()]),
+            "a queued writer counts predecessors visible when it acquires the lease",
         )
     }
 
