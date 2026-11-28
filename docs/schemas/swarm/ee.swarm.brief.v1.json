@@ -133,6 +133,7 @@
       "agentInventory",
       "toolchainProvenance",
       "recommendations",
+      "knowledgeGaps",
       "degraded"
     ],
     "standard": ["*"],

@@ -97976,6 +97976,23 @@ mod tests {
                 "reasons": ["no_relevant_results"],
             }),
             "summary keeps the most-missed gap first, in the schema's camelCase",
+        )?;
+
+        // An explicit `--fields summary` re-projects through the preset list,
+        // which must name the key or it strips what the renderer emitted.
+        let rendered = super::render_swarm_brief_json(&report, output::FieldProfile::Summary)
+            .map_err(|error| error.message())?;
+        let selected = output::apply_field_selector_to_json(
+            &rendered,
+            &output::FieldSelector::parse("summary"),
+        )
+        .map_err(|error| error.message())?;
+        let selected: serde_json::Value =
+            serde_json::from_str(&selected).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &selected["data"]["knowledgeGaps"].as_array().map(Vec::len),
+            &Some(5),
+            "explicit --fields summary keeps knowledgeGaps",
         )
     }
 

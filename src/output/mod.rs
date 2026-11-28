@@ -2536,6 +2536,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "agentInventory",
                 "toolchainProvenance",
                 "recommendations",
+                "knowledgeGaps",
                 "degraded",
             ],
             FieldProfile::Standard | FieldProfile::Full => &["*"],
