@@ -14,7 +14,7 @@
       {
         "eventId": "fb_journal_capture_001",
         "signal": "helpful",
-        "weight": 1.0,
+        "weight": 1,
         "sourceType": "human",
         "recordedAt": "2026-06-12T12:10:00Z",
         "reasonPresent": true,
@@ -26,11 +26,21 @@
       {
         "eventId": "fb_journal_capture_002",
         "signal": "harmful",
-        "weight": 1.0,
+        "weight": 1,
         "sourceType": "automated_check",
         "recordedAt": "2026-06-12T12:11:00Z",
         "reasonPresent": false,
         "quarantined": true
+      }
+    ],
+    "quarantine": [
+      {
+        "quarantineId": "fq_00000000000000000000000002",
+        "status": "released",
+        "proposedEventId": "fb_journal_capture_002",
+        "releasedFeedbackEventId": "fb_journal_capture_002",
+        "recordedAt": "2026-06-12T12:10:30Z",
+        "reviewedAt": "2026-06-12T12:11:00Z"
       }
     ]
   }

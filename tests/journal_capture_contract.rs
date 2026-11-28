@@ -5,7 +5,9 @@ use std::process::Command;
 
 use ee::core::journal::{JOURNAL_DISTILL_SCHEMA_V1, JOURNAL_ENTRY_SCHEMA_V1};
 use ee::core::memory::{RememberBatchLineResult, RememberBatchReport};
-use ee::core::outcome::{OUTCOME_TRACE_SCHEMA_V1, OutcomeTraceEvent, OutcomeTraceReport};
+use ee::core::outcome::{
+    OUTCOME_TRACE_SCHEMA_V1, OutcomeTraceEvent, OutcomeTraceQuarantine, OutcomeTraceReport,
+};
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
@@ -302,6 +304,14 @@ fn outcome_trace_golden() -> Result<Value, String> {
                 trust_transition: None,
             },
         ],
+        quarantine: vec![OutcomeTraceQuarantine {
+            quarantine_id: "fq_00000000000000000000000002".to_owned(),
+            status: "released".to_owned(),
+            proposed_event_id: Some("fb_journal_capture_002".to_owned()),
+            released_feedback_event_id: Some("fb_journal_capture_002".to_owned()),
+            recorded_at: "2026-06-12T12:10:30Z".to_owned(),
+            reviewed_at: Some("2026-06-12T12:11:00Z".to_owned()),
+        }],
     };
     let data = serde_json::to_value(report)
         .map_err(|error| format!("serialize outcome trace golden: {error}"))?;
