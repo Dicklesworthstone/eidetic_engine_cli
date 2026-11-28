@@ -62,6 +62,31 @@
       "surface": "orient",
       "command": "orient",
       "schema_file": "ee.orient.v1.json"
+    },
+    {
+      "surface": "evidence_rescreen",
+      "command": "evidence rescreen",
+      "schema_file": "ee.evidence.security_rescreen.v1.json"
+    },
+    {
+      "surface": "evidence_withdraw",
+      "command": "evidence withdraw",
+      "schema_file": "ee.evidence.withdraw.v1.json"
+    },
+    {
+      "surface": "evidence_withdraw_session",
+      "command": "evidence withdraw-session",
+      "schema_file": "ee.evidence.withdraw_session.v1.json"
+    },
+    {
+      "surface": "index_backfill_anchors",
+      "command": "index backfill-anchors",
+      "schema_file": "ee.index.backfill_anchors.v1.json"
+    },
+    {
+      "surface": "memory_anchors",
+      "command": "memory anchors",
+      "schema_file": "ee.memory.anchors.v1.json"
     }
   ]
 }
