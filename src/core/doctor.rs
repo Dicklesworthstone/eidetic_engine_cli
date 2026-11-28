@@ -2003,19 +2003,36 @@ impl IntegrityDiagnosticsReport {
             format!("Database found at {}.", database_path.display()),
         ));
 
-        let connection = match DbConnection::open_file(&database_path) {
-            Ok(connection) => connection,
-            Err(error) => {
-                checks.push(IntegrityDiagnosticCheck::error(
-                    "database_open",
+        // Even a read-only engine open may initialize an empty store or touch
+        // its sidecars. Inspect the selected file before handing it to the
+        // engine, including when --database selects a non-workspace path.
+        let opened = if let Some((code, reason)) = unreadable_database_file(&database_path) {
+            Err((
+                format!("Database left unopened: {reason}."),
+                code.default_repair,
+            ))
+        } else {
+            let result = if options.create_canary && !options.dry_run {
+                DbConnection::open_file(&database_path)
+            } else {
+                DbConnection::open_file_read_only(&database_path)
+            };
+            result.map_err(|error| {
+                (
                     format!("Failed to open database: {error}"),
                     Some("ee doctor --json"),
-                ));
+                )
+            })
+        };
+        let connection = match opened {
+            Ok(connection) => connection,
+            Err((message, repair)) => {
+                checks.push(IntegrityDiagnosticCheck::error("database_open", message, repair));
                 degraded.push(IntegrityDiagnosticDegradation {
                     code: "integrity_database_open_failed",
                     severity: "high",
                     message: "The database exists but could not be opened.".to_string(),
-                    repair: Some("ee doctor --json"),
+                    repair,
                 });
                 let canary = canary_for_open_failure(options);
                 return Self::finalize(
@@ -3288,10 +3305,13 @@ fn empty_database_message(workspace_path: &Path, database_path: &Path) -> String
 /// A missing database is not reported here; its own checks handle it. Damage
 /// the header cannot show is left to the normal open path.
 pub(crate) fn database_unreadable(workspace_path: &Path) -> Option<(ErrorCode, String)> {
+    unreadable_database_file(&workspace_path.join(".ee").join("ee.db"))
+}
+
+fn unreadable_database_file(database_path: &Path) -> Option<(ErrorCode, String)> {
     use std::io::Read as _;
 
-    let database_path = workspace_path.join(".ee").join("ee.db");
-    let metadata = std::fs::metadata(&database_path).ok()?;
+    let metadata = std::fs::metadata(database_path).ok()?;
     if !metadata.is_file() {
         return None;
     }
@@ -3309,7 +3329,7 @@ pub(crate) fn database_unreadable(workspace_path: &Path) -> Option<(ErrorCode, S
         ));
     }
     let mut header = [0_u8; 100];
-    std::fs::File::open(&database_path)
+    std::fs::File::open(database_path)
         .and_then(|mut file| file.read_exact(&mut header))
         .ok()?;
     if &header[..16] != b"SQLite format 3\0" {
@@ -7535,10 +7555,55 @@ mod tests {
     }
 
     #[test]
+    fn integrity_diagnostics_preserve_damaged_custom_databases_before_open() -> TestResult {
+        for bytes in [&b""[..], &b"SQLite format 3"[..], &[0xa5; 100][..]] {
+            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let path = temp.path().join("recovery.db");
+            std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
+            for (create_canary, dry_run) in [(false, false), (true, true), (true, false)] {
+                let report = IntegrityDiagnosticsReport::gather(&IntegrityDiagnosticsOptions {
+                    workspace_path: temp.path().to_path_buf(),
+                    database_path: Some(path.clone()),
+                    workspace_id: TEST_WORKSPACE_ID.to_owned(),
+                    sample_size: 8,
+                    create_canary,
+                    dry_run,
+                });
+                ensure(
+                    report.status,
+                    IntegrityDiagnosticsStatus::Failed,
+                    "damaged store",
+                )?;
+                ensure(
+                    report.provenance_sample.is_none(),
+                    true,
+                    "damaged database is never sampled",
+                )?;
+                ensure(
+                    std::fs::read(&path).map_err(|error| error.to_string())?,
+                    bytes.to_vec(),
+                    "original database bytes",
+                )?;
+                ensure(
+                    std::fs::read_dir(temp.path())
+                        .map_err(|error| error.to_string())?
+                        .count(),
+                    1,
+                    "no sidecar created",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn integrity_diagnostics_unmigrated_database_skips_canary() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let database_path = temp.path().join("ee.db");
         let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("CREATE TABLE unmigrated_fixture (id INTEGER PRIMARY KEY)")
             .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
 
