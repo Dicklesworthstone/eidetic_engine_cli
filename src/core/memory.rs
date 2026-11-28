@@ -803,41 +803,72 @@ pub(crate) fn screen_sandbox_import(
 
 /// Persist a sandbox artifact through the normal audited writer without
 /// granting externally produced text the manual remember authority class.
-pub(crate) fn remember_sandbox_import(
+pub(crate) fn remember_sandbox_proposal(
     options: &RememberMemoryOptions<'_>,
-) -> Result<RememberMemoryReport, DomainError> {
-    let screen = screen_sandbox_import(options.content)?;
-    let confidence = UnitScore::parse(options.confidence)
-        .map_err(|error| remember_usage_error(error.to_string()))?;
-    let source = options
-        .source
-        .filter(|source| source.starts_with("ee://sandbox-import/"))
-        .ok_or_else(|| {
-            remember_usage_error("Sandbox import requires sandbox provenance.".to_owned())
-        })?;
-    let imported_options = RememberMemoryOptions {
-        content: &screen.content,
-        confidence: confidence.into_inner().min(0.5),
-        source: Some(source),
-        allow_secret_mention: false,
-        ..options.clone()
+    replay_id: uuid::Uuid,
+    imported: bool,
+) -> Result<String, DomainError> {
+    let screen;
+    let (effective, origin) = if imported {
+        screen = screen_sandbox_import(options.content)?;
+        let confidence = UnitScore::parse(options.confidence)
+            .map_err(|error| remember_usage_error(error.to_string()))?;
+        let source = options
+            .source
+            .filter(|source| source.starts_with("ee://sandbox-import/"))
+            .ok_or_else(|| {
+                remember_usage_error("Sandbox import requires sandbox provenance.".to_owned())
+            })?;
+        (
+            RememberMemoryOptions {
+                content: &screen.content,
+                confidence: confidence.into_inner().min(0.5),
+                source: Some(source),
+                allow_secret_mention: false,
+                ..options.clone()
+            },
+            RememberWriteOrigin::SandboxImport,
+        )
+    } else {
+        (options.clone(), RememberWriteOrigin::Manual)
     };
-    validate_remember_level_kind_cross_wire(imported_options.level, imported_options.kind)?;
-    match remember_memory_outcome_inner_with_store(
-        &imported_options,
+    validate_remember_level_kind_cross_wire(effective.level, effective.kind)?;
+    // Bind the proposal's entire variable payload, including its origin.
+    // A changed scratch record cannot replay another proposal's receipt.
+    let canonical = serde_json::to_vec(&(
+        imported,
+        effective.content,
+        effective.level,
+        effective.kind,
+        effective.source,
+        effective.confidence,
+    ))
+    .map_err(|error| remember_usage_error(error.to_string()))?;
+    let hash = format!("blake3:{}", blake3::hash(&canonical).to_hex());
+    let key = format!("sandbox-apply:{replay_id}");
+    let request = RememberIdempotencyRequest {
+        key: &key,
+        request_hash: &hash,
+        legacy_request_hash: None,
+        creation_companions: RememberCreationCompanions::default(),
+    };
+    let outcome = remember_memory_outcome_inner_with_store(
+        &effective,
         &mut RememberIdSource::Ambient,
         None,
         false,
         None,
         &[],
         None,
-        None,
+        Some(request),
         RememberCreationCompanions::default(),
-        RememberWriteOrigin::SandboxImport,
-    )? {
-        RememberOutcome::Created(report) => Ok(*report),
-        _ => Err(DomainError::Storage {
-            message: "Sandbox import unexpectedly returned a replay outcome".to_owned(),
+        origin,
+    )?;
+    match outcome {
+        RememberOutcome::Created(report) => Ok(report.memory_id.to_string()),
+        RememberOutcome::AlreadyRecorded(report) => Ok(report.memory_id),
+        RememberOutcome::Reinforced(_) => Err(DomainError::Storage {
+            message: "Sandbox apply unexpectedly reinforced another memory".to_owned(),
             repair: Some("ee doctor --json".to_owned()),
         }),
     }

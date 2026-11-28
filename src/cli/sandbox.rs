@@ -16,7 +16,7 @@ use std::path::Path;
 use clap::{Args, Subcommand};
 
 use crate::core::memory::{
-    RememberMemoryOptions, remember_memory, remember_sandbox_import, screen_sandbox_import,
+    RememberMemoryOptions, remember_sandbox_proposal, screen_sandbox_import,
 };
 use crate::core::sandbox::{
     SandboxDiffSurface, SandboxProposal, SandboxSession, assemble_sandbox_diff, content_hash,
@@ -140,8 +140,62 @@ pub struct ProposeOutcome {
     pub notes: Vec<String>,
 }
 
+// A legacy session consists solely of the flattened proposal list. Once an
+// apply starts, each additive proposal also owns a stable replay identity.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct SessionDocument {
+    #[serde(flatten)]
+    session: SandboxSession,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    apply_keys: Vec<String>,
+}
+
+impl SessionDocument {
+    fn prepare_apply_keys(&mut self) -> Result<Vec<uuid::Uuid>, DomainError> {
+        let count = self
+            .session
+            .proposals
+            .iter()
+            .filter(|proposal| !matches!(proposal, SandboxProposal::Retire { .. }))
+            .count();
+        let invalid = || DomainError::Storage {
+            message: "Sandbox apply checkpoint contains invalid proposal identities.".to_owned(),
+            repair: Some("Inspect the session and restore a consistent checkpoint before retrying.".to_owned()),
+        };
+        if self.apply_keys.len() > count {
+            return Err(invalid());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut keys = Vec::with_capacity(count);
+        for value in &self.apply_keys {
+            let key = uuid::Uuid::parse_str(value).map_err(|_| invalid())?;
+            if !seen.insert(key) {
+                return Err(invalid());
+            }
+            keys.push(key);
+        }
+        while keys.len() < count {
+            let key = uuid::Uuid::now_v7();
+            self.apply_keys.push(key.to_string());
+            keys.push(key);
+        }
+        Ok(keys)
+    }
+
+    fn remaining(&self, applied: usize) -> Self {
+        Self {
+            session: remaining_after_applied_additives(&self.session, applied),
+            apply_keys: self.apply_keys[applied..].to_vec(),
+        }
+    }
+}
+
 fn load_session(workspace: &Path, name: &str) -> Result<SandboxSession, DomainError> {
-    SandboxSession::try_load(&SandboxSession::session_path(workspace, name)).map_err(|error| {
+    Ok(load_document(workspace, name)?.session)
+}
+
+fn load_document(workspace: &Path, name: &str) -> Result<SessionDocument, DomainError> {
+    crate::core::sandbox::read_session_document(&SandboxSession::session_path(workspace, name)).map_err(|error| {
         DomainError::Storage {
             message: format!("Cannot read sandbox session `{name}`: {error}"),
             repair: Some(format!("Inspect .ee/sandbox/{name}.json before retrying.")),
@@ -153,37 +207,15 @@ fn load_session(workspace: &Path, name: &str) -> Result<SandboxSession, DomainEr
 /// Applying proposals takes the same lock through the durable writes and the
 /// final checkpoint. Readers only need the atomically published JSON.
 fn lock_session(workspace: &Path, name: &str) -> Result<std::fs::File, DomainError> {
-    let directory = workspace.join(".ee").join("sandbox");
-    let acquire = || -> std::io::Result<std::fs::File> {
-        std::fs::create_dir_all(&directory)?;
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true).write(true).create(true).truncate(false);
-        #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(
-                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
-            );
-        }
-        let file = options.open(directory.join(format!("{name}.lock")))?;
-        if !file.metadata()?.is_file() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "sandbox writer lock must be a regular file",
-            ));
-        }
-        file.lock()?;
-        Ok(file)
-    };
-    acquire().map_err(|error| DomainError::Storage {
-        message: format!("Cannot lock sandbox session `{name}`: {error}"),
-        repair: Some("Check that <workspace>/.ee/sandbox is writable.".to_owned()),
-    })
+    crate::core::sandbox::lock_session_file(&SandboxSession::session_path(workspace, name))
+        .map_err(|error| DomainError::Storage {
+            message: format!("Cannot lock sandbox session `{name}`: {error}"),
+            repair: Some("Check that <workspace>/.ee/sandbox is writable.".to_owned()),
+        })
 }
 
-fn save_session(workspace: &Path, name: &str, session: &SandboxSession) -> Result<(), DomainError> {
-    session
-        .save(&SandboxSession::session_path(workspace, name))
+fn save_session(workspace: &Path, name: &str, document: &SessionDocument) -> Result<(), DomainError> {
+    crate::core::sandbox::write_session_document(&SandboxSession::session_path(workspace, name), document)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to persist sandbox session `{name}`: {error}"),
             repair: Some("Check that <workspace>/.ee/sandbox is writable.".to_owned()),
@@ -197,18 +229,18 @@ pub fn propose_remember(
 ) -> Result<ProposeOutcome, DomainError> {
     let name = session_name(&args.session)?;
     let _writer = lock_session(workspace, &name)?;
-    let mut session = load_session(workspace, &name)?;
-    session.proposals.push(SandboxProposal::Remember {
+    let mut document = load_document(workspace, &name)?;
+    document.session.proposals.push(SandboxProposal::Remember {
         memory_id: synthetic_memory_id(&args.content),
         content: args.content.clone(),
         content_hash: content_hash(&args.content),
         level: args.level.clone().unwrap_or_else(default_level),
         kind: args.kind.clone().unwrap_or_else(default_kind),
     });
-    save_session(workspace, &name, &session)?;
+    save_session(workspace, &name, &document)?;
     Ok(ProposeOutcome {
         session_name: name,
-        session,
+        session: document.session,
         notes: Vec::new(),
     })
 }
@@ -229,18 +261,18 @@ pub fn propose_import(
     let name = session_name(&args.session)?;
     let _writer = lock_session(workspace, &name)?;
     let screen = screen_session_import(workspace, &name, &args.content)?;
-    let mut session = load_session(workspace, &name)?;
-    session.proposals.push(SandboxProposal::Import {
+    let mut document = load_document(workspace, &name)?;
+    document.session.proposals.push(SandboxProposal::Import {
         memory_id: synthetic_memory_id(&screen.content),
         content_hash: content_hash(&screen.content),
         content: screen.content,
         level: args.level.clone().unwrap_or_else(default_level),
         kind: args.kind.clone().unwrap_or_else(default_kind),
     });
-    save_session(workspace, &name, &session)?;
+    save_session(workspace, &name, &document)?;
     Ok(ProposeOutcome {
         session_name: name,
-        session,
+        session: document.session,
         notes: if screen.redacted {
             vec!["Secret-like content was redacted before entering the sandbox overlay.".to_owned()]
         } else {
@@ -332,12 +364,12 @@ pub fn propose_curate(
     }
     let name = session_name(&args.session)?;
     let _writer = lock_session(workspace, &name)?;
-    let mut session = load_session(workspace, &name)?;
+    let mut document = load_document(workspace, &name)?;
     let mut added_retire_proposals = 0_usize;
     for memory_id in &args.retire {
         let trimmed = memory_id.trim();
         if !trimmed.is_empty() {
-            session.proposals.push(SandboxProposal::Retire {
+            document.session.proposals.push(SandboxProposal::Retire {
                 memory_id: trimmed.to_owned(),
             });
             added_retire_proposals += 1;
@@ -350,10 +382,10 @@ pub fn propose_curate(
             repair: Some("Pass --retire <id> (repeatable) to propose retirements.".to_owned()),
         });
     }
-    save_session(workspace, &name, &session)?;
+    save_session(workspace, &name, &document)?;
     Ok(ProposeOutcome {
         session_name: name,
-        session,
+        session: document.session,
         notes: Vec::new(),
     })
 }
@@ -421,17 +453,20 @@ pub fn apply_session(
 ) -> Result<ApplyOutcome, DomainError> {
     let name = session_name(&args.session)?;
     let _writer = lock_session(workspace, &name)?;
-    let mut session = load_session(workspace, &name)?;
-    if preflight_session_imports(workspace, &name, &mut session)? {
-        // Replace legacy raw secrets in scratch before the authoritative write.
-        // A denied preflight leaves the original session available for review.
-        save_session(workspace, &name, &session)?;
+    let mut document = load_document(workspace, &name)?;
+    let screened = preflight_session_imports(workspace, &name, &mut document.session)?;
+    let prior_key_count = document.apply_keys.len();
+    let keys = document.prepare_apply_keys()?;
+    if screened || keys.len() != prior_key_count {
+        // The receipt IDs must survive a crash after the database commits.
+        // Publish screened content and identities together before the first write.
+        save_session(workspace, &name, &document)?;
     }
 
     let mut persisted = Vec::new();
     let mut retire_pending = Vec::new();
     let mut applied_additive_count = 0_usize;
-    for proposal in &session.proposals {
+    for proposal in &document.session.proposals {
         match proposal {
             SandboxProposal::Remember {
                 content,
@@ -464,24 +499,24 @@ pub fn apply_session(
                     auto_link: false,
                     propose_candidates: false,
                 };
-                let result = if import_source.is_some() {
-                    remember_sandbox_import(&options)
-                } else {
-                    remember_memory(&options)
-                };
-                let report = match result {
-                    Ok(report) => report,
+                let result = remember_sandbox_proposal(
+                    &options,
+                    keys[applied_additive_count],
+                    import_source.is_some(),
+                );
+                let memory_id = match result {
+                    Ok(memory_id) => memory_id,
                     Err(error) => {
                         return Err(record_partial_apply_failure(
                             workspace,
                             &name,
-                            &session,
+                            &document,
                             applied_additive_count,
                             error,
                         ));
                     }
                 };
-                persisted.push(report.memory_id.to_string());
+                persisted.push(memory_id);
                 applied_additive_count += 1;
             }
             SandboxProposal::Retire { memory_id } => retire_pending.push(memory_id.clone()),
@@ -497,7 +532,7 @@ pub fn apply_session(
     }
 
     // Clear the applied additive proposals; keep un-promoted retires.
-    let remaining = remaining_after_applied_additives(&session, applied_additive_count);
+    let remaining = document.remaining(applied_additive_count);
     save_session(workspace, &name, &remaining)?;
 
     Ok(ApplyOutcome {
@@ -511,7 +546,7 @@ pub fn apply_session(
 fn record_partial_apply_failure(
     workspace: &Path,
     name: &str,
-    session: &SandboxSession,
+    document: &SessionDocument,
     applied_additive_count: usize,
     apply_error: DomainError,
 ) -> DomainError {
@@ -519,7 +554,7 @@ fn record_partial_apply_failure(
         return apply_error;
     }
 
-    let remaining = remaining_after_applied_additives(session, applied_additive_count);
+    let remaining = document.remaining(applied_additive_count);
     match save_session(workspace, name, &remaining) {
         Ok(()) => DomainError::Storage {
             message: format!(
@@ -534,7 +569,7 @@ fn record_partial_apply_failure(
                 "Sandbox apply failed after {applied_additive_count} additive proposal(s) persisted; also failed to update the scratch session: {cleanup_error}. Original apply error: {apply_error}"
             ),
             repair: Some(
-                "Inspect <workspace>/.ee/sandbox and avoid retrying the same session until the persisted proposals are reconciled."
+                "Restore write access to <workspace>/.ee/sandbox and retry the same session using its saved proposal identities."
                     .to_owned(),
             ),
         },
@@ -864,6 +899,52 @@ mod tests {
         assert!(propose_import(workspace.path(), &import_args(withheld)).is_err());
         assert!(!SandboxSession::session_path(workspace.path(), "default").exists());
         assert!(!workspace.path().join(".ee/ee.db").exists());
+    }
+
+    #[test]
+    fn replay_after_database_commit_returns_the_original_manual_and_imported_ids() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let root = workspace.path();
+        initialize_workspace(root);
+        propose_remember(root, &SandboxRememberArgs {
+            content: "Check the release manifest before publishing.".to_owned(),
+            level: None,
+            kind: None,
+            session: None,
+        }).expect("manual proposal");
+        propose_import(root, &import_args("The reviewed manifest has three entries."))
+            .expect("import proposal");
+
+        // Capture exactly the durable scratch state that survives if the
+        // process dies between committing the memories and clearing the file.
+        let mut document = super::load_document(root, "default").expect("session");
+        let keys = document.prepare_apply_keys().expect("prepare identities");
+        assert_eq!(keys.len(), 2);
+        assert_ne!(keys[0], keys[1]);
+        super::save_session(root, "default", &document).expect("persist identities");
+        let path = SandboxSession::session_path(root, "default");
+        let bytes = std::fs::read(&path).expect("stored checkpoint");
+        let save = document.session.save(&path).expect_err("legacy save must preserve receipts");
+        assert_eq!(save.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read(&path).expect("unchanged checkpoint"), bytes);
+        let args = SandboxApplyArgs { session: None };
+        let first = apply_session(root, &args).expect("apply");
+        assert_eq!(first.persisted.len(), 2);
+
+        super::save_session(root, "default", &document).expect("simulate interrupted checkpoint");
+        // A later append retains both outstanding identities, even if it
+        // proposes identical content intentionally as a fresh occurrence.
+        propose_import(root, &import_args("The reviewed manifest has three entries."))
+            .expect("append while recovery is pending");
+        let second = apply_session(root, &args).expect("recover and apply");
+        assert_eq!(&second.persisted[..2], first.persisted.as_slice());
+        assert_eq!(second.persisted.len(), 3);
+        assert_ne!(second.persisted[1], second.persisted[2]);
+        let db = DbConnection::open_file_read_only(&root.join(".ee/ee.db")).expect("database");
+        let creations = db.list_audit_by_action(crate::db::audit_actions::MEMORY_CREATE, None)
+            .expect("creation audits");
+        assert_eq!(creations.len(), 3);
+        assert!(load_session(root, "default").expect("checkpoint").proposals.is_empty());
     }
 
     #[test]

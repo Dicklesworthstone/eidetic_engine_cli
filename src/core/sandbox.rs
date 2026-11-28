@@ -253,36 +253,27 @@ impl SandboxSession {
     /// Load the session for an operation that needs the complete proposal set.
     /// Only an absent file represents a new session.
     pub fn try_load(path: &Path) -> std::io::Result<Self> {
-        match std::fs::symlink_metadata(path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(error) => return Err(error),
-            Ok(metadata) if !metadata.is_file() => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "sandbox session must be a regular file",
-                ));
-            }
-            Ok(_) => {}
-        }
-        let body = std::fs::read(path)?;
-        serde_json::from_slice(&body)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        read_session_document(path)
     }
 
-    /// Publish a complete session atomically. Readers can keep reading the
-    /// previous version until the replacement is ready.
+    /// Publish a complete session atomically.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        let parent = path.parent().filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(parent)?;
-        let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-        serde_json::to_writer_pretty(staged.as_file_mut(), self)
-            .map_err(std::io::Error::other)?;
-        staged.as_file().sync_all()?;
-        staged.persist(path).map_err(|error| error.error)?;
-        #[cfg(unix)]
-        std::fs::File::open(parent)?.sync_all()?;
-        Ok(())
+        // This public API carries proposals only. A pending CLI apply owns
+        // replay identities in the same document; keep them intact.
+        #[derive(Default, Deserialize)]
+        struct Checkpoint {
+            #[serde(default)]
+            apply_keys: Vec<String>,
+        }
+        let _writer = lock_session_file(path)?;
+        let checkpoint: Checkpoint = read_session_document(path)?;
+        if !checkpoint.apply_keys.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cannot replace a sandbox session with a pending apply checkpoint",
+            ));
+        }
+        write_session_document(path, self)
     }
 
     /// Build the [`SandboxOverlay`] this session's proposals describe.
@@ -306,6 +297,77 @@ impl SandboxSession {
         }
         overlay
     }
+}
+
+pub(crate) fn lock_session_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+        );
+    }
+    let lock_path = if path.extension() == Some(std::ffi::OsStr::new("json")) {
+        path.with_extension("lock")
+    } else {
+        let mut name = path.as_os_str().to_owned();
+        name.push(".lock");
+        PathBuf::from(name)
+    };
+    let file = options.open(lock_path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "sandbox writer lock must be a regular file",
+        ));
+    }
+    file.lock()?;
+    Ok(file)
+}
+
+pub(crate) fn read_session_document<T: serde::de::DeserializeOwned + Default>(
+    path: &Path,
+) -> std::io::Result<T> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(error) => return Err(error),
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "sandbox session must be a regular file",
+            ));
+        }
+        Ok(_) => {}
+    }
+    let body = std::fs::read(path)?;
+    serde_json::from_slice(&body)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+pub(crate) fn write_session_document(
+    path: &Path,
+    value: &impl Serialize,
+) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer_pretty(staged.as_file_mut(), value)
+        .map_err(std::io::Error::other)?;
+    staged.as_file().sync_all()?;
+    staged.persist(path).map_err(|error| error.error)?;
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
 }
 
 /// The read-only sandbox diff surface (`ee.sandbox.diff.v1`): baseline-vs-overlay
