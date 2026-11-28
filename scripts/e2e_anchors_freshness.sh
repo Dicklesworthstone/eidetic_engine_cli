@@ -103,12 +103,16 @@ fi
 # Bounded steward drift job over git-changed files (bd-1n0np.3.7 part 2). When
 # wired, this run recomputes the anchored symbol's content-hash, detects the
 # v1->v2 change, and writes an audited memory.freshness_transition row.
+# Not built: there is no top-level `ee steward` command and no
+# --bounded-to-git-changed flag, and insert_memory_freshness_transition_audit
+# (src/db/mod.rs) has only a test caller. 3.7 and 3.8 were force-closed with
+# this wiring named as follow-up; no open bead tracks it.
 if ee_supports steward run; then
     step "run the bounded freshness steward over git-changed files"
     steward_out="$(ee_json steward run --workspace "$WS" --bounded-to-git-changed --json)"
     assert_jq "$steward_out" '.success == true' "bounded steward run succeeds"
 else
-    log_drop 1 "bounded freshness steward absent (bd-1n0np.3.7): when wired, assert it writes an audited memory.freshness_transition row (previousState=current,newState=stale,driftCode=memory_drift_source_changed) for the content change"
+    log_drop 1 "bounded freshness steward not built (follow-up left when bd-1n0np.3.7 was force-closed): when wired, assert it writes an audited memory.freshness_transition row (previousState=current,newState=stale,driftCode=memory_drift_source_changed) for the content change"
 fi
 
 # ee memory show freshness status (bd-1n0np.3.8).
@@ -119,17 +123,17 @@ if ee_supports memory show; then
         assert_jq "$show_out" '(.data.freshness.state // "") | test("changed|stale|suspect")' \
             "memory show reports a non-current freshness state after the symbol changed"
     else
-        log_drop 1 "ee memory show has no freshness block yet (bd-1n0np.3.8): when wired, assert data.freshness.state == symbol_changed/stale"
+        log_drop 1 "ee memory show has no freshness block (follow-up left when bd-1n0np.3.8 was force-closed): when wired, assert data.freshness.state == symbol_changed/stale"
     fi
 else
     log_drop 1 "ee memory show absent; freshness-status assertion skipped"
 fi
 
 # Pack per-item symbol_drift facet + rank-down + live file:line (bd-1n0np.3.7/3.8).
-log_drop 1 "pack symbol_drift facet absent (bd-1n0np.3.8): when wired, assert a pack for this task still INCLUDES the drifted memory (rank-down, not removed), tags it freshness: symbol_drift, and carries the live file:line in its provenance"
+log_drop 1 "pack symbol_drift facet not built (follow-up left when bd-1n0np.3.8 was force-closed): when wired, assert a pack for this task still INCLUDES the drifted memory (rank-down, not removed), tags it freshness: symbol_drift, and carries the live file:line in its provenance"
 
 # Revalidate curation candidate (bd-1n0np.3.8).
-log_drop 1 "revalidate curation candidate absent (bd-1n0np.3.8): when wired, assert ee curate candidates surfaces a 'revalidate' candidate for the drifted memory"
+log_drop 1 "revalidate curation candidate not built (follow-up left when bd-1n0np.3.8 was force-closed): when wired, assert ee curate candidates surfaces a 'revalidate' candidate for the drifted memory"
 
 # Conservatism: rename/move => unknown, never stale (bd-1n0np.3.7).
 step "rename the symbol (refactor ambiguity must stay advisory, never stale)"
@@ -142,6 +146,6 @@ impl Widget {
     }
 }
 RUST
-log_drop 1 "rename=unknown conservatism not observable without the steward (bd-1n0np.3.7): when wired, assert a rename/move yields freshness status=unknown/suspect (advisory), NEVER stale"
+log_drop 1 "rename=unknown conservatism not observable without the steward (follow-up left when bd-1n0np.3.7 was force-closed): when wired, assert a rename/move yields freshness status=unknown/suspect (advisory), NEVER stale"
 
 harness_summary
