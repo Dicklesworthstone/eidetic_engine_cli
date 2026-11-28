@@ -1,0 +1,292 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.calibration_honesty.v1.json",
+  "title": "ee.calibration_honesty.v1",
+  "description": "Read-only empirical rates and Wilson intervals over the same historical observations as ee.outcome.calibration.v1. Each admitted accepted feedback event contributes one unweighted sample in the explicit half-open [since, until) window. Classes below 30 observations abstain with [0, 1] intervals; no predictive coverage guarantee is implied. eventsInWindow = sampleCount + excludedCount; scannedEvents = eventsInWindow + outsideWindowCount + invalidTimestampCount. Scan overflow is an error, never a partial report.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "workspaceId",
+    "since",
+    "until",
+    "readOnly",
+    "predictionBasis",
+    "situationClassBasis",
+    "eventLimit",
+    "scannedEvents",
+    "outsideWindowCount",
+    "invalidTimestampCount",
+    "eventsInWindow",
+    "auditLimit",
+    "scannedAuditRows",
+    "classLimit",
+    "sampleCount",
+    "excludedCount",
+    "exclusions",
+    "sourceCounts",
+    "tableHash",
+    "degraded",
+    "minSamples",
+    "classes"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.calibration_honesty.v1"
+    },
+    "command": {
+      "const": "outcome calibration"
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "since": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Inclusive RFC3339 instant, normalized to UTC."
+    },
+    "until": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Exclusive RFC3339 instant, normalized to UTC; strictly after since."
+    },
+    "readOnly": {
+      "const": true
+    },
+    "predictionBasis": {
+      "const": "historical_pre_outcome_audit"
+    },
+    "situationClassBasis": {
+      "const": "recorded_evidence_situation_class",
+      "description": "Validated recorded event evidence situationClass, or unclassified when absent, invalid, or sensitive; no current classification or hindsight inference."
+    },
+    "eventLimit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "scannedEvents": {
+      "$ref": "#/$defs/count",
+      "description": "Candidate rows in the conservative calendar-date scan, including offset guard rows outside the exact window."
+    },
+    "outsideWindowCount": {
+      "$ref": "#/$defs/count"
+    },
+    "invalidTimestampCount": {
+      "$ref": "#/$defs/count"
+    },
+    "eventsInWindow": {
+      "$ref": "#/$defs/count"
+    },
+    "auditLimit": {
+      "type": "integer",
+      "minimum": 4,
+      "maximum": 400000,
+      "description": "Historical audit candidate bound: four times eventLimit."
+    },
+    "scannedAuditRows": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 400000
+    },
+    "classLimit": {
+      "const": 256,
+      "description": "Maximum distinct admitted situation classes; excess classes refuse the report rather than truncate it."
+    },
+    "sampleCount": {
+      "$ref": "#/$defs/count"
+    },
+    "excludedCount": {
+      "$ref": "#/$defs/count"
+    },
+    "exclusions": {
+      "type": "array",
+      "description": "In-window exclusions, sorted by reason. Each excluded event has one reason.",
+      "items": {
+        "$ref": "#/$defs/exclusion"
+      }
+    },
+    "sourceCounts": {
+      "type": "array",
+      "description": "Admitted sample counts only, sorted by sourceType; counts sum to sampleCount.",
+      "items": {
+        "$ref": "#/$defs/sourceCount"
+      }
+    },
+    "tableHash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$",
+      "description": "BLAKE3 of the canonical admitted observations including historical audit identities; identical to normal calibration for the same population."
+    },
+    "degraded": {
+      "type": "array",
+      "maxItems": 0,
+      "description": "No partial report is emitted on scan overflow or unreadable storage."
+    },
+    "minSamples": {
+      "const": 30
+    },
+    "classes": {
+      "type": "array",
+      "maxItems": 256,
+      "description": "Nonempty situation-class populations sorted by situationClass; counts sum to sampleCount. Labels rejected by the shared redactor fall back to unclassified.",
+      "items": {
+        "$ref": "#/$defs/class"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "sampleCount": {
+            "const": 0
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "classes": {
+            "maxItems": 0
+          },
+          "sourceCounts": {
+            "maxItems": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "classes": {
+            "minItems": 1
+          },
+          "sourceCounts": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "probability": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "exclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
+        "count"
+      ],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        }
+      }
+    },
+    "sourceCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceType",
+        "count"
+      ],
+      "properties": {
+        "sourceType": {
+          "enum": [
+            "human_explicit",
+            "agent_inference",
+            "outcome_observed"
+          ]
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        }
+      }
+    },
+    "class": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "situationClass",
+        "sampleCount",
+        "empiricalHitRate",
+        "intervalLower",
+        "intervalUpper",
+        "abstained"
+      ],
+      "properties": {
+        "situationClass": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "sampleCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "empiricalHitRate": {
+          "$ref": "#/$defs/probability"
+        },
+        "intervalLower": {
+          "$ref": "#/$defs/probability"
+        },
+        "intervalUpper": {
+          "$ref": "#/$defs/probability"
+        },
+        "abstained": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "sampleCount": {
+                "maximum": 29
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "abstained": {
+                "const": true
+              },
+              "intervalLower": {
+                "const": 0
+              },
+              "intervalUpper": {
+                "const": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "abstained": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

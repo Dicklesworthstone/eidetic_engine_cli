@@ -139,6 +139,12 @@ pub const PROVENANCE_HEALTH_SCHEMA_V1: &str = "ee.provenance_health.v1";
 /// Schema identifier for trust calibration diagnostics (bd-2vq2z.3).
 pub const TRUST_REPORT_SCHEMA_V1: &str = "ee.trust_report.v1";
 
+/// Schema identifier for bounded calibration of historical outcome predictions.
+pub const OUTCOME_CALIBRATION_SCHEMA_V1: &str = "ee.outcome.calibration.v1";
+
+/// Schema identifier for empirical outcome rates and sparse-class abstention.
+pub const CALIBRATION_HONESTY_SCHEMA_V1: &str = "ee.calibration_honesty.v1";
+
 /// Schema identifier for the user-global memory store-metadata block (bd-2vq2z.13).
 pub const GLOBAL_MEMORY_SCHEMA_V1: &str = "ee.global_memory.v1";
 
@@ -268,6 +274,8 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     AMBIENT_CONTEXT_SCHEMA_V1,
     PROVENANCE_HEALTH_SCHEMA_V1,
     TRUST_REPORT_SCHEMA_V1,
+    OUTCOME_CALIBRATION_SCHEMA_V1,
+    CALIBRATION_HONESTY_SCHEMA_V1,
     GLOBAL_MEMORY_SCHEMA_V1,
     TIMELINE_SCHEMA_V1,
     ORIENT_SCHEMA_V1,

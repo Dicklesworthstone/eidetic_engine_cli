@@ -24501,6 +24501,87 @@ impl DbConnection {
         rows.iter().map(stored_feedback_event_from_row).collect()
     }
 
+    /// Read a bounded calibration candidate slice from one workspace.
+    ///
+    /// The calendar-date bounds are deliberately wider than the requested
+    /// RFC3339 window: offsets and subsecond precision are interpreted by the
+    /// caller, never by lexicographic SQL timestamp comparison. Callers request
+    /// their budget plus one row and refuse overflow rather than report a
+    /// silently truncated reliability curve.
+    pub(crate) fn list_feedback_calibration_candidates(
+        &self,
+        workspace_id: &str,
+        earliest_date: &str,
+        latest_date_exclusive: &str,
+        limit: u32,
+    ) -> Result<Vec<StoredFeedbackEvent>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, target_type, target_id, signal, weight, source_type, source_id, reason, evidence_json, session_id, applied_at, created_at FROM feedback_events WHERE workspace_id = ?1 AND created_at >= ?2 AND created_at < ?3 ORDER BY created_at ASC, id ASC LIMIT ?4",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(earliest_date.to_owned()),
+                Value::Text(latest_date_exclusive.to_owned()),
+                Value::BigInt(i64::from(limit)),
+            ],
+        )?;
+        rows.iter().map(stored_feedback_event_from_row).collect()
+    }
+
+    /// Read historical prediction audits for a bounded batch of typed targets.
+    ///
+    /// Feedback can be released from quarantine after its observation window,
+    /// so the audit timestamp must not be filtered by that window. Only the
+    /// native target's learning action is eligible; the caller additionally
+    /// joins `feedbackEventId` and rejects duplicate or malformed predictions.
+    pub(crate) fn list_feedback_calibration_audits(
+        &self,
+        workspace_id: &str,
+        target_type: &str,
+        target_ids: &[String],
+        limit: u32,
+    ) -> Result<Vec<StoredAuditEntry>> {
+        let action = match target_type {
+            "memory" => audit_actions::OUTCOME_BAYES_UPDATE,
+            "rule" => audit_actions::RULE_MARK,
+            _ => {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "calibration audits require a memory or native rule target".to_owned(),
+                });
+            }
+        };
+        if target_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if target_ids.len() > 128 {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "calibration audit batches cannot exceed 128 targets".to_owned(),
+            });
+        }
+        let placeholders = (4..4 + target_ids.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut params = vec![
+            Value::Text(workspace_id.to_owned()),
+            Value::Text(target_type.to_owned()),
+            Value::Text(action.to_owned()),
+        ];
+        params.extend(target_ids.iter().cloned().map(Value::Text));
+        params.push(Value::BigInt(i64::from(limit)));
+        let rows = self.query_for(
+            DbOperation::Query,
+            &format!(
+                "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash FROM audit_log WHERE workspace_id = ?1 AND target_type = ?2 AND action = ?3 AND target_id IN ({placeholders}) ORDER BY target_id ASC, timestamp ASC, id ASC LIMIT ?{}",
+                params.len()
+            ),
+            &params,
+        )?;
+        rows.iter().map(stored_audit_from_row).collect()
+    }
+
     /// Identity of the exact rows read for calibration and quality admission.
     /// Unlike the cheap append fingerprint, this detects updates, replacements
     /// and application markers even when row count and maximum rowid agree.
@@ -63661,6 +63742,205 @@ UPDATE memories
         let re_apply = connection.apply_feedback_event("fb_11234567890123456789012345")?;
         ensure(!re_apply, "second apply returns false (already applied)")?;
 
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn calibration_candidate_reader_preserves_offset_guards_and_overflow_sentinel() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let workspace = "wsp_01234567890123456789012345";
+        let other_workspace = "wsp_11234567890123456789012345";
+        connection.insert_workspace(
+            other_workspace,
+            &CreateWorkspaceInput {
+                path: "/calibration-reader-other".to_owned(),
+                name: Some("calibration other".to_owned()),
+            },
+        )?;
+        for (suffix, owner, created_at) in [
+            ("01", workspace, "2025-12-30T23:59:59Z"),
+            ("02", workspace, "2025-12-31T23:00:00-01:00"),
+            ("03", workspace, "2026-01-01T00:00:00.000000001Z"),
+            ("04", workspace, "2026-01-02T23:00:00+23:00"),
+            ("05", workspace, "2026-01-03T00:00:00Z"),
+            ("06", other_workspace, "2026-01-01T00:00:00Z"),
+        ] {
+            connection.insert_feedback_event_for_recovery(&super::StoredFeedbackEvent {
+                id: format!("fb_000000000000000000000000{suffix}"),
+                workspace_id: owner.to_owned(),
+                target_type: "memory".to_owned(),
+                target_id: "mem_01234567890123456789012345".to_owned(),
+                signal: "helpful".to_owned(),
+                weight: 1.0,
+                source_type: "outcome_observed".to_owned(),
+                source_id: None,
+                reason: None,
+                evidence_json: None,
+                session_id: None,
+                applied_at: Some(created_at.to_owned()),
+                created_at: created_at.to_owned(),
+            })?;
+        }
+        let full = connection.list_feedback_calibration_candidates(
+            workspace,
+            "2025-12-31",
+            "2026-01-03",
+            4,
+        )?;
+        ensure_equal(
+            &full.len(),
+            &3,
+            "candidate range keeps both offset guard days",
+        )?;
+        ensure_equal(
+            &full.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            &vec![
+                "fb_00000000000000000000000002",
+                "fb_00000000000000000000000003",
+                "fb_00000000000000000000000004",
+            ],
+            "candidate reader excludes unrelated workspace and outside date bounds",
+        )?;
+        let budget = 1;
+        let bounded = connection.list_feedback_calibration_candidates(
+            workspace,
+            "2025-12-31",
+            "2026-01-03",
+            budget + 1,
+        )?;
+        ensure_equal(
+            &bounded.len(),
+            &2,
+            "budget plus one preserves overflow evidence",
+        )?;
+        ensure_equal(
+            &bounded,
+            &full[..2].to_vec(),
+            "bounded scan has stable order",
+        )?;
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn calibration_audit_reader_is_typed_scoped_and_bounded() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let workspace = "wsp_01234567890123456789012345";
+        let other_workspace = "wsp_11234567890123456789012345";
+        connection.insert_workspace(
+            other_workspace,
+            &CreateWorkspaceInput {
+                path: "/calibration-audit-other".to_owned(),
+                name: Some("calibration audit other".to_owned()),
+            },
+        )?;
+        for (suffix, owner, kind, target, action) in [
+            (
+                "01",
+                workspace,
+                "memory",
+                "mem_a",
+                super::audit_actions::OUTCOME_BAYES_UPDATE,
+            ),
+            (
+                "02",
+                workspace,
+                "memory",
+                "mem_a",
+                super::audit_actions::OUTCOME_BAYES_UPDATE,
+            ),
+            (
+                "03",
+                other_workspace,
+                "memory",
+                "mem_a",
+                super::audit_actions::OUTCOME_BAYES_UPDATE,
+            ),
+            (
+                "04",
+                workspace,
+                "rule",
+                "mem_a",
+                super::audit_actions::RULE_MARK,
+            ),
+            (
+                "05",
+                workspace,
+                "memory",
+                "mem_a",
+                super::audit_actions::MEMORY_CREATE,
+            ),
+            (
+                "06",
+                workspace,
+                "memory",
+                "mem_b",
+                super::audit_actions::OUTCOME_BAYES_UPDATE,
+            ),
+        ] {
+            connection.insert_audit(
+                &format!("audit_000000000000000000000000{suffix}"),
+                &super::CreateAuditInput {
+                    workspace_id: Some(owner.to_owned()),
+                    actor: None,
+                    action: action.to_owned(),
+                    target_type: Some(kind.to_owned()),
+                    target_id: Some(target.to_owned()),
+                    details: Some(format!(
+                        "{{\"feedbackEventId\":\"fb_{suffix}\",\"priorMean\":0.5}}"
+                    )),
+                },
+            )?;
+        }
+        let target_ids = vec!["mem_a".to_owned()];
+        let audits =
+            connection.list_feedback_calibration_audits(workspace, "memory", &target_ids, 3)?;
+        ensure_equal(
+            &audits.len(),
+            &2,
+            "only native memory learning audits are admitted",
+        )?;
+        ensure(
+            audits
+                .iter()
+                .all(|row| row.workspace_id.as_deref() == Some(workspace)),
+            "audits stay in addressed workspace",
+        )?;
+        let bounded =
+            connection.list_feedback_calibration_audits(workspace, "memory", &target_ids, 1)?;
+        ensure_equal(
+            &bounded,
+            &audits[..1].to_vec(),
+            "audit read honors its remaining budget",
+        )?;
+        ensure(
+            connection
+                .list_feedback_calibration_audits(workspace, "memory", &[], 1)?
+                .is_empty(),
+            "empty target set reads no audits",
+        )?;
+        ensure(
+            connection
+                .list_feedback_calibration_audits(workspace, "pack", &target_ids, 1)
+                .is_err(),
+            "unsupported native target is refused",
+        )?;
+        ensure(
+            connection
+                .list_feedback_calibration_audits(
+                    workspace,
+                    "memory",
+                    &vec!["mem_a".to_owned(); 129],
+                    1,
+                )
+                .is_err(),
+            "oversized audit batch is refused",
+        )?;
         connection.close()?;
         Ok(())
     }

@@ -11704,6 +11704,20 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: outcome_harvest_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::OUTCOME_CALIBRATION_SCHEMA_V1,
+            version: "1",
+            description: "Read-only reliability buckets and Brier scores from historical pre-outcome predictions in an explicit window",
+            category: "memory",
+            definition: outcome_calibration_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::models::CALIBRATION_HONESTY_SCHEMA_V1,
+            version: "1",
+            description: "Empirical outcome rates and Wilson intervals with explicit abstention for sparse situation classes",
+            category: "memory",
+            definition: calibration_honesty_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::memory_debt::MEMORY_DEBT_DOCTOR_SCHEMA_V1,
             version: "1",
             description: "Read-only memory-debt doctor report with ranked curation repairs",
@@ -13545,6 +13559,14 @@ fn learn_gaps_schema_definition() -> String {
 
 fn outcome_harvest_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.outcome.harvest.v1.json").to_string()
+}
+
+fn outcome_calibration_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.outcome.calibration.v1.json").to_string()
+}
+
+fn calibration_honesty_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.calibration_honesty.v1.json").to_string()
 }
 
 fn memory_debt_doctor_schema_definition() -> String {

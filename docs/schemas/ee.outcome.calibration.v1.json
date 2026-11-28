@@ -1,0 +1,426 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.outcome.calibration.v1.json",
+  "title": "ee.outcome.calibration.v1",
+  "description": "Read-only calibration over the explicit half-open [since, until) window. Each admitted accepted feedback event contributes one unweighted sample using its historical pre-outcome audit prediction. Derived feedback, unsupported targets, nonpositive weights, and missing or ambiguous historical predictions are excluded with counts. Bounds must fit completely; overflow is an error, never a partial report. eventsInWindow = sampleCount + excludedCount; scannedEvents = eventsInWindow + outsideWindowCount + invalidTimestampCount. Current memory confidence and current situation classifications are not consulted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "workspaceId",
+    "since",
+    "until",
+    "readOnly",
+    "predictionBasis",
+    "situationClassBasis",
+    "eventLimit",
+    "scannedEvents",
+    "outsideWindowCount",
+    "invalidTimestampCount",
+    "eventsInWindow",
+    "auditLimit",
+    "scannedAuditRows",
+    "classLimit",
+    "sampleCount",
+    "excludedCount",
+    "exclusions",
+    "sourceCounts",
+    "tableHash",
+    "degraded",
+    "assessment",
+    "bucketCount",
+    "brierScore",
+    "meanPredicted",
+    "observedPositiveRate",
+    "calibrationGap",
+    "recalibration",
+    "buckets",
+    "classes"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.outcome.calibration.v1"
+    },
+    "command": {
+      "const": "outcome calibration"
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "since": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Inclusive RFC3339 instant, normalized to UTC."
+    },
+    "until": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Exclusive RFC3339 instant, normalized to UTC; strictly after since."
+    },
+    "readOnly": {
+      "const": true
+    },
+    "predictionBasis": {
+      "const": "historical_pre_outcome_audit"
+    },
+    "situationClassBasis": {
+      "const": "recorded_evidence_situation_class",
+      "description": "Validated recorded event evidence situationClass, or unclassified when absent, invalid, or sensitive; no current classification or hindsight inference."
+    },
+    "eventLimit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "scannedEvents": {
+      "$ref": "#/$defs/count",
+      "description": "Candidate rows in the conservative calendar-date scan, including offset guard rows outside the exact window."
+    },
+    "outsideWindowCount": {
+      "$ref": "#/$defs/count"
+    },
+    "invalidTimestampCount": {
+      "$ref": "#/$defs/count"
+    },
+    "eventsInWindow": {
+      "$ref": "#/$defs/count"
+    },
+    "auditLimit": {
+      "type": "integer",
+      "minimum": 4,
+      "maximum": 400000,
+      "description": "Historical audit candidate bound: four times eventLimit."
+    },
+    "scannedAuditRows": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 400000
+    },
+    "classLimit": {
+      "const": 256,
+      "description": "Maximum distinct admitted situation classes; excess classes refuse the report rather than truncate it."
+    },
+    "sampleCount": {
+      "$ref": "#/$defs/count"
+    },
+    "excludedCount": {
+      "$ref": "#/$defs/count"
+    },
+    "exclusions": {
+      "type": "array",
+      "description": "In-window exclusions, sorted by reason. Each excluded event has one reason.",
+      "items": {
+        "$ref": "#/$defs/exclusion"
+      }
+    },
+    "sourceCounts": {
+      "type": "array",
+      "description": "Admitted sample counts only, sorted by sourceType; counts sum to sampleCount.",
+      "items": {
+        "$ref": "#/$defs/sourceCount"
+      }
+    },
+    "tableHash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$",
+      "description": "BLAKE3 of the canonical admitted observations including historical audit identities; shared with --honesty and independent of bucket count."
+    },
+    "degraded": {
+      "type": "array",
+      "maxItems": 0,
+      "description": "No partial report is emitted on scan overflow or unreadable storage."
+    },
+    "assessment": {
+      "enum": [
+        "insufficient_data",
+        "observed"
+      ]
+    },
+    "bucketCount": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    },
+    "brierScore": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "meanPredicted": {
+      "$ref": "#/$defs/probability"
+    },
+    "observedPositiveRate": {
+      "$ref": "#/$defs/probability"
+    },
+    "calibrationGap": {
+      "type": "number",
+      "minimum": -1,
+      "maximum": 1,
+      "description": "Observed positive rate minus mean prediction; negative values indicate overconfidence and positive values underconfidence."
+    },
+    "recalibration": {
+      "enum": [
+        null,
+        "overconfident",
+        "underconfident",
+        "well_calibrated"
+      ],
+      "description": "Descriptive direction only; never changes weights, half-lives, or scores. Null when no observations were admitted."
+    },
+    "buckets": {
+      "$ref": "#/$defs/buckets"
+    },
+    "classes": {
+      "type": "array",
+      "maxItems": 256,
+      "description": "Nonempty situation-class populations, sorted by situationClass, using the same observations and bucket count as the aggregate. Labels rejected by the shared redactor fall back to unclassified.",
+      "items": {
+        "$ref": "#/$defs/class"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "sampleCount": {
+            "const": 0
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "assessment": {
+            "const": "insufficient_data"
+          },
+          "brierScore": {
+            "type": "null"
+          },
+          "meanPredicted": {
+            "const": 0
+          },
+          "observedPositiveRate": {
+            "const": 0
+          },
+          "calibrationGap": {
+            "const": 0
+          },
+          "recalibration": {
+            "type": "null"
+          },
+          "buckets": {
+            "items": {
+              "properties": {
+                "count": {
+                  "const": 0
+                }
+              }
+            }
+          },
+          "classes": {
+            "maxItems": 0
+          },
+          "sourceCounts": {
+            "maxItems": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "assessment": {
+            "const": "observed"
+          },
+          "brierScore": {
+            "type": "number"
+          },
+          "recalibration": {
+            "type": "string"
+          },
+          "classes": {
+            "minItems": 1
+          },
+          "sourceCounts": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "probability": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "exclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
+        "count"
+      ],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        }
+      }
+    },
+    "sourceCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceType",
+        "count"
+      ],
+      "properties": {
+        "sourceType": {
+          "enum": [
+            "human_explicit",
+            "agent_inference",
+            "outcome_observed"
+          ]
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        }
+      }
+    },
+    "buckets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "description": "Equal-width prediction buckets in ascending order; length equals bucketCount. Counts sum to the enclosing sampleCount. The final bucket includes a prediction of 1.",
+      "items": {
+        "$ref": "#/$defs/bucket"
+      }
+    },
+    "bucket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lower",
+        "upper",
+        "count",
+        "meanPredicted",
+        "observedPositiveRate"
+      ],
+      "properties": {
+        "lower": {
+          "$ref": "#/$defs/probability"
+        },
+        "upper": {
+          "$ref": "#/$defs/probability"
+        },
+        "count": {
+          "$ref": "#/$defs/count"
+        },
+        "meanPredicted": {
+          "$ref": "#/$defs/probability"
+        },
+        "observedPositiveRate": {
+          "$ref": "#/$defs/probability"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "count": {
+                "const": 0
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "meanPredicted": {
+                "const": 0
+              },
+              "observedPositiveRate": {
+                "const": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "class": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "situationClass",
+        "sampleCount",
+        "assessment",
+        "bucketCount",
+        "brierScore",
+        "meanPredicted",
+        "observedPositiveRate",
+        "calibrationGap",
+        "recalibration",
+        "buckets"
+      ],
+      "properties": {
+        "situationClass": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "sampleCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "assessment": {
+          "const": "observed"
+        },
+        "bucketCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "brierScore": {
+          "$ref": "#/$defs/probability"
+        },
+        "meanPredicted": {
+          "$ref": "#/$defs/probability"
+        },
+        "observedPositiveRate": {
+          "$ref": "#/$defs/probability"
+        },
+        "calibrationGap": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        },
+        "recalibration": {
+          "enum": [
+            "overconfident",
+            "underconfident",
+            "well_calibrated"
+          ]
+        },
+        "buckets": {
+          "$ref": "#/$defs/buckets"
+        }
+      }
+    }
+  }
+}
