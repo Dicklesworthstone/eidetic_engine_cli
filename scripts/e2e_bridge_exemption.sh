@@ -8,10 +8,11 @@
 # with honest degradation on a degenerate graph.
 #   1. init + remember failure / bridge / solution memories + an isolated stale one.
 #   2. link failure -> bridge -> solution so `bridge` is the sole cut vertex.
-#   3. `ee maintenance` decay job: assert the bridge memory is exempted/protected
-#      while the isolated stale memory is eligible to decay (bd-1n0np.20.1/20.2).
-#   4. assert the exemption cap + honest degradation on a degenerate graph
-#      (no silent over-protection).
+#   3. `ee maintenance run --job decay_sweep --include-decay --dry-run`: assert
+#      the bridge memory's structuralAdjustment marks it an articulation point
+#      (bd-1n0np.20.1/20.2).
+#   4. assert the cap (no multiplier of 0 under the default policy) and that a
+#      degenerate graph earns no protection (no silent over-protection).
 #
 # The decay-maintenance + bridge-exemption surfaces are CAPABILITY-GUARDED: where
 # a surface is absent in the binary under test, the step records a visible
@@ -73,29 +74,45 @@ else
 fi
 
 step "decay maintenance protects the bridge memory (bd-1n0np.20.1/20.2)"
-# The exact decay-maintenance invocation (job name / subcommand) is binary-
-# dependent; probe for a success envelope before asserting the exemption surface.
-decayed="$(ee_json maintenance --workspace "$WS" --json)"
+# Protection shipped as a per-memory structuralAdjustment on the decay sweep
+# (src/steward/mod.rs), computed only with --include-decay and built from the
+# memory links. This probe used to call bare `ee maintenance`, which is a
+# command group, so it never got a success envelope. --dry-run keeps scores.
+decayed="$(ee_json maintenance run --job decay_sweep --include-decay --dry-run --workspace "$WS" --json)"
 if printf '%s' "$decayed" | jq -e '.success == true' >/dev/null 2>&1; then
-    assert_jq "$decayed" '.success == true' "maintenance job runs"
-    if printf '%s' "$decayed" | jq -e '.. | objects | has("bridgeExemptions") or has("bridge_exemptions") or has("exemptedMemories")' >/dev/null 2>&1; then
-        assert_jq "$decayed" \
-            '[.. | objects | (.bridgeExemptions // .bridge_exemptions // .exemptedMemories // empty)] | length >= 1' \
-            "maintenance reports bridge exemptions"
+    assert_jq "$decayed" '.success == true' "decay sweep dry run succeeds"
+    bridge_adj='[.. | objects | select(has("structuralAdjustment")) | .structuralAdjustment | select(.memoryId == $b)]'
+    if [ -n "$bridge_id" ] && printf '%s' "$decayed" | jq -e --arg b "$bridge_id" "$bridge_adj | length >= 1" >/dev/null 2>&1; then
+        # isArticulationPoint is set for a cut vertex regardless of onion depth.
+        if printf '%s' "$decayed" | jq -e --arg b "$bridge_id" "$bridge_adj | all(.isArticulationPoint == true)" >/dev/null 2>&1; then
+            _harness_pass "decay sweep marks the bridge memory as an articulation point"
+        else
+            _harness_fail "decay sweep did not mark the bridge memory as an articulation point"
+        fi
     else
-        log_drop 1 "bridge-exemption maintenance surface pending (bd-1n0np.20.2): exemption assertions skipped"
+        log_drop 1 "decay sweep listed no structuralAdjustment for the bridge memory: protection assertion skipped"
     fi
 else
-    log_drop 1 "decay-maintenance job surface pending (bd-1n0np.20.1/20.2): exemption assertions skipped"
+    log_drop 1 "ee maintenance run --job decay_sweep did not succeed in this binary: exemption assertions skipped"
 fi
 
 step "exemption cap + honest degradation on a degenerate graph (no over-protection)"
-if printf '%s' "$decayed" | jq -e '.. | objects | has("exemptionCap") or has("degraded")' >/dev/null 2>&1; then
+# There is no exemptionCap field. The cap is the multiplier itself: the
+# default articulation_protection is 0.5, clamped to [0, 1], so under the
+# default policy no memory is fully exempted (multiplier 0). A degenerate graph
+# (maxLayer < 2) earns no protection at all and reports the baseline. The old
+# form passed on any envelope, since every one has `degraded` and `length >= 0`
+# is always true.
+if printf '%s' "$decayed" | jq -e '[.. | objects | select(has("structuralAdjustment"))] | length >= 1' >/dev/null 2>&1; then
     assert_jq "$decayed" \
-        '([.. | objects | (.exemptionCap // empty)] | length >= 0)' \
-        "exemption cap / degradation surface present"
+        '[.. | objects | select(has("structuralAdjustment")) | .structuralAdjustment] | all(.structuralMultiplier > 0)' \
+        "no memory is fully exempted from decay under the default policy"
+    assert_jq "$decayed" \
+        '[.. | objects | select(has("structuralAdjustment")) | .structuralAdjustment | select(.maxLayer < 2)]
+         | all(.structuralMultiplier == 1 and .rationale == "structural_decay_baseline")' \
+        "a degenerate graph earns no structural protection"
 else
-    log_drop 1 "exemption cap + degenerate-graph degradation surface pending (bd-1n0np.20.2)"
+    log_drop 1 "decay sweep reported no structuralAdjustment: cap and degenerate-graph assertions skipped"
 fi
 
 end_temp_workspace
