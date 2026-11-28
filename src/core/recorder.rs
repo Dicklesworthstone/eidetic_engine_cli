@@ -116,7 +116,7 @@ impl RecorderStartReport {
             out.push_str(&format!("Workspace: {workspace}\n"));
         }
         out.push_str(&format!("Started:  {}\n", self.started_at));
-        out.push_str("\nNext:\n  ee recorder event <run-id> --type tool_call\n");
+        out.push_str("\nNext:\n  ee recorder event <run-id> --event-type tool_call\n");
         out
     }
 }
