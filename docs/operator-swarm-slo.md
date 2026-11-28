@@ -6,9 +6,16 @@ default profile sits between them: it covers every correctness gate but
 leaves benches and the pack-quality eval as opt-ins.
 
 This document is the operator-facing companion to the bd-2dgn0
-`swarm-slo` evidence epic. The replay runner (bd-2dgn0.2), redaction
-adapters (bd-2dgn0.4), and scorecard budgets (bd-2dgn0.3) feed into the
-two profiles described below.
+`swarm-slo` evidence epic. That epic shipped three pieces, and nothing yet
+joins them into a scorecard:
+
+- the replay runner `scripts/swarm-slo-replay.sh` (bd-2dgn0.2), which writes
+  an `ee.swarm_slo.replay.v1` summary and runs in every profile as the
+  `Swarm SLO Replay Contract` stage;
+- the `ee.swarm_slo.scorecard.v1` schema with its budget profiles and golden
+  fixtures (bd-2dgn0.1, bd-2dgn0.3), which no command or script writes;
+- the redaction adapters in `src/policy/swarm_slo_attribution.rs`
+  (bd-2dgn0.4), which only their own tests call.
 
 ## TL;DR — which flag should I use?
 
@@ -16,7 +23,7 @@ two profiles described below.
 | --- | --- |
 | Agent pre-push readiness; per-PR swarm CI smoke; "did I break the type system?" | `./scripts/verify.sh --ci-smoke` |
 | Local "is the tree fine?" check before a substantive change | `./scripts/verify.sh` (default) |
-| Pre-release / weekly Swarm-X scorecard run on the canonical 64-agent host | `./scripts/verify.sh --swarm-heavy` |
+| Pre-release / weekly Swarm-X run on the canonical 64-agent host | `./scripts/verify.sh --swarm-heavy` |
 | Following up a `--ci-smoke` PR before tagging a release | `./scripts/verify.sh --swarm-heavy` |
 
 The two scope flags are mutually exclusive — passing both errors out
@@ -71,20 +78,18 @@ agent pre-push readiness.
 
 ## `--swarm-heavy` (full Swarm-X / 64-agent verification)
 
-Use when you want the full evidence trail required to feed the
-bd-2dgn0 scorecard, including the optional benches and eval that the
-default profile keeps gated behind explicit flags.
+Use when you want every gate, including the benches and eval that the
+default profile keeps behind explicit flags.
 
 `--swarm-heavy` implies `--include-bench`, `--eval`, `--fuzz-smoke`,
 `--include-e2e-orphans`, and `--plan-doc-smoke` on top of every default-profile gate. There is
 no separate "swarm heavy" set of new gates; the value of the flag is
-**the bundle**: a single command that produces a complete scorecard
-input artifact set on a large host.
+**the bundle**: one command that runs all of them on a large host.
 
 ### When to use `--swarm-heavy`
 
 - Cutting a release.
-- Closing a Swarm-X performance bead that cites scorecard evidence.
+- Closing a Swarm-X performance bead.
 - Investigating an SLO regression report from the replay runner
   (bd-2dgn0.2 / bd-2dgn0.3).
 - Periodic (weekly / pre-rotation) cross-feature regression sweeps.
@@ -100,10 +105,11 @@ input artifact set on a large host.
 
 ## Interpreting scorecard failures
 
-The replay runner (bd-2dgn0.2), adapters (bd-2dgn0.4), and budgets
-(bd-2dgn0.3) write a `ee.swarm_slo.scorecard.v1` artifact. When a gate
-fails inside a `--swarm-heavy` run, the failure surface depends on
-which stage produced it:
+A `--swarm-heavy` run does not write an `ee.swarm_slo.scorecard.v1`
+artifact, because nothing produces one yet (see the top of this page).
+What it reports is the stage results. When a gate fails inside a
+`--swarm-heavy` run, the failure surface depends on which stage produced
+it:
 
 1. **`Forbidden Dependencies`, `Closure Linter`, `Vision Coverage`**
    — straight regressions. Fix the underlying code or bead, do not
@@ -113,14 +119,8 @@ which stage produced it:
    what cargo reports.
 3. **`Performance Benchmarks` / `Eval Regression`** — these are the
    real Swarm-X SLO gates. A failure means a feature shipped that
-   regressed an SLO budget. Capture the scorecard artifact path in the
-   feature bead's evidence section, do not just retry the run.
-
-A feature bead is **only** "closed with scorecard evidence" when the
-full `--swarm-heavy` run is green AND the scorecard artifact is cited
-in the bead's close comment. See AGENTS.md "Bead Taxonomy" — scorecard
-evidence behaves like the `implements-surface:*` rule: it is a
-post-condition for closing, not an alternative to it.
+   regressed an SLO budget. Record the failing stage and its output in
+   the feature bead's evidence section, do not just retry the run.
 
 ## RCH-only heavy verification
 
@@ -136,20 +136,16 @@ failure as a verification blocker and surface it in the relevant
 bead. Do **not** run `--swarm-heavy` against local Cargo just because
 remote dispatch refused.
 
-## Citing scorecard evidence in beads
+## Citing a `--swarm-heavy` run in beads
 
 When closing a Swarm-X performance bead, include in the close comment:
 
-- The exact command that produced the scorecard
-  (`scripts/verify.sh --swarm-heavy` plus any env flags).
-- The scorecard artifact path (the bd-2dgn0.3 budget summary line in
-  the verify output points to it).
-- The feature-specific focused proof (perf gate, golden snap, etc.)
-  that the scorecard run also satisfied — the scorecard is
-  cross-feature evidence, not a substitute for the focused proof.
-
-Beads that try to cite scorecard evidence without a matching focused
-proof should be reopened.
+- The exact command (`scripts/verify.sh --swarm-heavy` plus any env
+  flags).
+- The result of each stage the bead depends on.
+- The feature-specific focused proof (perf gate, golden snap, etc.).
+  A green `--swarm-heavy` run is cross-feature evidence, not a substitute
+  for it.
 
 ## See also
 

@@ -865,8 +865,8 @@ peer liveness or staleness. The v1 schema file remains in the repository as a
 historical artifact but is no longer registered or emitted.
 
 Each schema has a JSON Schema file at `docs/schemas/<name>.json` and is
-covered by the J6 drift gate (`tests/contracts/swarm_schema_lifecycle.rs`
-or the equivalent for non-swarm schemas). Adding a new schema without
+covered by the J6 drift gate (`tests/swarm_schema_lifecycle.rs`, run in
+the `integration_s_z` suite, or the equivalent for non-swarm schemas). Adding a new schema without
 the corresponding fixture and drift entry will fail CI.
 
 The ADR also names the future audit back-fill payload
