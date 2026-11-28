@@ -2570,15 +2570,15 @@ impl WhyResultDocumentSource {
     // an extra lookup. Drop the `<...>` metavariable templates in favor of
     // each command's `--help` form so `classify_repair_command` reports
     // `RepairCommandKind::Actionable` and an agent can run the hint verbatim
-    // to discover required arguments. `Self::Session` already shipped without
-    // a metavariable and stays unchanged.
+    // to discover required arguments. Every command named here must exist:
+    // `ee import sessions` and `ee artifact show` never did.
     const fn repair(self) -> &'static str {
         match self {
             Self::Memory => "ee why --help",
             Self::Rule => "ee why --help",
             Self::Evidence => "ee why --help",
-            Self::Session => "ee import sessions --json",
-            Self::Artifact => "ee artifact show --help",
+            Self::Session => "ee review session --help",
+            Self::Artifact => "ee artifact inspect --help",
             Self::CurationCandidate => "ee curate show --help",
             Self::Unknown => "ee search --help",
         }

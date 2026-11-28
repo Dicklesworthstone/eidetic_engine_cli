@@ -1308,7 +1308,7 @@ fn unsafe_workspace_id_degradation() -> ShardFanoutDegradation {
         SHARD_FANOUT_WORKSPACE_ID_UNSAFE_CODE,
         "high",
         "Shard fan-out refused an unsafe workspace ID for path derivation.",
-        "Re-resolve the workspace through ee workspace status before enabling shard fan-out.",
+        "Re-resolve the workspace with `ee workspace resolve` before enabling shard fan-out.",
     )
 }
 

@@ -875,7 +875,7 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
         next_commands.insert(
             0,
             format!(
-                "ee session info {} --json  # admitted transcript history, not curated decisions",
+                "ee review session {} --json  # admitted transcript evidence; read-only without --propose",
                 session.session_id
             ),
         );

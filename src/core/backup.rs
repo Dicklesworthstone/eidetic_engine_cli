@@ -529,7 +529,7 @@ impl BackupMeshSummary {
                 "cachedBodies": "metadata_only_revalidate_after_restore",
             },
             "nextAction": if self.included {
-                "run ee mesh doctor --workspace <side-path> --json and re-pair peers before enabling mesh sync"
+                "run ee mesh status --workspace <side-path> --json and re-pair peers before enabling mesh sync"
             } else {
                 "none"
             },
@@ -3968,7 +3968,7 @@ fn restore_backup_to_side_path_with_recovery_hooks(
         .iter()
         .any(|entry| entry.code == "mesh_restore_requires_repair")
     {
-        next_actions.push(restore_mesh_doctor_next_action(&side_path));
+        next_actions.push(restore_mesh_status_next_action(&side_path));
     }
     if options.dry_run {
         return Ok(BackupRestoreReport {
@@ -4483,9 +4483,9 @@ fn restore_base_next_actions(backup_id: &str, side_path: &Path) -> Vec<String> {
     ]
 }
 
-fn restore_mesh_doctor_next_action(side_path: &Path) -> String {
+fn restore_mesh_status_next_action(side_path: &Path) -> String {
     format!(
-        "ee mesh doctor --workspace {} --json",
+        "ee mesh status --workspace {} --json",
         shell_quote_path_arg(side_path)
     )
 }
@@ -4565,7 +4565,7 @@ fn restore_manifest_degradations(manifest_bytes: &[u8]) -> Vec<BackupDegradation
         degraded.push(BackupDegradation::warning(
             "mesh_restore_requires_repair",
             "backup contains mesh coordination state; restored workspaces keep mesh sync disabled until peers are explicitly re-paired",
-            "run ee mesh doctor --workspace <side-path> --json and re-pair peers before enabling mesh sync",
+            "run ee mesh status --workspace <side-path> --json and re-pair peers before enabling mesh sync",
         ));
     }
     degraded
@@ -17776,8 +17776,8 @@ mod tests {
             restored
                 .next_actions
                 .iter()
-                .any(|action| action.contains("ee mesh doctor")),
-            "mesh restore next actions include mesh doctor",
+                .any(|action| action.contains("ee mesh status")),
+            "mesh restore next actions include mesh status",
         )
     }
 
@@ -17795,9 +17795,9 @@ mod tests {
             "restore base next actions quote shell-unsafe side paths",
         )?;
         ensure_equal(
-            restore_mesh_doctor_next_action(side_path),
-            "ee mesh doctor --workspace '/tmp/restore dir/it'\\'' ll' --json".to_owned(),
-            "restore mesh doctor next action quotes shell-unsafe side path",
+            restore_mesh_status_next_action(side_path),
+            "ee mesh status --workspace '/tmp/restore dir/it'\\'' ll' --json".to_owned(),
+            "restore mesh status next action quotes shell-unsafe side path",
         )
     }
 

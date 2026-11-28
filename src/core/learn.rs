@@ -4072,7 +4072,7 @@ fn load_learning_snapshot_with_boundary(
         .list_feedback_events(&workspace_id)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to list learning feedback events: {error}"),
-            repair: Some("ee outcome list --json".to_string()),
+            repair: Some("ee doctor".to_string()),
         })?;
     let audit_entries = connection
         .list_audit_entries(Some(&workspace_id), None)

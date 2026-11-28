@@ -17,8 +17,8 @@
     "code": "shard_fanout_workspace_id_unsafe",
     "severity": "high",
     "message_contains": ["unsafe workspace ID"],
-    "repair_contains": "ee workspace status",
-    "repair_string": "Re-resolve the workspace through ee workspace status before enabling shard fan-out.",
-    "repair_command_regex": "(?<cmd>ee workspace status)"
+    "repair_contains": "ee workspace resolve",
+    "repair_string": "Re-resolve the workspace with `ee workspace resolve` before enabling shard fan-out.",
+    "repair_command_regex": "(?<cmd>ee workspace resolve)"
   }
 }

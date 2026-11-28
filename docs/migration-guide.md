@@ -942,7 +942,7 @@ New columns added to existing tables (additive only):
 
 Rollback: `ee mesh disable --workspace .` removes the peer-group +
 trust + workspace-binding rows transactionally. Per-peer revocation
-is via `ee mesh revoke <node-key>`.
+is via `ee mesh peer revoke <peer-id>`.
 
 ### Backward compatibility
 

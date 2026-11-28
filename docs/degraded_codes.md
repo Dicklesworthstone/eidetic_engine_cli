@@ -16487,7 +16487,7 @@ ee status --workspace . --json
 
 **Expected emission.** Message contains: `unsafe workspace ID`
 
-**Repair hint.** Re-resolve the workspace through ee workspace status before enabling shard fan-out.
+**Repair hint.** Re-resolve the workspace with `ee workspace resolve` before enabling shard fan-out.
 
 **Fixture.** [`tests/fixtures/failure_modes/shard_fanout_workspace_id_unsafe.json`](../tests/fixtures/failure_modes/shard_fanout_workspace_id_unsafe.json)
 
@@ -19724,5 +19724,5 @@ the gap is one of:
 For new degraded codes, follow the J6 fixture-authoring workflow in
 `tests/fixtures/failure_modes/` (see any existing fixture as a
 template), then regenerate.
-<!-- degraded-codes-fingerprint inputs=sha256:fb9916b78a8c676c1a58abe0d97fa2291ee555d08dd297f24c28ecdaa01659dd -->
-<!-- degraded-codes-fingerprint body=sha256:ca841520da1d1632eb706736447e251e24745f748bb91c30e232993d5111ff7f -->
+<!-- degraded-codes-fingerprint inputs=sha256:534d2d09b48fe1a16e7e076030dae2bcd3b94a7d49210cf6565f643356e5ef3f -->
+<!-- degraded-codes-fingerprint body=sha256:6b4ac45f4841aaeb27f7365ecdfb71aa4d81ae251ed0ab545796c8d6a85fc7b8 -->

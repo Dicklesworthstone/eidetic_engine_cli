@@ -861,7 +861,7 @@ fn recommendations(
             code: "increase_outcome_coverage",
             severity: "medium",
             summary: "Outcome coverage is low; wire ambient capture and explicit outcome hooks for packed memories.".to_string(),
-            command: Some("ee outcome helpful|harmful <memory-id> --json".to_string()),
+            command: Some("ee outcome <memory-id> --signal helpful|harmful --json".to_string()),
         });
     }
     if packed_memory_count > 0
@@ -873,7 +873,7 @@ fn recommendations(
             summary: "Packed memories are not receiving enough outcome signal after use."
                 .to_string(),
             command: Some(
-                "ee pack <task> --json && ee outcome helpful|harmful <memory-id> --json"
+                "ee pack <task> --json && ee outcome --pack <pack-id> --item <n> --signal helpful|harmful --json"
                     .to_string(),
             ),
         });

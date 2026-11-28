@@ -3791,7 +3791,7 @@ fn resolve_target_workspace(
             if !span.is_direct_pack_admitted_for_session(&span.workspace_id, &session) {
                 return Err(DomainError::PolicyDenied {
                     message: "Evidence target no longer has live pack admission.".to_owned(),
-                    repair: Some("ee import status --json".to_owned()),
+                    repair: Some(format!("ee why {target_id} --json")),
                 });
             }
         }

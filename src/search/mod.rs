@@ -3010,12 +3010,14 @@ impl IndexManifestError {
     #[must_use]
     pub fn repair(&self) -> &'static str {
         match self {
-            Self::NotFound { .. } => "Run `ee index build` to create the index.",
-            Self::InvalidFormat { .. } => "Delete the corrupted manifest and run `ee index build`.",
-            Self::UnsupportedSchema { .. } => {
-                "Upgrade ee or rebuild the index with `ee index build`."
+            Self::NotFound { .. } => "Run `ee index rebuild` to create the index.",
+            Self::InvalidFormat { .. } => {
+                "Delete the corrupted manifest and run `ee index rebuild`."
             }
-            Self::MissingField { .. } => "Run `ee index build` to regenerate the manifest.",
+            Self::UnsupportedSchema { .. } => {
+                "Upgrade ee or rebuild the index with `ee index rebuild`."
+            }
+            Self::MissingField { .. } => "Run `ee index rebuild` to regenerate the manifest.",
             Self::GenerationMismatch { .. } => "Run `ee index rebuild` to sync with the database.",
             Self::EmbeddingMismatch { .. } => {
                 "Run `ee index rebuild` with the correct embedding model."
