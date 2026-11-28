@@ -4328,7 +4328,9 @@ fn graph_numa_pin_check_from_result(result: &NumaPinResult) -> CheckResult {
             format_static_codes(&result.degraded_codes)
         ),
         error_code: None,
-        repair: Some("Inspect `ee status --json` graph.numaPin and graph NUMA env/config."),
+        repair: Some(
+            "No platform pins graph snapshots yet; run `EE_GRAPH_NUMA_PIN_DISABLE=1 ee doctor --json` to see this check as disabled.",
+        ),
         tier: CheckTier::Core,
     }
 }

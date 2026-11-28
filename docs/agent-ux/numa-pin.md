@@ -1,10 +1,12 @@
 # NUMA-aware graph snapshot pinning
 
 > **Status:** scaffold (bd-ldstd, sub-bead of bd-1prrl.3 / swarmx.4).
-> The public surface, configuration, schema, and degraded-code vocabulary
-> documented here are stable. The Linux `libc::mbind` / `MAP_POPULATE`
-> syscall path and the wiring into `refresh_graph_snapshot` /
-> `load_graph_snapshot` are tracked under follow-up slices of bd-1prrl.3.
+> Nothing pins a graph snapshot on any platform yet. What runs today is
+> the advisory `graph_numa_pin` check in `ee doctor`, configured by three
+> environment variables; the `[graph.numa_pin]` config table is not
+> accepted. The Linux `libc::mbind` / `MAP_POPULATE` syscall path and the
+> wiring into `refresh_graph_snapshot` / `load_graph_snapshot` remain
+> unbuilt. bd-1prrl.3 is closed and no open bead tracks them.
 
 ## What this optimization does
 
@@ -35,30 +37,44 @@ No graph algorithm code changes; only the loader path moves.
 
 ## Configuration
 
-The optimization is config-driven; no CLI flag is involved.
+No CLI flag is involved. The planned `.ee/config.toml` table was:
 
-```toml
+```text
 [graph.numa_pin]
 enabled          = true     # opt out by setting to false
 preferred_node   = "auto"   # "auto" detects from CPU affinity; "0"/"1"/... pin to an explicit node
 populate_on_load = true     # pre-fault all pages on load
 ```
 
-Environment variables (registered in `src/config/env_registry.rs` by
-the wiring slice — not the scaffold):
+Do not add it. `[graph]` is a closed table in `src/config/file.rs`, and
+`numa_pin` is not one of its keys, so the config loader rejects the whole
+file with an unknown-key error.
 
-| Variable | Equivalent | Notes |
+The settings are environment variables, registered in
+`src/config/env_registry.rs`. The two switches accept `true|1|yes|on` and
+`false|0|no|off`. An unparseable value in any of the three is ignored.
+Today only `ee doctor` reads them.
+
+| Variable | Default | Notes |
 |---|---|---|
-| `EE_GRAPH_NUMA_PIN_DISABLE` | `[graph.numa_pin] enabled = false` | Disables the optimization without editing config. |
-| `EE_GRAPH_NUMA_PIN_NODE` | `[graph.numa_pin] preferred_node` | Accepts `auto` or a non-negative integer. |
+| `EE_GRAPH_NUMA_PIN_DISABLE` | off | Turns the optimization off; doctor then reports the check as disabled. |
+| `EE_GRAPH_NUMA_PIN_NODE` | `auto` | Accepts `auto` or a non-negative integer. |
+| `EE_GRAPH_NUMA_PIN_POPULATE` | on | Requests pre-faulting all pages on load. |
+
+## What `ee doctor --json` reports
+
+The `graph_numa_pin` check is advisory, so it never changes doctor's
+overall health. On Linux it reports `ok` with a not-implemented note. On
+macOS and Windows, with the default settings, it reports a `warning`
+carrying `numa_pin_unsupported_platform`. With
+`EE_GRAPH_NUMA_PIN_DISABLE=1` it reports `ok` as disabled.
 
 ## What `ee status --json` reports
 
-The wiring slice surfaces a `numaPin` block at
-`data.graph.numaPin` matching the
+Nothing yet: `ee status --json` emits no `numaPin` block. The
 [`ee.status.graph.numa_pin.v1`](../schemas/ee.status.graph.numa_pin.v1.json)
-schema. The scaffold pins the schema id and the field shape so
-consumers can write parsers ahead of the wiring slice.
+schema is registered and fixes the planned shape of a block at
+`data.graph.numaPin`, shown below, but no command fills it.
 
 ```jsonc
 {
@@ -89,34 +105,30 @@ of the codes documented in `tests/fixtures/failure_modes/`:
 
 Pack hashes MUST be byte-identical regardless of NUMA pinning state.
 The optimization only changes wall-clock; the algorithm output is
-unchanged. The determinism gate
-(`tests/determinism_unit.rs`, extended by the wiring slice) pins this
-invariant across `[graph.numa_pin] enabled = true | false`.
+unchanged. Nothing tests this yet, because nothing pins:
+`tests/determinism_unit.rs` does not mention NUMA. When the syscall path
+lands, that gate needs a case run with pinning on and off.
 
 ## Snapshot lifecycle interaction
 
-When `ee graph snapshot prune` runs, pinned blobs MUST be unmapped
-before the file is deleted. The wiring slice adds a `munmap` plus
-reservation release to the prune path; the scaffold's pinning result
-includes the snapshot path so the prune handler has the metadata it
-needs to release the mapping.
+Any command that deletes a pinned snapshot file must unmap it first.
+There is no such command today: `ee graph snapshot` has only `refresh`.
+The pinning result already carries the snapshot path, which is what a
+future prune path would need to release the mapping.
 
 ## What the scaffold does NOT do (yet)
 
 - Issue any `mmap`, `mbind`, `mlock`, or `madvise` syscalls.
 - Wire into `refresh_graph_snapshot` / `load_graph_snapshot`.
 - Surface the `numaPin` block in `ee status --json`.
-- Register the `[graph.numa_pin]` config section in `src/config/mod.rs`.
-- Register `EE_GRAPH_NUMA_PIN_*` env vars in `src/config/env_registry.rs`.
-- Add a `ee doctor` NUMA readiness check.
+- Accept a `[graph.numa_pin]` config table (the loader rejects one).
 - Land the criterion bench at `benches/graph_pagerank_numa.rs`.
 - Land the e2e script at `scripts/e2e_overhaul/sx4_numa_pin.sh`.
 
-These ship under follow-up sub-beads of bd-1prrl.3. The scaffold
-intentionally avoids touching `src/core/status.rs`, `src/cli/mod.rs`,
-`src/db/mod.rs`, `src/config/mod.rs`, and `src/config/env_registry.rs`
-because those files are currently in flight for unrelated shard-fanout
-and workspace-hygiene work.
+The `EE_GRAPH_NUMA_PIN_*` environment variables and the `ee doctor`
+check, which earlier versions of this list also named, have since landed.
+bd-1prrl.3 closed after the `NumaPinningAdapter` trait landed, leaving the
+items above with no open bead.
 
 ## Related beads
 
