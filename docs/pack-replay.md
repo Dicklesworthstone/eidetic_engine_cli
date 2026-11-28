@@ -374,9 +374,8 @@ The following test families cover replay, freshness, and egress:
 | File | Coverage |
 |------|----------|
 | `tests/e2e_pack_determinism.rs` | Ledger persistence, deterministic selection |
-| `tests/no_mocks_e2e.rs` | Real-binary pack with ledger assertions |
-| `tests/redaction_egress_no_mock.rs` | Egress matrix for secret-like spans |
-| `tests/freshness_contracts.rs` | Freshness states, changed_source E2E |
+| `tests/no_mocks_e2e.rs` | Real-binary pack with ledger assertions; secret-like spans redacted on public outputs (`no_mocks_public_outputs_redact_secret_like_memory_content`); replay and diff freshness and egress (`no_mocks_pack_replay_diff_freshness_and_egress_are_logged`) |
+| `tests/memory_drift_no_mock_e2e.rs` | Replay surfaces a changed source without mutating the store |
 | `tests/degraded_honesty.rs` | Support bundle schema validation |
 | `tests/support_bundle_perf_compare.rs` | Bundle profile/perf evidence |
 | `tests/json_contract_snapshots.rs` | Stable pack ledger JSON contracts |

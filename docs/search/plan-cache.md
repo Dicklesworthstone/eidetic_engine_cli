@@ -1,7 +1,7 @@
 # EQL query plan cache
 
 > **Bead:** [`bd-2mey5`](https://github.com/Dicklesworthstone/eidetic_engine_cli) — idea-wizard MagentaPanther 2026-05-18.
-> **Status (2026-05-19):** cache module shipped; `run_search_inner` integration and `ee diag plan-cache --json` surface tracked as follow-up work below.
+> **Status (2026-11-27):** the search path consults the cache (`lookup_or_insert_process_plan` in `src/core/search.rs`), and `ee diag plan-cache --json` reports it. The cache lives in process memory, so read [Observability](#observability) before relying on its counters.
 
 ## Why this exists
 
@@ -75,11 +75,11 @@ pub struct CompiledPlan {
 }
 ```
 
-The current slice persists the parsed `EqlQuery`. The `bound_index` and
-`join_strategy` fields stay `Option<None>` until the follow-up integration
-bead extracts the compile step out of `run_search_inner`. The cache shape is
-forward-compatible: adding the resolved index/join values does not change the
-public types beyond filling those `Option` fields.
+`compiled_search_plan` in `src/core/search.rs` fills all three fields. The
+parsed query's `q` is the lexical engine's rewrite of the request text.
+`bound_index` is the source mode (`lexical_only`, `semantic_only` or
+`hybrid`), and `join_strategy` is `lexical_only`, `semantic_two_tier` or
+`hybrid_two_tier`.
 
 The plan-tree hash recomputes the canonical hash from the stored fields on
 every `get`. A corrupted entry (e.g. invariant violation, manual surgery, or a
@@ -105,22 +105,27 @@ parse + bind cost.
 
 `PlanCache::stats()` exposes monotonic counters: `hits`, `misses`,
 `inserts`, `evictions`, `invalidations`, plus the current cache size and
-capacity. The follow-up `ee diag plan-cache --json` surface will expose these
-through the standard CLI envelope and will include the top-N hot key
-projections.
+capacity. `ee diag plan-cache --json` reports them in the standard envelope,
+with the first 16 cached keys in sorted key order.
 
-The bead tracing contract is `surface=plan_cache` with required fields
-`workspace_id`, `eql_hash`, `manifest_version`,
-`decision (hit|miss|invalidated)`, `elapsed_ms`, and `degraded_codes`. The
-degraded vocabulary is:
+The cache is a process-wide static, so the counters belong to the process
+that ran the searches. A long-running process such as `ee serve` keeps one
+cache across the searches it runs, but no long-running surface exposes
+`diag plan-cache`. A separate
+`ee diag plan-cache` process therefore always reports an empty cache: size 0,
+zero hits and zero misses. What it can tell you today is the capacity and
+where that value came from (`process_env` or `registry_default`).
 
-| Code | Meaning |
+Each lookup emits a `debug` event on the tracing target
+`ee::search::plan_cache` with `workspace_id` (the index directory),
+`eql_hash`, `index_manifest_version`, `search_config_hash`, `plan_tree_hash`,
+`cache_decision`, `capacity`, `evicted` (a count), `degraded_codes`,
+`elapsed_ms` and `source_mode`. `degraded_codes` is always `[]`.
+
+| Code | Where it is reported |
 |---|---|
-| `plan_cache_disabled` | Capacity 0 or feature-flagged off. |
-| `plan_cache_full` | Insert evicted at least one entry. |
-
-These codes will be wired through the standard degraded aggregation pipeline
-once `run_search_inner` consults the cache.
+| `plan_cache_disabled` | `ee diag plan-cache`, when `EE_QUERY_PLAN_CACHE_ENTRIES` is 0. Search output does not report it. |
+| `plan_cache_full` | Nowhere yet. An eviction shows only as the trace event's `evicted` count. |
 
 ## Determinism
 
@@ -133,24 +138,20 @@ once `run_search_inner` consults the cache.
   alongside any incompatible schema change so historical entries fail
   self-verification instead of returning stale data.
 
-## Follow-up before `bd-2mey5` closes
+## What is still open
 
-The current slice keeps the cache reachable as a library type. The
-remaining acceptance items live in follow-up beads:
+`bd-2mey5` is closed, and the search integration, the `diag` surface and the
+trace event have landed. Three things are not done:
 
-- **Integration**: hook `src/core/search.rs:run_search_inner` so the
-  call site at the `search_sync` invocation consults the plan cache and only
-  re-runs parse + bind + index-choice on a miss. The current signature of
-  `search_sync` takes `query: &str`; the integration slice will introduce a
-  small "compile" step that returns a `CompiledPlan` and threads it through.
-- **`ee diag plan-cache --json`**: expose `PlanCacheStats` and the top
-  cached keys through the standard envelope.
-- **Tracing**: emit the `surface=plan_cache` decision events on every
-  `get`/`insert`.
-- **Performance**: pin p50 EQL plan resolution `<2µs` on cache hit and
-  no-regression on cache miss (bead acceptance #4 and #5).
-- **End-to-end test** (`tests/plan_cache_e2e.rs`): drive `ee search` twice
-  with the same query and assert the second call hits the plan cache.
-
-Each follow-up will land its own bead under the `bd-2mey5` parent. This file
-will gain a "Status" badge each time one of those acceptance items lands.
+- **Performance.** No bench pins plan resolution time on a hit or a miss, so
+  the `<2µs` hit target in the bead's acceptance is unmeasured.
+- **Live counters from the CLI.** `ee diag plan-cache` cannot read another
+  process's cache (see [Observability](#observability)), so an end-to-end
+  test that runs `ee search` twice and expects a hit is not possible as
+  separate processes. `tests/plan_cache_unit.rs`
+  (`process_cache_reuses_compiled_plan_and_diag_reports_live_counters`)
+  checks hit counting inside one process instead, and
+  `tests/diag_plan_cache_e2e.rs` checks only the envelope of a real `diag`
+  run.
+- **Degraded codes on search output.** Neither `plan_cache_disabled` nor
+  `plan_cache_full` reaches `ee search` or `ee context` output.

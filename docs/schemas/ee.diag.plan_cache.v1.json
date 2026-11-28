@@ -86,7 +86,7 @@
           "invalidations": 0,
           "hitRate": null,
           "envVarName": "EE_QUERY_PLAN_CACHE_ENTRIES",
-          "envVarValueSource": "operator_override",
+          "envVarValueSource": "process_env",
           "topKeys": []
         }
       },
@@ -94,7 +94,7 @@
         {
           "code": "plan_cache_disabled",
           "severity": "info",
-          "message": "EE_QUERY_PLAN_CACHE_ENTRIES is 0; plan caching is disabled by operator override.",
+          "message": "EE_QUERY_PLAN_CACHE_ENTRIES is 0; plan caching is disabled.",
           "repair": "Unset EE_QUERY_PLAN_CACHE_ENTRIES or set it to a positive integer to re-enable plan caching."
         }
       ]
@@ -120,14 +120,7 @@
           "topKeys": []
         }
       },
-      "degraded": [
-        {
-          "code": "plan_cache_not_yet_integrated",
-          "severity": "warning",
-          "message": "Plan cache module is present but search_sync does not consult it yet; counters will remain zero until the run_search_inner hook lands.",
-          "repair": "Tracked under bd-2mey5; pick up the run_search_inner integration slice or wait for it to land."
-        }
-      ]
+      "degraded": []
     }
   ],
   "$defs": {
