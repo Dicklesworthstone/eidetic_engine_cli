@@ -5519,48 +5519,59 @@ fn remember_write_immune_hold(
     }
     let window_end_ms = current.observed_at_ms;
     let window_start_ms = window_end_ms.saturating_sub(DEFAULT_WRITE_STREAM_WINDOW_MS);
-    // The newest rows from every agent, as many as the write ceiling, plus
-    // this write are enough to exceed it. A workspace busier than that across
-    // agents undercounts, which can only withhold a hold, never add one. A
-    // configured ceiling below the minimum sample still reads that sample.
-    let rows = connection
-        .list_memories_with_ids_between(
-            workspace_id,
-            &memory_id_bound_at_ms(window_start_ms, false),
-            &memory_id_bound_at_ms(window_end_ms, true),
-            thresholds
-                .max_writes_per_window
-                .max(REMEMBER_WRITE_IMMUNE_MIN_WRITES),
-        )
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to read the write-immune window: {error}"),
-            repair: Some("ee doctor --json".to_owned()),
-        })?;
-    // Oldest first, as near-duplicate counting compares each write with the
-    // ones before it.
-    let prior = rows
-        .iter()
-        .rev()
-        .filter(|row| row.id != memory_id)
-        .filter(|row| {
-            super::memory_scope::memory_producer_agent(row).as_deref()
-                == Some(current.source_id.as_str())
-        })
-        .filter_map(|row| {
+    // Count this source's writes, independent of other agents sharing the
+    // workspace. Page past substring matches from similarly named agents
+    // until the canonical producer and time checks yield a full sample.
+    const PAGE_ROWS: u32 = 64;
+    let limit = thresholds
+        .max_writes_per_window
+        .max(REMEMBER_WRITE_IMMUNE_MIN_WRITES) as usize;
+    let min_id = memory_id_bound_at_ms(window_start_ms, false);
+    let max_id = memory_id_bound_at_ms(window_end_ms, true);
+    let page_size = limit.min(PAGE_ROWS as usize) as u32;
+    let mut before_id = None;
+    let mut prior = Vec::new();
+    while prior.len() < limit {
+        let rows = connection
+            .list_write_source_candidates(
+                workspace_id,
+                &min_id,
+                &max_id,
+                before_id.as_deref(),
+                &current.source_id,
+                page_size,
+            )
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to read the write-immune window: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        let end_of_window = rows.len() < page_size as usize;
+        before_id = rows.last().map(|row| row.id.clone());
+        let remaining = limit - prior.len();
+        prior.extend(rows.into_iter().filter_map(|row| {
+            if row.id == memory_id
+                || super::memory_scope::memory_producer_agent(&row).as_deref()
+                    != Some(current.source_id.as_str())
+            {
+                return None;
+            }
             let created_ms = chrono::DateTime::parse_from_rfc3339(&row.created_at)
                 .ok()
                 .and_then(|created| u64::try_from(created.timestamp_millis()).ok())?;
             (window_start_ms..=window_end_ms)
                 .contains(&created_ms)
                 .then_some((row, created_ms))
-        })
-        .collect::<Vec<_>>();
-    // Most writes stop here, before any content is hashed or embedded.
+        }).take(remaining));
+        if end_of_window {
+            break;
+        }
+    }
     if prior.len() < REMEMBER_WRITE_IMMUNE_MIN_WRITES.saturating_sub(1) as usize {
         return Ok(None);
     }
     let mut observations = prior
         .into_iter()
+        .rev()
         .map(|(row, created_ms)| {
             WriteStreamObservation::memory_create(
                 current.source_id.clone(),
@@ -25064,6 +25075,32 @@ mod tests {
             released.status.as_str(),
             "released",
             "the hold is reviewable",
+        )
+    }
+
+    #[test]
+    fn other_agents_cannot_displace_a_sources_write_window() -> TestResult {
+        let workspace = upgrade_test_workspace()?;
+        let ceiling = crate::core::write_owner::REMEMBER_WRITE_IMMUNE_MIN_WRITES;
+        set_workspace_feedback_config(
+            workspace.path(),
+            &format!("write_immune_writes_per_hour = {ceiling}\n"),
+        )?;
+        let content = "Retry the flaky upload step.";
+        for _ in 0..ceiling - 1 {
+            remember_as(workspace.path(), content, Some("agent-a"))?;
+        }
+        // These rows match the SQL prefilter, but belong to another source.
+        // They force a second page to recover all nineteen matching writes.
+        for _ in 0..3 {
+            let foreign = remember_as(workspace.path(), content, Some("agent-a2"))?;
+            ensure(foreign.write_immune_hold.is_none(), true, "separate source")?;
+        }
+        let held = remember_as(workspace.path(), content, Some("agent-a"))?;
+        ensure(
+            held.write_immune_hold.map(|hold| hold.reason_codes),
+            Some(vec!["near_duplicate_ratio_exceeded".to_owned()]),
+            "only the named source's twenty writes count",
         )
     }
 

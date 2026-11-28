@@ -30091,29 +30091,28 @@ impl DbConnection {
             .collect()
     }
 
-    /// A workspace's memories whose ids fall in `min_id..=max_id`, highest id
-    /// first, at most `limit`. Tombstoned and superseded rows are included,
-    /// because a write-rate window counts writes rather than live memories.
-    ///
-    /// Ids minted by `MemoryId::now` are UUIDv7 in an order-preserving
-    /// encoding, so an id range is a creation-time range read from the
-    /// primary key. `memories` has no `created_at` index. Ids derived from a
-    /// hash (team inbound) fall outside a narrow range almost surely; the
-    /// caller still checks `created_at` itself.
-    pub(crate) fn list_memories_with_ids_between(
+    /// Page historical write candidates newest first in a UUIDv7 time window.
+    /// Retain tombstones and superseded writes. The substring test prunes
+    /// unrelated agents before fetching bodies but is only a prefilter: the
+    /// caller applies the canonical producer parser, including legacy URIs.
+    pub(crate) fn list_write_source_candidates(
         &self,
         workspace_id: &str,
         min_id: &str,
         max_id: &str,
+        before_id: Option<&str>,
+        source_id: &str,
         limit: u32,
     ) -> Result<Vec<StoredMemory>> {
         self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE id >= ?2 AND id <= ?3 AND workspace_id = ?1 ORDER BY id DESC LIMIT ?4",
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND id >= ?2 AND id <= ?3 AND id <> ?4 AND (instr(trust_subclass, ?5) > 0 OR instr(provenance_uri, ?5) > 0) ORDER BY id DESC LIMIT ?6",
             &[
                 Value::Text(workspace_id.to_owned()),
                 Value::Text(min_id.to_owned()),
-                Value::Text(max_id.to_owned()),
+                Value::Text(before_id.unwrap_or(max_id).to_owned()),
+                Value::Text(before_id.unwrap_or("").to_owned()),
+                Value::Text(source_id.to_owned()),
                 Value::BigInt(i64::from(limit)),
             ],
         )?
