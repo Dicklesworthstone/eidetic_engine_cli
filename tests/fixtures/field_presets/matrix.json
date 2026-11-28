@@ -87,6 +87,71 @@
       "surface": "memory_anchors",
       "command": "memory anchors",
       "schema_file": "ee.memory.anchors.v1.json"
+    },
+    {
+      "surface": "curate_auto_promote",
+      "command": "curate auto-promote",
+      "schema_file": "ee.curate.auto_promote.v1.json"
+    },
+    {
+      "surface": "curate_disposition",
+      "command": "curate disposition",
+      "schema_file": "ee.curate.disposition.v1.json"
+    },
+    {
+      "surface": "curate_show",
+      "command": "curate show",
+      "schema_file": "ee.curate.show.v1.json"
+    },
+    {
+      "surface": "diag_incident",
+      "command": "diag incident",
+      "schema_file": "ee.diag.incident.replay.v1.json"
+    },
+    {
+      "surface": "maintenance_graph_snapshot_prune",
+      "command": "maintenance graph-snapshot-prune",
+      "schema_file": "ee.graph.snapshot_prune.v1.json"
+    },
+    {
+      "surface": "maintenance_graph_witnesses_prune",
+      "command": "maintenance graph-witnesses-prune",
+      "schema_file": "ee.graph.witness_prune_report.v1.json"
+    },
+    {
+      "surface": "health_scorecard",
+      "command": "health scorecard",
+      "schema_file": "ee.health_scorecard.v1.json"
+    },
+    {
+      "surface": "insights",
+      "command": "insights",
+      "schema_file": "ee.insights.v1.json"
+    },
+    {
+      "surface": "mcp_manifest",
+      "command": "mcp manifest",
+      "schema_file": "ee.mcp.manifest.v1.json"
+    },
+    {
+      "surface": "reflect_ingest",
+      "command": "reflect ingest",
+      "schema_file": "ee.reflect.ingest.v1.json"
+    },
+    {
+      "surface": "reflect_propose",
+      "command": "reflect propose",
+      "schema_file": "ee.reflect.propose.v1.json"
+    },
+    {
+      "surface": "reflect_request_ledger_diagnostics",
+      "command": "reflect request-ledger diagnostics",
+      "schema_file": "ee.reflect.request_ledger.diagnostics.v1.json"
+    },
+    {
+      "surface": "timeline",
+      "command": "timeline",
+      "schema_file": "ee.timeline.v1.json"
     }
   ]
 }
