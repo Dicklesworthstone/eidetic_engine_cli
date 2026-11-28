@@ -12,8 +12,8 @@
     "description": "A context pack selects memories with directly contradictory claims on the same subject.",
     "setup_commands": [
       "ee init --workspace .",
-      "ee remember 'Always use HTTPS for callbacks.' --workspace . --level procedural --kind rule --tag transport-https --json",
-      "ee remember 'Never use HTTPS for callbacks.' --workspace . --level procedural --kind rule --tag transport-https --json",
+      "ee remember 'Always use HTTPS for callbacks.' --workspace . --level procedural --kind rule --tags transport-https --json",
+      "ee remember 'Never use HTTPS for callbacks.' --workspace . --level procedural --kind rule --tags transport-https --json",
       "ee index rebuild --workspace . --json"
     ],
     "invocation": "ee context 'HTTPS callbacks' --workspace . --json"

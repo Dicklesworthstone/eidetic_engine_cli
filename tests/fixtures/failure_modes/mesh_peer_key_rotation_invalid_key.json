@@ -11,7 +11,7 @@
   "trigger": {
     "description": "A peer key rotation is attempted with an empty or malformed replacement key fingerprint, so the rotation is denied without touching the stored key generation.",
     "setup_commands": ["enroll a mesh peer", "run rotate with an empty replacement fingerprint"],
-    "invocation": "ee mesh peer rotate <node-key> --fingerprint \"\" --workspace . --json"
+    "invocation": "ee mesh peer rotate <peer-id> --public-key-fingerprint \"\" --workspace . --json"
   },
   "expected_emission": {
     "code": "mesh_peer_key_rotation_invalid_key",

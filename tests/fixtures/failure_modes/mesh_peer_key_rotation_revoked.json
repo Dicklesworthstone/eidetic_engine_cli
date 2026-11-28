@@ -15,7 +15,7 @@
       "revoke it with ee mesh peer revoke",
       "attempt a rotation on the revoked record"
     ],
-    "invocation": "ee mesh peer rotate <revoked-node-key> --fingerprint <new> --workspace . --json"
+    "invocation": "ee mesh peer rotate <revoked-peer-id> --public-key-fingerprint <new> --workspace . --json"
   },
   "expected_emission": {
     "code": "mesh_peer_key_rotation_revoked",

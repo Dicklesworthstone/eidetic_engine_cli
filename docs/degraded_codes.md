@@ -3131,8 +3131,8 @@ ee causal estimate --artifact-id artifact-1 --method matching --workspace . --js
 
 ```bash
 ee init --workspace .
-ee remember 'Always use HTTPS for callbacks.' --workspace . --level procedural --kind rule --tag transport-https --json
-ee remember 'Never use HTTPS for callbacks.' --workspace . --level procedural --kind rule --tag transport-https --json
+ee remember 'Always use HTTPS for callbacks.' --workspace . --level procedural --kind rule --tags transport-https --json
+ee remember 'Never use HTTPS for callbacks.' --workspace . --level procedural --kind rule --tags transport-https --json
 ee index rebuild --workspace . --json
 ```
 
@@ -10694,8 +10694,10 @@ ee swarm brief --workspace . --json
 
 ```bash
 ee init --workspace . --json
-ee remember 'Changed provenance marker.' --workspace . --level procedural --kind rule --json
-ee memory drift verify --workspace . --sample-size 1 --json
+mkdir -p src && printf 'v1\n' > src/drift_marker.rs
+ee remember 'Changed provenance marker.' --workspace . --level procedural --kind rule --source "file://$PWD/src/drift_marker.rs" --json
+printf 'v2\n' > src/drift_marker.rs
+ee verify provenance --workspace . --json   # records the changed source as a provenance mismatch
 ```
 
 **Invocation.**
@@ -11532,7 +11534,7 @@ run rotate with an empty replacement fingerprint
 **Invocation.**
 
 ```bash
-ee mesh peer rotate <node-key> --fingerprint "" --workspace . --json
+ee mesh peer rotate <peer-id> --public-key-fingerprint "" --workspace . --json
 ```
 
 **Expected emission.** Message contains: `key`
@@ -11564,7 +11566,7 @@ attempt a rotation on the revoked record
 **Invocation.**
 
 ```bash
-ee mesh peer rotate <revoked-node-key> --fingerprint <new> --workspace . --json
+ee mesh peer rotate <revoked-peer-id> --public-key-fingerprint <new> --workspace . --json
 ```
 
 **Expected emission.** Message contains: `revoked`
@@ -11595,7 +11597,7 @@ run rotate passing that same fingerprint
 **Invocation.**
 
 ```bash
-ee mesh peer rotate <node-key> --fingerprint <same> --workspace . --json
+ee mesh peer rotate <peer-id> --public-key-fingerprint <same> --workspace . --json
 ```
 
 **Expected emission.** Message contains: `unchanged`
@@ -18079,7 +18081,7 @@ ee team idp attest --id-token malformed.jwt --discovery-json discovery.json --wo
 ```bash
 ee init --workspace .
 ee remember "Always rebase in shared checkouts." --workspace . --level procedural --kind rule
-ee remember "Never rebase in shared checkouts." --workspace . --level procedural --kind rule --trust-class peer_human_attested
+# a teammate's memory saying "Never rebase in shared checkouts." must arrive through team exchange; ee remember has no trust-class flag and cannot create one
 ```
 
 **Invocation.**
@@ -19723,5 +19725,5 @@ the gap is one of:
 For new degraded codes, follow the J6 fixture-authoring workflow in
 `tests/fixtures/failure_modes/` (see any existing fixture as a
 template), then regenerate.
-<!-- degraded-codes-fingerprint inputs=sha256:e813c2d6a411337f631ae20fb5dda79c3f3d391e75e641067ac495ff111536e2 -->
-<!-- degraded-codes-fingerprint body=sha256:0bc07d95cd2c073a27d0a3902e79f82f631433cfa138a05fbea67b7df8a8f44e -->
+<!-- degraded-codes-fingerprint inputs=sha256:1ca227d34554239852bba16ca919dde4b1c5fad938a592d9bd004f3a638c9635 -->
+<!-- degraded-codes-fingerprint body=sha256:e0543678f07fc48356ab62b74d2c1dfd63a8d04035e7829e8ba58492775ded21 -->

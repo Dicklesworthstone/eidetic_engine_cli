@@ -13,7 +13,7 @@
     "setup_commands": [
       "ee init --workspace .",
       "ee remember \"Always rebase in shared checkouts.\" --workspace . --level procedural --kind rule",
-      "ee remember \"Never rebase in shared checkouts.\" --workspace . --level procedural --kind rule --trust-class peer_human_attested"
+      "# a teammate's memory saying \"Never rebase in shared checkouts.\" must arrive through team exchange; ee remember has no trust-class flag and cannot create one"
     ],
     "invocation": "ee pack \"rebase policy\" --workspace . --memory-scope team --json"
   },

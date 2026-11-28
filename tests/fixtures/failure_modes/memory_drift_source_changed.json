@@ -12,8 +12,10 @@
     "description": "Search or context selects a memory whose persisted provenance chain verification status is mismatch, meaning the remembered source evidence no longer matches the stored chain hash.",
     "setup_commands": [
       "ee init --workspace . --json",
-      "ee remember 'Changed provenance marker.' --workspace . --level procedural --kind rule --json",
-      "ee memory drift verify --workspace . --sample-size 1 --json"
+      "mkdir -p src && printf 'v1\\n' > src/drift_marker.rs",
+      "ee remember 'Changed provenance marker.' --workspace . --level procedural --kind rule --source \"file://$PWD/src/drift_marker.rs\" --json",
+      "printf 'v2\\n' > src/drift_marker.rs",
+      "ee verify provenance --workspace . --json   # records the changed source as a provenance mismatch"
     ],
     "invocation": "ee search 'Changed provenance marker' --workspace . --json"
   },

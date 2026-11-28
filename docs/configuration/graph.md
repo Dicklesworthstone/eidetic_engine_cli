@@ -134,9 +134,10 @@ articulation_protection_multiplier = 0.5
 enabled = true
 ```
 
-Agent effect: `ee curate candidates --dry-run --json` should show how
-articulation points and onion layers change decay before any memory is
-promoted, demoted, or tombstoned.
+Agent effect: `ee curate disposition --json` (no `--apply`, so it only
+plans) should show how articulation points and onion layers change decay
+before any memory is promoted, demoted, or tombstoned. Add
+`--no-structural-decay` to see the uniform-TTL plan for comparison.
 
 ## Witness Retention
 

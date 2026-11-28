@@ -14,7 +14,7 @@
       "enroll a mesh peer with a known fingerprint",
       "run rotate passing that same fingerprint"
     ],
-    "invocation": "ee mesh peer rotate <node-key> --fingerprint <same> --workspace . --json"
+    "invocation": "ee mesh peer rotate <peer-id> --public-key-fingerprint <same> --workspace . --json"
   },
   "expected_emission": {
     "code": "mesh_peer_key_rotation_unchanged",

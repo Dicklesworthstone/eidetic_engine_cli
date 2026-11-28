@@ -27,10 +27,11 @@ bypass token.
 4. **Propose** (`bd-1n0np.18.2`, `propose_calibration_candidate`) — turn evidence
    into a **pending** curate candidate (`CreateDerivedMemory`, source-type
    `trauma_guard_bypass_evidence`) recording that this exact command
-   historically had a halt followed by human authorization N times.
-   `ee preflight learn --dry-run`
-   previews it; `--apply` routes it through curate's existing
-   propose → validate → apply (ADR-0014).
+   historically had a halt followed by human authorization N times. The
+   `ee preflight learn --dry-run/--apply` command meant to preview it and route
+   it through curate's propose → validate → apply (ADR-0014) is not built:
+   bd-1n0np.18.2 was closed with it deferred, and nothing in production calls
+   `correlate_bypass_evidence` or `propose_calibration_candidate` yet.
 5. **Better cited context** — once accepted, advisory risk lookup can cite the
    audited evidence when the same command class is inspected again.
 
@@ -58,6 +59,6 @@ bypass token.
 | Correlate | `core::trauma_guard::correlate_bypass_evidence` (18.1) |
 | Propose | `core::trauma_guard::propose_calibration_candidate` (18.2 core) |
 | Apply | `ee curate accept` (existing ADR-0014 pipeline + `CURATION_CANDIDATE_*` audit rows) |
-| Learn CLI | `ee preflight learn --dry-run/--apply` (18.2 surface) |
+| Learn CLI | Not built. `ee preflight learn --dry-run/--apply` was deferred when bd-1n0np.18.2 closed. |
 
 Schema: `ee.trauma_guard.bypass_evidence.v1`.

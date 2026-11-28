@@ -74,7 +74,7 @@ Pause fences network exchange without deleting membership. Resume
 reopens it. Leave is a self-removal, not a tombstone of origin history.
 
 ```bash
-ee team pause --confirm --workspace . --json
+ee team pause --workspace . --json
 ee team resume --confirm --workspace . --json
 ee team leave --confirm --workspace . --json
 ```
