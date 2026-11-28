@@ -11779,7 +11779,9 @@ pub struct WhyNotArgs {
     #[arg(long, value_name = "N")]
     pub max_results: Option<u32>,
 
-    /// Mesh command mode: off, cache, revisable, or blocking.
+    /// Mesh command mode: off, cache, revisable, or blocking. Accepted for parity with
+    /// `ee pack` and not read here: mesh mode changes how a pack is served and annotated,
+    /// not which candidates it selects, so the verdict is the same in every mode.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
     pub mesh_mode: MeshCommandMode,
 }

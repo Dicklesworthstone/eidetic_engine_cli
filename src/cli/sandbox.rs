@@ -115,9 +115,9 @@ pub struct SandboxCurateArgs {
 
 #[derive(Clone, Debug, Eq, PartialEq, Args)]
 pub struct SandboxDiffArgs {
-    /// Optional task/query context for the diff. Recorded for the agent; the
+    /// Optional task/query context. Accepted but not yet used or echoed: the
     /// change set is content-keyed, so retrieval impact stays a
-    /// `sandboxApproximation` (bd-1n0np.21.2) rather than a live re-ranking.
+    /// `sandboxApproximation` (bd-1n0np.21.2) rather than a re-ranking for this query.
     #[arg(value_name = "QUERY")]
     pub query: Option<String>,
     /// Overlay session name.
