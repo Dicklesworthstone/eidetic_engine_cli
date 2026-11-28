@@ -24,7 +24,7 @@ data:
   unimplemented[2]{code,featureFlag,shipTarget,trackingBead}:
     diagram_backend_unavailable,franken-mermaid-adapter,planned,null
     mcp_feature_disabled,mcp,opt-in,null
-  commands[564]{name,available}:
+  commands[565]{name,available}:
     agent,true
     agent detect,true
     agent scan,true
@@ -350,6 +350,7 @@ data:
     note,true
     orient,true
     outcome,true
+    outcome calibration,true
     outcome harvest,true
     outcome trace,true
     outcome-quarantine,true

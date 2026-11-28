@@ -36,23 +36,17 @@ ee_lists_outcome_sub() { "$EE_BIN" outcome --help 2>&1 | grep -qiw "$1"; }
 ee_lists_top() { "$EE_BIN" --help 2>&1 | grep -qiw "$1"; }
 
 with_temp_workspace WS
+# Cover the freshly created store with reproducible, explicit RFC3339 bounds.
+window=(--since 2000-01-01T00:00:00Z --until 2100-01-01T00:00:00Z)
 
 step "init workspace"
 init_out="$(ee_json init --workspace "$WS" --json)"
 assert_jq "$init_out" '.success == true' "ee init succeeds"
 
 step "cold-start honesty: no outcomes -> calibration is inert, never falsely confident"
-if ee_lists_outcome_sub calibration; then
-    cold="$(ee_json outcome calibration --workspace "$WS" --json)"
-    assert_jq "$cold" '.success == true and .data != null and (.data | keys | length) >= 1' "cold-start calibration succeeds"
-    # With zero outcomes there must be no reliability buckets — a sparse signal
-    # that reads as certainty is worse than no signal (the feedback-gated honesty
-    # invariant).
-    assert_jq "$cold" '((.data.buckets // []) | length) == 0' \
-        "cold-start calibration emits no falsely-confident buckets"
-else
-    log_drop 1 "calibration CLI not built (bd-p5wa2; the core shipped in bd-1n0np.2.6): cold-start honesty assertion skipped"
-fi
+cold="$(ee_json outcome calibration "${window[@]}" --workspace "$WS" --json)"
+assert_jq "$cold" '.success == true and .data.sampleCount == 0 and .data.assessment == "insufficient_data" and (.data | has("brierScore")) and .data.brierScore == null and all(.data.buckets[]; .count == 0)' \
+    "cold-start report exposes zero samples and an unavailable Brier score"
 
 step "seed memories + pack (records pack_candidate_impressions, bd-1n0np.2.2)"
 r1="$(ee_json remember "Always run cargo fmt --check before a release." \
@@ -64,9 +58,15 @@ assert_jq "$r2" '.success == true' "remember rule 2"
 pack_out="$(ee_json pack "prepare a release" --workspace "$WS" --max-tokens 2000 --json)"
 assert_jq "$pack_out" '.success == true' "ee pack succeeds (records impressions)"
 
-step "seed a dense outcome stream via the Evidence Harvester (bd-1n0np.2.5)"
+step "record a helpful outcome with a situation class"
+memory_id="$(jq -r '.data.memoryId' <<<"$r1")"
+observed="$(ee_json outcome "$memory_id" --signal helpful --source-type human_explicit \
+    --evidence-json '{"situationClass":"release"}' --workspace "$WS" --json)"
+assert_jq "$observed" '.success == true' "explicit feedback accepted"
+
+step "harvest available evidence (bd-1n0np.2.5)"
 if ee_lists_outcome_sub harvest; then
-    harvested="$(ee_json outcome harvest --workspace "$WS" --apply --json)"
+    harvested="$(ee_json outcome harvest "${window[@]}" --workspace "$WS" --apply --json)"
     assert_jq "$harvested" '.success == true' "outcome harvest --apply succeeds"
 else
     log_drop 1 "outcome harvest CLI absent (bd-1n0np.2.5): outcome-stream seeding skipped"
@@ -94,15 +94,9 @@ else
 fi
 
 step "calibration-honesty: empirical recall + wide CIs + loud abstention (bd-1n0np.13.3)"
-if "$EE_BIN" outcome calibration --help 2>&1 | grep -q -- "--honesty"; then
-    honesty="$(ee_json outcome calibration --honesty --workspace "$WS" --json)"
-    assert_jq "$honesty" '.success == true and .data != null and (.data | keys | length) >= 1' "calibration --honesty succeeds"
-    assert_jq "$honesty" \
-        '((.data.classes // []) | length) == 0 or any(.data.classes[]?; has("abstained"))' \
-        "honesty report carries per-class abstention flags (loud abstention on sparse)"
-else
-    log_drop 1 "calibration --honesty not built (bd-p5wa2 owns the command; the core shipped in bd-1n0np.13.3): honesty/abstention assertions skipped"
-fi
+honesty="$(ee_json outcome calibration --honesty "${window[@]}" --workspace "$WS" --json)"
+assert_jq "$honesty" '.success == true and .data.schema == "ee.calibration_honesty.v1" and .data.sampleCount == 1 and any(.data.classes[]; .situationClass == "release" and .abstained == true and .intervalLower == 0 and .intervalUpper == 1)' \
+    "a single observed release outcome abstains with a full-width interval"
 
 end_temp_workspace
 harness_summary

@@ -39,6 +39,8 @@ ee_lists_outcome_sub() { "$EE_BIN" outcome --help 2>&1 | grep -qiw "$1"; }
 ee_json() { "$EE_BIN" "$@" 2>/dev/null || true; }
 
 with_temp_workspace WS
+# Cover the freshly created store with reproducible, explicit RFC3339 bounds.
+window=(--since 2000-01-01T00:00:00Z --until 2100-01-01T00:00:00Z)
 
 step "init workspace"
 init_out="$(ee_json init --workspace "$WS" --json)"
@@ -74,9 +76,17 @@ fi
 # They are guarded until those surfaces land; window flags (--since/--until) and
 # the simulated bead-close / verification / reverted-commit fixtures are wired
 # together with the CLI so the contract is asserted against the real surface.
+step "record explicit feedback and its historical prediction"
+memory_id="$(jq -r '.data.memoryId' <<<"$r1")"
+observed="$(ee_json outcome "$memory_id" --signal helpful --source-type human_explicit --workspace "$WS" --json)"
+assert_jq "$observed" '.success == true' "explicit outcome recorded"
+trace_before="$(ee_json outcome trace "$memory_id" --workspace "$WS" --json)"
+assert_jq "$trace_before" '.data.eventCount == 1 and (.data.events[0].priorMean | type) == "number"' \
+    "feedback trace records its historical prediction"
+
 step "harvest dry-run -> derived-outcome proposals (bd-1n0np.2.4/2.5)"
 if ee_lists_outcome_sub harvest; then
-    harvest="$(ee_json outcome harvest --workspace "$WS" --dry-run --json)"
+    harvest="$(ee_json outcome harvest "${window[@]}" --workspace "$WS" --dry-run --json)"
     assert_jq "$harvest" '.success == true' "outcome harvest --dry-run succeeds"
     assert_jq "$harvest" '(.data.proposals | type) == "array"' "harvest emits a proposals array"
 else
@@ -85,38 +95,23 @@ fi
 
 step "harvest apply -> audited writes; explicit NOT overridden (bd-1n0np.2.4/2.5)"
 if ee_lists_outcome_sub harvest; then
-    applied="$(ee_json outcome harvest --workspace "$WS" --apply --json)"
+    applied="$(ee_json outcome harvest "${window[@]}" --workspace "$WS" --apply --json)"
     assert_jq "$applied" '.success == true' "outcome harvest --apply succeeds"
-    # Direct comparison, not `// 0` (bd-o8e1n): an ABSENT explicitOverrides
-    # defaulted to 0 and passed. The count must be PRESENT and zero -- a
-    # missing field is not evidence that nothing was overridden.
-    #
-    # THESE COMMENTS SIT ABOVE THE CALL, NOT INSIDE IT. a320f3a1f placed them
-    # between the backslash continuation and the filter. A `\` joins the next
-    # physical line, and a `#` then comments out the remainder of that JOINED
-    # logical line -- so assert_jq received ONE argument (the payload, no filter,
-    # no label) and the filter ran as a shell command: "command not found".
-    # `bash -n` reported the file clean throughout, because it is valid shell;
-    # it simply was not the program anybody intended. Never put a comment
-    # between a continuation and its argument.
-    assert_jq "$applied" \
-        '.data.explicitOverrides == 0' \
-        "derived feedback never overrides explicit feedback"
+    trace_after="$(ee_json outcome trace "$memory_id" --workspace "$WS" --json)"
+    assert_jq "$trace_after" ".success == true and .data.events == $(jq -c '.data.events' <<<"$trace_before")" \
+        "harvesting preserves the recorded explicit feedback and posterior update"
 else
     log_drop 1 "harvest --apply pending (bd-1n0np.2.5): audited-write + explicit-override assertions skipped"
 fi
 
 step "calibration report -> reliability buckets + Brier (bd-1n0np.2.6)"
-if ee_lists_outcome_sub calibration; then
-    calib="$(ee_json outcome calibration --workspace "$WS" --json)"
-    assert_jq "$calib" '.success == true' "outcome calibration succeeds"
-    assert_jq "$calib" '.data.buckets != null' "calibration emits reliability buckets"
-    assert_jq "$calib" \
-        '(.data.brierScore == null) or ((.data.brierScore | type) == "number")' \
-        "calibration emits a Brier score field"
-else
-    log_drop 1 "calibration CLI not built (bd-p5wa2; the core shipped in bd-1n0np.2.6): reliability-bucket + Brier assertions skipped"
-fi
+calib="$(ee_json outcome calibration "${window[@]}" --workspace "$WS" --json)"
+assert_jq "$calib" '.success == true and .data.schema == "ee.outcome.calibration.v1" and .data.sampleCount == 1' \
+    "calibration admits the observed feedback"
+assert_jq "$calib" '([.data.buckets[].count] | add) == 1' "reliability buckets account for the observation"
+prior="$(jq -r '.data.events[0].priorMean' <<<"$trace_before")"
+assert_jq "$calib" "(.data.brierScore | type) == \"number\" and (.data.brierScore - ((1 - $prior) * (1 - $prior)) | fabs) < 0.00000001" \
+    "Brier score uses the recorded pre-feedback prediction"
 
 end_temp_workspace
 harness_summary

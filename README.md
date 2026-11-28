@@ -2404,6 +2404,13 @@ leaves the source store, queued jobs, and persisted index unchanged. Explicit
 historical requests and corrupt or incompatible indexes retain the
 `global_index_unavailable` refusal instead of substituting current source rows.
 
+Semantic-only and strict hybrid searches score global vectors when the request
+has a semantic model and the global index matches both that model and the
+pinned global source generation. If the global index is missing, behind, or
+incompatible, the response reports `global_index_unavailable` and keeps the
+workspace matches. A model-free search of an empty workspace can also report
+this condition. Reading the global lane never loads a second model.
+
 ---
 
 ## Context Profiles

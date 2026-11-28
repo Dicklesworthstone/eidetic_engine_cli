@@ -584,3 +584,106 @@ fn harvest_cli_previews_then_saves_and_replays_only_pending_review_candidates() 
     );
     Ok(())
 }
+
+#[test]
+fn calibration_cli_reads_the_addressed_store_with_repeatable_output_in_both_modes() -> TestResult {
+    let fixture = HarvestFixture::new()?;
+    let before = fixture.state()?;
+    let manifest = crate::core::effect::EffectManifest::build();
+    let mut hashes = Vec::new();
+    for honesty in [false, true] {
+        let mut argv = vec![
+            "ee",
+            "--json",
+            "--workspace",
+            fixture.workspace.to_str().ok_or("non-UTF-8 workspace")?,
+            "outcome",
+            "--database",
+            fixture.database.to_str().ok_or("non-UTF-8 database")?,
+            "calibration",
+            "--since",
+            SINCE,
+            "--until",
+            UNTIL,
+            "--buckets",
+            "3",
+        ];
+        if honesty {
+            argv.push("--honesty");
+        }
+        let cli = Cli::try_parse_from(&argv)?;
+        let os_args = argv.iter().map(OsString::from).collect::<Vec<_>>();
+        let invocation = NormalizedInvocation::from_cli(&cli, &os_args);
+        assert_eq!(invocation.command_path, "outcome calibration");
+        let effect = manifest
+            .get(&invocation.command_path)
+            .ok_or("missing calibration effect")?;
+        assert!(effect.requires_read_snapshot);
+        assert!(!effect.default_effect.is_mutating());
+
+        let (exit, stdout, stderr) = invoke(&argv);
+        assert_eq!(exit, ProcessExitCode::Success, "{stdout}\n{stderr}");
+        assert_eq!(invoke(&argv), (exit, stdout.clone(), stderr));
+        let envelope: serde_json::Value = serde_json::from_str(&stdout)?;
+        let data = &envelope["data"];
+        assert_eq!(envelope["success"], true);
+        assert_eq!(data["workspaceId"], fixture.workspace_id);
+        assert_eq!(data["sampleCount"], 0);
+        assert_eq!(data["readOnly"], true);
+        let schema_id = if honesty {
+            assert_eq!(data["minSamples"], 30);
+            assert_eq!(data["classes"], serde_json::json!([]));
+            "ee.calibration_honesty.v1"
+        } else {
+            assert_eq!(data["bucketCount"], 3);
+            assert_eq!(data["assessment"], "insufficient_data");
+            assert!(data["brierScore"].is_null());
+            "ee.outcome.calibration.v1"
+        };
+        assert_eq!(data["schema"], schema_id);
+        let schema =
+            serde_json::from_str(&crate::output::render_schema_export_json(Some(schema_id)))?;
+        assert_exported_fields(&schema, data)?;
+        hashes.push(
+            data["tableHash"]
+                .as_str()
+                .ok_or("missing table hash")?
+                .to_owned(),
+        );
+    }
+    assert_eq!(hashes[0], hashes[1]);
+    assert_eq!(fixture.state()?, before);
+    Ok(())
+}
+
+#[test]
+fn calibration_cli_rejects_missing_bounds_and_recording_flags() -> TestResult {
+    let temporary = tempfile::tempdir()?;
+    for (options, expected) in [
+        (vec!["calibration", "--since", SINCE], "--until"),
+        (
+            vec![
+                "--signal", "helpful", "calibration", "--since", SINCE, "--until", UNTIL,
+            ],
+            "calibration cannot be combined",
+        ),
+        (
+            vec!["calibration", "--since", UNTIL, "--until", SINCE],
+            "since must be strictly earlier",
+        ),
+    ] {
+        let mut argv = vec![
+            "ee",
+            "--json",
+            "--workspace",
+            temporary.path().to_str().ok_or("non-UTF-8 workspace")?,
+            "outcome",
+        ];
+        argv.extend(options);
+        let (exit, stdout, stderr) = invoke(&argv);
+        assert_eq!(exit, ProcessExitCode::Usage, "{stdout}\n{stderr}");
+        assert!(format!("{stdout}\n{stderr}").contains(expected));
+        assert!(!temporary.path().join(".ee/ee.db").exists());
+    }
+    Ok(())
+}
