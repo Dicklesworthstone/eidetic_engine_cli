@@ -8,7 +8,7 @@
       "taskClass": "low-risk",
       "eeCommands": [
         "ee status --workspace /tmp/ee-fixtures/low-risk --json",
-        "ee preflight run --workspace /tmp/ee-fixtures/low-risk --task \"update README wording\" --json",
+        "ee preflight run \"update README wording\" --workspace /tmp/ee-fixtures/low-risk --json",
         "ee tripwire list --workspace /tmp/ee-fixtures/low-risk --json"
       ],
       "evidenceIds": ["ev.preflight.low.001", "tw.docs.clear"],
@@ -29,7 +29,7 @@
       "taskClass": "destructive-command",
       "eeCommands": [
         "ee status --workspace /tmp/ee-fixtures/destructive --json",
-        "ee preflight run --workspace /tmp/ee-fixtures/destructive --task \"delete generated files\" --json",
+        "ee preflight run \"delete generated files\" --workspace /tmp/ee-fixtures/destructive --json",
         "ee tripwire check tw.destructive.delete --workspace /tmp/ee-fixtures/destructive --json"
       ],
       "evidenceIds": ["ev.preflight.destructive.001", "tw.destructive.delete"],
@@ -50,7 +50,7 @@
       "taskClass": "migration",
       "eeCommands": [
         "ee status --workspace /tmp/ee-fixtures/migration --json",
-        "ee preflight run --workspace /tmp/ee-fixtures/migration --task \"migrate memory rows\" --json",
+        "ee preflight run \"migrate memory rows\" --workspace /tmp/ee-fixtures/migration --json",
         "ee tripwire check tw.migration.rollback --workspace /tmp/ee-fixtures/migration --json"
       ],
       "evidenceIds": ["ev.preflight.migration.001", "tw.migration.rollback"],
@@ -71,7 +71,7 @@
       "taskClass": "production-deploy",
       "eeCommands": [
         "ee status --workspace /tmp/ee-fixtures/deploy --json",
-        "ee preflight run --workspace /tmp/ee-fixtures/deploy --task \"deploy release\" --json",
+        "ee preflight run \"deploy release\" --workspace /tmp/ee-fixtures/deploy --json",
         "ee tripwire check tw.deploy.release --workspace /tmp/ee-fixtures/deploy --json"
       ],
       "evidenceIds": ["ev.preflight.deploy.001", "tw.deploy.release"],
@@ -92,7 +92,7 @@
       "taskClass": "no-evidence",
       "eeCommands": [
         "ee status --workspace /tmp/ee-fixtures/no-evidence --json",
-        "ee preflight run --workspace /tmp/ee-fixtures/no-evidence --task \"change release workflow\" --json"
+        "ee preflight run \"change release workflow\" --workspace /tmp/ee-fixtures/no-evidence --json"
       ],
       "evidenceIds": [],
       "tripwireIds": [],
@@ -112,7 +112,7 @@
       "taskClass": "redacted-evidence",
       "eeCommands": [
         "ee status --workspace /tmp/ee-fixtures/redacted --json",
-        "ee preflight run --workspace /tmp/ee-fixtures/redacted --task \"review secrets\" --json"
+        "ee preflight run \"review secrets\" --workspace /tmp/ee-fixtures/redacted --json"
       ],
       "evidenceIds": ["ev.preflight.redaction_failed"],
       "tripwireIds": ["tw.privacy.secret"],
@@ -132,7 +132,7 @@
       "taskClass": "degraded-tripwire",
       "eeCommands": [
         "ee status --workspace /tmp/ee-fixtures/degraded-tripwire --json",
-        "ee preflight run --workspace /tmp/ee-fixtures/degraded-tripwire --task \"run cleanup\" --json",
+        "ee preflight run \"run cleanup\" --workspace /tmp/ee-fixtures/degraded-tripwire --json",
         "ee tripwire list --workspace /tmp/ee-fixtures/degraded-tripwire --json"
       ],
       "evidenceIds": ["ev.preflight.cleanup.001"],

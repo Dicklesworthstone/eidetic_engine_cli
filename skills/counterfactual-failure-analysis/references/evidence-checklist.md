@@ -6,8 +6,8 @@ Use this checklist before writing a counterfactual failure-analysis memo.
 
 - `ee status --workspace <workspace> --json`
 - `ee lab capture --workspace <workspace> --json`
-- `ee lab replay --workspace <workspace> --episode-id <episode-id> --json`
-- `ee lab counterfactual --workspace <workspace> --episode-id <episode-id> --json`
+- `ee lab replay <episode-id> --workspace <workspace> --json`
+- `ee lab counterfactual <episode-id> --workspace <workspace> --json`
 - Optional wrapped bundle: `ee.skill_evidence_bundle.v1`
 
 ## Evidence Fields

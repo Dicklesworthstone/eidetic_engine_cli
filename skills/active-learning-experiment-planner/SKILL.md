@@ -39,7 +39,7 @@ ee --workspace <workspace> learn experiment run --id <experiment-id> --dry-run -
 ee learn observe <experiment-id> --measurement-name <name> --signal neutral --evidence-id <evidence-id> --redaction-status redacted --dry-run --json
 ee learn close <experiment-id> --status inconclusive --decision-impact "<impact>" --safety-note "<note>" --dry-run --json
 ee context "<task>" --workspace <workspace> --json
-ee lab replay --workspace <workspace> --episode-id <episode-id> --json
+ee lab replay <episode-id> --workspace <workspace> --json
 ee causal compare --workspace <workspace> --json
 ee economy score --workspace <workspace> --json
 ```

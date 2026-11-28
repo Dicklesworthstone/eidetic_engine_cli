@@ -23,8 +23,8 @@
       "eeCommands": [
         "ee status --workspace /tmp/ee-fixtures/replay-supported --json",
         "ee lab capture --workspace /tmp/ee-fixtures/replay-supported --json",
-        "ee lab replay --workspace /tmp/ee-fixtures/replay-supported --episode-id ep_replay_supported --json",
-        "ee lab counterfactual --workspace /tmp/ee-fixtures/replay-supported --episode-id ep_replay_supported --json"
+        "ee lab replay ep_replay_supported --workspace /tmp/ee-fixtures/replay-supported --json",
+        "ee lab counterfactual ep_replay_supported --workspace /tmp/ee-fixtures/replay-supported --json"
       ],
       "evidenceIds": ["ev.capture.001", "ev.replay.001", "ev.counterfactual.001"],
       "redactionStatus": "passed",
@@ -43,8 +43,8 @@
       "eeCommands": [
         "ee status --workspace /tmp/ee-fixtures/contradictory --json",
         "ee lab capture --workspace /tmp/ee-fixtures/contradictory --json",
-        "ee lab replay --workspace /tmp/ee-fixtures/contradictory --episode-id ep_contradictory --json",
-        "ee lab counterfactual --workspace /tmp/ee-fixtures/contradictory --episode-id ep_contradictory --json"
+        "ee lab replay ep_contradictory --workspace /tmp/ee-fixtures/contradictory --json",
+        "ee lab counterfactual ep_contradictory --workspace /tmp/ee-fixtures/contradictory --json"
       ],
       "evidenceIds": ["ev.capture.002", "ev.replay.contradiction", "ev.counterfactual.002"],
       "redactionStatus": "passed",
@@ -63,7 +63,7 @@
       "eeCommands": [
         "ee status --workspace /tmp/ee-fixtures/redacted --json",
         "ee lab capture --workspace /tmp/ee-fixtures/redacted --json",
-        "ee lab replay --workspace /tmp/ee-fixtures/redacted --episode-id ep_redacted --json"
+        "ee lab replay ep_redacted --workspace /tmp/ee-fixtures/redacted --json"
       ],
       "evidenceIds": ["ev.capture.redaction_failed"],
       "redactionStatus": "failed",
@@ -82,7 +82,7 @@
       "eeCommands": [
         "ee status --workspace /tmp/ee-fixtures/prompt-injection --json",
         "ee lab capture --workspace /tmp/ee-fixtures/prompt-injection --json",
-        "ee lab replay --workspace /tmp/ee-fixtures/prompt-injection --episode-id ep_prompt_injection --json"
+        "ee lab replay ep_prompt_injection --workspace /tmp/ee-fixtures/prompt-injection --json"
       ],
       "evidenceIds": ["ev.prompt_injection_like"],
       "redactionStatus": "passed",
@@ -101,7 +101,7 @@
       "eeCommands": [
         "ee status --workspace /tmp/ee-fixtures/degraded-lab --json",
         "ee lab capture --workspace /tmp/ee-fixtures/degraded-lab --json",
-        "ee lab counterfactual --workspace /tmp/ee-fixtures/degraded-lab --episode-id ep_degraded --json"
+        "ee lab counterfactual ep_degraded --workspace /tmp/ee-fixtures/degraded-lab --json"
       ],
       "evidenceIds": ["ev.capture.003", "ev.counterfactual.pack_diff_only"],
       "redactionStatus": "passed",

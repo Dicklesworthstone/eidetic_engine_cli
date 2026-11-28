@@ -9,7 +9,7 @@
       "eeCommands": [
         "ee status --workspace /tmp/ee-fixtures/rehearsal-success --json",
         "ee rehearse plan --workspace /tmp/ee-fixtures/rehearsal-success --json",
-        "ee rehearse inspect --plan-id reh.plan.001 --workspace /tmp/ee-fixtures/rehearsal-success --json"
+        "ee rehearse inspect reh.plan.001 --workspace /tmp/ee-fixtures/rehearsal-success --json"
       ],
       "evidenceIds": ["ev.rehearsal.success.001", "ev.precondition.all_pass"],
       "rehearsalArtifactIds": ["reh.plan.001", "reh.artifact.config.json"],
@@ -56,7 +56,7 @@
       "eeCommands": [
         "ee status --workspace /tmp/ee-fixtures/rehearsal-partial --json",
         "ee rehearse run --workspace /tmp/ee-fixtures/rehearsal-partial --json",
-        "ee rehearse inspect --plan-id reh.plan.002 --workspace /tmp/ee-fixtures/rehearsal-partial --json"
+        "ee rehearse inspect reh.plan.002 --workspace /tmp/ee-fixtures/rehearsal-partial --json"
       ],
       "evidenceIds": ["ev.rehearsal.partial.001", "ev.precondition.partial_fail"],
       "rehearsalArtifactIds": ["reh.plan.002", "reh.artifact.incomplete"],
@@ -123,7 +123,7 @@
       "eeCommands": [
         "ee status --workspace /tmp/ee-fixtures/rehearsal-redacted --json",
         "ee rehearse plan --workspace /tmp/ee-fixtures/rehearsal-redacted --json",
-        "ee rehearse inspect --plan-id reh.plan.003 --workspace /tmp/ee-fixtures/rehearsal-redacted --json"
+        "ee rehearse inspect reh.plan.003 --workspace /tmp/ee-fixtures/rehearsal-redacted --json"
       ],
       "evidenceIds": ["ev.rehearsal.redacted.001", "ev.precondition.all_pass"],
       "rehearsalArtifactIds": ["reh.plan.003", "reh.artifact.redacted_config"],
@@ -145,7 +145,7 @@
       "taskClass": "malformed-artifact",
       "eeCommands": [
         "ee status --workspace /tmp/ee-fixtures/rehearsal-malformed --json",
-        "ee rehearse inspect --plan-id reh.plan.invalid --workspace /tmp/ee-fixtures/rehearsal-malformed --json"
+        "ee rehearse inspect reh.plan.invalid --workspace /tmp/ee-fixtures/rehearsal-malformed --json"
       ],
       "evidenceIds": [],
       "rehearsalArtifactIds": ["reh.plan.invalid"],
@@ -192,7 +192,7 @@
       "eeCommands": [
         "ee status --workspace /tmp/ee-fixtures/rehearsal-destructive --json",
         "ee rehearse plan --workspace /tmp/ee-fixtures/rehearsal-destructive --json",
-        "ee rehearse promote-plan --plan-id reh.plan.005 --workspace /tmp/ee-fixtures/rehearsal-destructive --dry-run --json"
+        "ee rehearse promote-plan reh.plan.005 --workspace /tmp/ee-fixtures/rehearsal-destructive --json"
       ],
       "evidenceIds": ["ev.rehearsal.destructive.001", "ev.precondition.all_pass"],
       "rehearsalArtifactIds": ["reh.plan.005", "reh.artifact.delete_records"],

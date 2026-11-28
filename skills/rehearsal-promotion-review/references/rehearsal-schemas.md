@@ -9,10 +9,10 @@ The skill accepts JSON output from these `ee rehearse` subcommands:
 
 | Schema | Source Command |
 |--------|----------------|
-| `ee.rehearse.plan.v1` | `ee rehearse plan --workspace <ws> --json` |
-| `ee.rehearse.run.v1` | `ee rehearse run --workspace <ws> --json` |
-| `ee.rehearse.inspect.v1` | `ee rehearse inspect --plan-id <id> --workspace <ws> --json` |
-| `ee.rehearse.promote_plan.v1` | `ee rehearse promote-plan --plan-id <id> --workspace <ws> --dry-run --json` |
+| `ee.rehearse.plan.v1` | `ee rehearse plan --commands <spec.json> --workspace <ws> --json` |
+| `ee.rehearse.run.v1` | `ee rehearse run --commands <spec.json> --workspace <ws> --json` |
+| `ee.rehearse.inspect.v1` | `ee rehearse inspect <run-id> --workspace <ws> --json` |
+| `ee.rehearse.promote_plan.v1` | `ee rehearse promote-plan <run-id> --workspace <ws> --json` |
 | `ee.response.v2` | Any command with degradation codes |
 
 ## Required Fields for Review

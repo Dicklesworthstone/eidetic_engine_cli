@@ -34,7 +34,7 @@ REQUIRED_SECTIONS = [
 
 REQUIRED_COMMANDS = [
     "ee status --workspace <workspace> --json",
-    "ee preflight run --workspace <workspace> --task \"<task>\" --json",
+    "ee preflight run \"<task>\" --workspace <workspace> --json",
     "ee tripwire list --workspace <workspace> --json",
     "ee tripwire check <tripwire-id> --workspace <workspace> --json",
     "ee context \"<task>\" --workspace <workspace> --json",

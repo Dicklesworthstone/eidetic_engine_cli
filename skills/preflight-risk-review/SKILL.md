@@ -30,7 +30,7 @@ Consume only explicit machine JSON and exported evidence:
 
 ```bash
 ee status --workspace <workspace> --json
-ee preflight run --workspace <workspace> --task "<task>" --json
+ee preflight run "<task>" --workspace <workspace> --json
 ee tripwire list --workspace <workspace> --json
 ee tripwire check <tripwire-id> --workspace <workspace> --json
 ee context "<task>" --workspace <workspace> --json
@@ -57,7 +57,7 @@ Gather the smallest evidence set that can support the brief:
 
 1. Parse `ee status --workspace <workspace> --json` for degraded capabilities
    and repair commands.
-2. Parse `ee preflight run --workspace <workspace> --task "<task>" --json` for
+2. Parse `ee preflight run "<task>" --workspace <workspace> --json` for
    evidence matches, risk categories, stop conditions, and redaction state.
 3. Parse `ee tripwire list --workspace <workspace> --json` and run
    `ee tripwire check <tripwire-id> --workspace <workspace> --json` only for

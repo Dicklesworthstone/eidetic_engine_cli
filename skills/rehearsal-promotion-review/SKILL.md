@@ -26,11 +26,15 @@ The required mechanical evidence comes from explicit JSON commands:
 
 ```bash
 ee status --workspace <workspace> --json
-ee rehearse plan --workspace <workspace> --json
-ee rehearse run --workspace <workspace> --dry-run --json
-ee rehearse inspect --workspace <workspace> --json
-ee rehearse promote <plan-id> --workspace <workspace> --dry-run --json
+ee rehearse plan --commands <spec.json> --workspace <workspace> --json
+ee rehearse run --commands <spec.json> --workspace <workspace> --json
+ee rehearse inspect <run-id> --workspace <workspace> --json
+ee rehearse promote-plan <run-id> --workspace <workspace> --json
 ```
+
+`ee rehearse run` always executes inside an isolated sandbox, so it takes no
+`--dry-run` flag. `ee rehearse promote-plan` is read-only: it prints the steps,
+preconditions and rollback commands for a real execution and runs none of them.
 
 The skill may consume `ee.response.v2`, `ee.error.v2`, `ee.rehearse.*`, or
 `ee.skill_evidence_bundle.v1` artifacts only when command provenance, redaction,
@@ -47,11 +51,12 @@ dry-run plan that the user approves before execution.
 Before producing any recommendation:
 
 1. Run `ee status --workspace <workspace> --json` to verify workspace readiness
-2. Run `ee rehearse plan --workspace <workspace> --json` or equivalent
-3. Run `ee rehearse run --workspace <workspace> --dry-run --json` when a plan
-   needs execution evidence
-4. Run `ee rehearse inspect --workspace <workspace> --json` when artifact
-   details are needed
+2. Run `ee rehearse plan --commands <spec.json> --workspace <workspace> --json`
+   or equivalent
+3. Run `ee rehearse run --commands <spec.json> --workspace <workspace> --json`
+   when a plan needs execution evidence
+4. Run `ee rehearse inspect <run-id> --workspace <workspace> --json` when
+   artifact details are needed
 5. If unavailable, the skill must refuse with explicit degraded status
 6. Parse the rehearsal JSON for artifacts, mutations, preconditions, and status
 
@@ -134,8 +139,8 @@ Collect from rehearsal output:
 **Escalation Required:** <yes/no> - <reason if yes>
 
 ### Recommended Explicit Commands
-- `ee rehearse promote <plan_id> --workspace <workspace> --dry-run --json` (preview)
-- `ee rehearse promote <plan_id> --workspace <workspace> --json` (execute, requires user approval)
+- `ee rehearse promote-plan <run-id> --workspace <workspace> --json` (read-only plan)
+- each `plan_steps[]` command, run outside the rehearsal (execute, requires user approval)
 ```
 
 ## Uncertainty Handling
@@ -206,7 +211,8 @@ Unsupported claims include:
 - `ee recommends promotion` beyond explicit command JSON
 - claims from sample, mock, placeholder, stale, degraded, or unredacted evidence
 - conclusions from forbidden direct DB scraping or hidden index access
-- durable memory mutation outside explicit `ee rehearse promote ... --json`
+- durable memory mutation; `ee rehearse promote-plan` only plans, and the
+  real execution is the user's to approve
 
 Put useful but unsupported concerns in mutation risks, verification steps, or
 the no-go rationale, not in the evidence-backed decision.

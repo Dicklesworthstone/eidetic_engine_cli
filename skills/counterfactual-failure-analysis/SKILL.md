@@ -28,8 +28,8 @@ The required mechanical evidence comes from explicit JSON commands:
 
 ```bash
 ee lab capture --workspace <workspace> --json
-ee lab replay --workspace <workspace> --episode-id <episode-id> --json
-ee lab counterfactual --workspace <workspace> --episode-id <episode-id> --json
+ee lab replay <episode-id> --workspace <workspace> --json
+ee lab counterfactual <episode-id> --workspace <workspace> --json
 ee why <memory-id> --workspace <workspace> --json
 ee status --workspace <workspace> --json
 ```
@@ -59,11 +59,11 @@ Collect the smallest redacted evidence bundle that can support the question:
 2. Parse `ee lab capture --workspace <workspace> --json` for episode ID,
    frozen inputs, redaction status, provenance IDs, pack hash, and raw secret
    handling.
-3. Parse `ee lab replay --workspace <workspace> --episode-id <episode-id>
+3. Parse `ee lab replay <episode-id> --workspace <workspace>
    --json` for replay quality, replay outcome, evidence availability, and
    degraded codes.
-4. Parse `ee lab counterfactual --workspace <workspace> --episode-id
-   <episode-id> --json` for changed items, pack diffs, hypothesis records,
+4. Parse `ee lab counterfactual <episode-id> --workspace
+   <workspace> --json` for changed items, pack diffs, hypothesis records,
    behavior claims, confidence state, assumptions, and durable mutation status.
 5. Verify bundle paths and content hashes before using referenced artifacts.
 
@@ -130,7 +130,7 @@ degradedState:
     effect: "<what cannot be concluded>"
     repair: "<explicit repair command>"
 recommendedExplicitCommands:
-  - "ee lab replay --workspace <workspace> --episode-id <episode-id> --json"
+  - "ee lab replay <episode-id> --workspace <workspace> --json"
 ```
 
 Keep the rationale concise and evidence-linked. Do not include private

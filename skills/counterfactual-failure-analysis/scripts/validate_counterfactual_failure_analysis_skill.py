@@ -35,8 +35,8 @@ REQUIRED_SECTIONS = [
 
 REQUIRED_COMMANDS = [
     "ee lab capture --workspace <workspace> --json",
-    "ee lab replay --workspace <workspace> --episode-id <episode-id> --json",
-    "ee lab counterfactual --workspace <workspace> --episode-id <episode-id> --json",
+    "ee lab replay <episode-id> --workspace <workspace> --json",
+    "ee lab counterfactual <episode-id> --workspace <workspace> --json",
     "ee status --workspace <workspace> --json",
 ]
 

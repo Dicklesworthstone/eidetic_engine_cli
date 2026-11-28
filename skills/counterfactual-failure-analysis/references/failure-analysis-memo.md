@@ -37,7 +37,7 @@ degradedState:
     effect: "none"
     repair: "none"
 recommendedExplicitCommands:
-  - "ee lab replay --workspace <workspace> --episode-id <episode-id> --json"
+  - "ee lab replay <episode-id> --workspace <workspace> --json"
 ```
 
 Required distinction:
