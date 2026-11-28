@@ -24557,6 +24557,39 @@ impl DbConnection {
         rows.iter().map(stored_feedback_event_from_row).collect()
     }
 
+    /// The source's historical SPRT inputs, ordered by stored timestamp text and ID.
+    /// One statement reads accepted events and pending holds together. Reasons,
+    /// evidence, and events belonging to other sources never leave the query.
+    pub(crate) fn list_sprt_source_signals(
+        &self,
+        workspace_id: &str,
+        source_id: &str,
+    ) -> Result<Vec<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT signal, weight FROM (
+                SELECT signal, weight, created_at AS observed_at, id AS entry_id, 0 AS ledger_order
+                FROM feedback_events WHERE workspace_id = ?1 AND source_id = ?2
+                UNION ALL
+                SELECT signal, weight, recorded_at AS observed_at, id AS entry_id, 1 AS ledger_order
+                FROM feedback_quarantine
+                WHERE workspace_id = ?1 AND source_id = ?2 AND status = 'pending'
+             ) AS history
+             ORDER BY observed_at ASC, entry_id ASC, ledger_order ASC",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(source_id.to_owned()),
+            ],
+        )?;
+        let mut signals = Vec::with_capacity(rows.len());
+        for row in rows {
+            if feedback_weight_from_row(&row, 1) > 0.0 {
+                signals.push(required_text(&row, 0, DbOperation::Query, "signal")?.to_owned());
+            }
+        }
+        Ok(signals)
+    }
+
     /// Read a bounded calibration candidate slice from one workspace.
     ///
     /// The calendar-date bounds are deliberately wider than the requested
@@ -25557,6 +25590,15 @@ impl FeedbackCounts {
     }
 }
 
+// Feedback weights have always been decoded as f32, including the fallback
+// for legacy rows. A positive f64 that rounds to zero is not an observation.
+fn feedback_weight_from_row(row: &Row, column: usize) -> f32 {
+    row.get(column)
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
+        .unwrap_or(1.0)
+}
+
 fn stored_feedback_event_from_row(row: &Row) -> Result<StoredFeedbackEvent> {
     Ok(StoredFeedbackEvent {
         id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
@@ -25564,11 +25606,7 @@ fn stored_feedback_event_from_row(row: &Row) -> Result<StoredFeedbackEvent> {
         target_type: required_text(row, 2, DbOperation::Query, "target_type")?.to_string(),
         target_id: required_text(row, 3, DbOperation::Query, "target_id")?.to_string(),
         signal: required_text(row, 4, DbOperation::Query, "signal")?.to_string(),
-        weight: row
-            .get(5)
-            .and_then(|v| v.as_f64())
-            .map(|v| v as f32)
-            .unwrap_or(1.0),
+        weight: feedback_weight_from_row(row, 5),
         source_type: required_text(row, 6, DbOperation::Query, "source_type")?.to_string(),
         source_id: optional_text(row, 7)?.map(str::to_string),
         reason: optional_text(row, 8)?.map(str::to_string),
@@ -26405,11 +26443,7 @@ fn stored_feedback_quarantine_from_row(row: &Row) -> Result<StoredFeedbackQuaran
         target_type: required_text(row, 3, DbOperation::Query, "target_type")?.to_string(),
         target_id: required_text(row, 4, DbOperation::Query, "target_id")?.to_string(),
         signal: required_text(row, 5, DbOperation::Query, "signal")?.to_string(),
-        weight: row
-            .get(6)
-            .and_then(|value| value.as_f64())
-            .map(|value| value as f32)
-            .unwrap_or(1.0),
+        weight: feedback_weight_from_row(row, 6),
         source_type: required_text(row, 7, DbOperation::Query, "source_type")?.to_string(),
         proposed_event_id: optional_text(row, 8)?.map(str::to_string),
         recorded_at: required_text(row, 9, DbOperation::Query, "recorded_at")?.to_string(),
@@ -63877,6 +63911,94 @@ UPDATE memories
             "bounded scan has stable order",
         )?;
         connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn sprt_source_history_matches_the_ordered_ledger_stream() -> TestResult {
+        let db = DbConnection::open_memory()?;
+        db.migrate()?;
+        setup_workspace(&db)?;
+        let owner = "wsp_01234567890123456789012345";
+        let other = "wsp_11234567890123456789012345";
+        db.insert_workspace(
+            other,
+            &CreateWorkspaceInput {
+                path: "/sprt-other".to_owned(),
+                name: None,
+            },
+        )?;
+        // The later text sorts first by actual instant. The legacy SPRT used
+        // raw text order, then ID, for floating-point accumulation.
+        let first = "2026-01-01T01:00:00Z";
+        let last = "2026-01-01T04:00:00+12:00";
+        for (id, workspace, source, at, signal, weight) in [
+            (3, owner, Some("source-A"), first, "helpful", 1.0),
+            (1, owner, Some("source-A"), first, "positive", 0.25),
+            (4, owner, Some("source-A"), last, "neutral", 1.0),
+            (5, owner, Some("source-A"), last, "confirmation", 1.0),
+            (6, owner, Some("source-A"), first, "harmful", -0.0),
+            (7, owner, Some("source-A"), first, "harmful", 1.0e-100),
+            (8, owner, Some("source-a"), first, "harmful", 1.0),
+            (9, other, Some("source-A"), first, "harmful", 1.0),
+            (10, owner, None, first, "harmful", 1.0),
+        ] {
+            db.execute(
+                "INSERT INTO feedback_events (id, workspace_id, target_type, target_id, signal, weight, source_type, source_id, created_at) VALUES (?1, ?2, 'source', 'task', ?3, ?4, 'outcome_observed', ?5, ?6)",
+                &[
+                    Value::Text(format!("fb_{id:026}")),
+                    Value::Text(workspace.to_owned()),
+                    Value::Text(signal.to_owned()),
+                    Value::Double(weight),
+                    source.map_or(Value::Null, |id| Value::Text(id.to_owned())),
+                    Value::Text(at.to_owned()),
+                ],
+            )?;
+        }
+        for (id, workspace, source, at, signal, status) in [
+            (2, owner, "source-A", first, "harmful", "pending"),
+            (1, owner, "source-A", last, "contradiction", "pending"),
+            (3, owner, "source-A", first, "harmful", "released"),
+            (4, owner, "source-A", first, "harmful", "rejected"),
+            (5, other, "source-A", first, "harmful", "pending"),
+            (6, owner, "source-a", first, "harmful", "pending"),
+        ] {
+            db.execute(
+                "INSERT INTO feedback_quarantine (id, workspace_id, source_id, target_type, target_id, signal, weight, source_type, recorded_at, reason, raw_event_hash, status) VALUES (?1, ?2, ?3, 'source', 'task', ?4, 1.0, 'outcome_observed', ?5, 'fixture', 'blake3:test', ?6)",
+                &[
+                    Value::Text(format!("fq_{id:026}")),
+                    Value::Text(workspace.to_owned()),
+                    Value::Text(source.to_owned()),
+                    Value::Text(signal.to_owned()),
+                    Value::Text(at.to_owned()),
+                    Value::Text(status.to_owned()),
+                ],
+            )?;
+        }
+
+        let signals = db.list_sprt_source_signals(owner, "source-A")?;
+        assert_eq!(
+            signals,
+            ["positive", "helpful", "harmful", "neutral", "confirmation", "contradiction"]
+        );
+        let mut historical: Vec<_> = db
+            .list_feedback_events(owner)?
+            .into_iter()
+            .filter(|row| row.source_id.as_deref() == Some("source-A") && row.weight > 0.0)
+            .map(|row| (row.created_at, row.id, row.signal))
+            .chain(
+                db.list_feedback_quarantine(owner, Some("pending"))?
+                    .into_iter()
+                    .filter(|row| row.source_id == "source-A" && row.weight > 0.0)
+                    .map(|row| (row.recorded_at, row.id, row.signal)),
+            )
+            .collect();
+        historical.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        assert_eq!(
+            signals,
+            historical.into_iter().map(|row| row.2).collect::<Vec<_>>()
+        );
+        assert!(db.list_sprt_source_signals(owner, "missing")?.is_empty());
         Ok(())
     }
 

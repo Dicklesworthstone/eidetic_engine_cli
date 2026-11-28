@@ -4243,40 +4243,15 @@ fn sprt_quarantine_decision_preview(
         return Ok(None);
     };
 
-    let mut stream = Vec::new();
-    for row in connection
-        .list_feedback_events(workspace_id)
+    let signals = connection
+        .list_sprt_source_signals(workspace_id, source_id)
         .map_err(|error| DomainError::Storage {
-            message: format!("Failed to inspect feedback stream for SPRT quarantine: {error}"),
+            message: format!("Failed to inspect source feedback history for SPRT quarantine: {error}"),
             repair: Some("ee doctor".to_owned()),
-        })?
-    {
-        if row.source_id.as_deref() == Some(source_id)
-            && row.weight > 0.0
-            && let Some(observation) = sprt_observation_for_signal(&row.signal)
-        {
-            stream.push((row.created_at, row.id, observation));
-        }
-    }
-    for row in connection
-        .list_feedback_quarantine(workspace_id, Some("pending"))
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to inspect quarantine stream for SPRT quarantine: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })?
-    {
-        if row.source_id == source_id
-            && row.weight > 0.0
-            && let Some(observation) = sprt_observation_for_signal(&row.signal)
-        {
-            stream.push((row.recorded_at, row.id, observation));
-        }
-    }
-    stream.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-
-    let observations = stream
-        .into_iter()
-        .map(|(_, _, observation)| observation)
+        })?;
+    let observations = signals
+        .iter()
+        .filter_map(|signal| sprt_observation_for_signal(signal))
         .chain(std::iter::once(current_observation));
 
     Ok(Some(OutcomeSprtDecision {
