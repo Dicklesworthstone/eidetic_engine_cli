@@ -14,7 +14,7 @@
       "ee daemon start --foreground",
       "# configure a small swarm.adaptive.prefetch_budget_ms and issue context requests that trigger speculative CASS evidence prefetch"
     ],
-    "invocation": "ee daemon request ee.daemon.context --json"
+    "invocation": "# send an ee.daemon.context request over the daemon socket (no ee subcommand sends one)"
   },
   "expected_emission": {
     "code": "cass_prefetch_budget_exceeded",

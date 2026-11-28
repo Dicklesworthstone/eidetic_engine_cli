@@ -12,7 +12,7 @@
     "description": "SRR6.46.3 auto-enrollment ran against a workspace whose IntendedLanePolicy or operator-supplied include/exclude overrides disqualify every discovered peer (all candidates land in an excluded set or the policy decision returns Block for the discovered universe). Auto-enrollment refuses to silently widen the policy; the operator sees the policy block surfaced rather than the absence misread as `_no_eligible_peers`.",
     "setup_commands": [
       "ee init --workspace .",
-      "ee mesh enable --workspace . --json",
+      "printf '[mesh]\\nenabled = true\\n' >> .ee/config.toml",
       "ee mesh auto-enroll --workspace . --exclude '*' --json   # blanket exclude blocks every candidate"
     ],
     "invocation": "ee mesh auto-enroll --workspace . --exclude '*' --json"

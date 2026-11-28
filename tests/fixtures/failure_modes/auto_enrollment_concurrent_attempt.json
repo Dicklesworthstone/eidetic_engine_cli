@@ -12,7 +12,7 @@
     "description": "SRR6.46.3 auto-enrollment detected a sibling process already holding the workspace's auto-enrollment advisory lock — typically a parallel `ee mesh auto-enroll` invocation, the SRR6.46.5 daemon job racing the foreground CLI, or a stale lockfile from a prior crashed process. Auto-enrollment refuses to interleave two materialization attempts onto the same workspace; the second caller backs off and surfaces the contention so the operator can serialize the work.",
     "setup_commands": [
       "ee init --workspace .",
-      "ee mesh enable --workspace . --json",
+      "printf '[mesh]\\nenabled = true\\n' >> .ee/config.toml",
       "ee mesh auto-enroll --workspace . --json &   # first invocation acquires the lock",
       "ee mesh auto-enroll --workspace . --json     # second invocation hits the concurrent guard"
     ],

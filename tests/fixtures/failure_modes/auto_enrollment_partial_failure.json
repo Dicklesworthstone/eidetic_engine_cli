@@ -12,7 +12,7 @@
     "description": "SRR6.46.3 auto-enrollment ran without evidence of a fresh local Tailscale probe in the current invocation (the caller did not pass a populated `fresh_probe_invocations` count). Materialization requires fresh probe evidence to avoid acting on stale autodiscovery state; the auto-enrollment outcome surfaces this code so the caller knows their probe pipeline is the gap, not the discovery itself.",
     "setup_commands": [
       "ee init --workspace .",
-      "ee mesh enable --workspace . --json",
+      "printf '[mesh]\\nenabled = true\\n' >> .ee/config.toml",
       "ee mesh auto-enroll --workspace . --json   # without first running the SRR6.46.1 probe end-to-end"
     ],
     "invocation": "ee mesh auto-enroll --workspace . --json"

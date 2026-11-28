@@ -15,7 +15,7 @@
       "ee remember 'Disconnected cluster alpha.' --workspace . --json",
       "ee remember 'Disconnected cluster beta.' --workspace . --json"
     ],
-    "invocation": "ee curate dry-run --workspace . --json"
+    "invocation": "ee curate disposition --workspace . --json"
   },
   "expected_emission": {
     "code": "graph_curate_disconnected_graph",

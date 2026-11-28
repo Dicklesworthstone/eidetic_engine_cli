@@ -12,7 +12,7 @@
     "description": "SRR6.46.46 auto-enrollment safety layer attempted to record the materialization audit-log entry but the write failed (disk full, permission denied, audit lane shut down, or sibling agent holds the audit-log lock past the timeout). SRR6.46.46.3 forces an abort with `auto_enrollment_audit_failed` rather than silently materializing the peer group without a durable audit record.",
     "setup_commands": [
       "ee init --workspace .",
-      "ee mesh enable --workspace . --json",
+      "printf '[mesh]\\nenabled = true\\n' >> .ee/config.toml",
       "# force the audit-log path to be unwritable (chmod -w .ee/audit/ or fill disk)",
       "ee mesh auto-enroll --workspace . --json"
     ],

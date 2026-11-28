@@ -12,7 +12,7 @@
     "description": "The operator passed --replace-manual-with-auto so SRR6.46.3 migrated the workspace from manual to auto-managed lifecycle, but the peer set the autodiscovery candidates picked DIFFERS from the existing manual peer set hash. Materialization went through; this code surfaces so the operator can review the divergence before relying on the new auto-managed group (the manual config may have included peers the autodiscovery filter would have excluded, or vice versa).",
     "setup_commands": [
       "ee init --workspace .",
-      "ee mesh enable --workspace . --json",
+      "printf '[mesh]\\nenabled = true\\n' >> .ee/config.toml",
       "ee mesh peer add <node-key> --workspace .   # manual configuration that includes peers not visible to autodiscovery, or omits peers autodiscovery would find",
       "ee mesh auto-enroll --workspace . --replace-manual-with-auto --json"
     ],

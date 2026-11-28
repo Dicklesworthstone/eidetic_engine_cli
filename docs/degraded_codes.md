@@ -109,7 +109,7 @@ ee daemon start --foreground
 **Invocation.**
 
 ```bash
-ee daemon request ee.daemon.context --json
+# from the agent above the threshold, send an ee.daemon.context request over the daemon socket (no ee subcommand sends one)
 ```
 
 **Expected emission.** Message contains: `adaptive backoff ... noisy-neighbor`
@@ -806,7 +806,7 @@ ee daemon --foreground --once --workspace . --json
 
 ```bash
 ee init --workspace .
-ee mesh enable --workspace . --json
+printf '[mesh]\nenabled = true\n' >> .ee/config.toml
 ee mesh auto-enroll --workspace . --json   # first run materializes the peer group
 ee mesh auto-enroll --workspace . --json   # this run reports already-complete
 ```
@@ -839,7 +839,7 @@ ee mesh auto-enroll --workspace . --json
 
 ```bash
 ee init --workspace .
-ee mesh enable --workspace . --json
+printf '[mesh]\nenabled = true\n' >> .ee/config.toml
 # force the audit-log path to be unwritable (chmod -w .ee/audit/ or fill disk)
 ee mesh auto-enroll --workspace . --json
 ```
@@ -872,7 +872,7 @@ ee mesh auto-enroll --workspace . --json
 
 ```bash
 ee init --workspace .
-ee mesh enable --workspace . --json
+printf '[mesh]\nenabled = true\n' >> .ee/config.toml
 ee mesh auto-enroll --workspace . --exclude '*' --json   # blanket exclude blocks every candidate
 ```
 
@@ -904,7 +904,7 @@ ee mesh auto-enroll --workspace . --exclude '*' --json
 
 ```bash
 ee init --workspace .
-ee mesh enable --workspace . --json
+printf '[mesh]\nenabled = true\n' >> .ee/config.toml
 ee mesh auto-enroll --workspace . --json &   # first invocation acquires the lock
 ee mesh auto-enroll --workspace . --json     # second invocation hits the concurrent guard
 ```
@@ -937,7 +937,7 @@ ee mesh auto-enroll --workspace . --json
 
 ```bash
 ee init --workspace .
-ee mesh enable --workspace . --json
+printf '[mesh]\nenabled = true\n' >> .ee/config.toml
 ee mesh auto-enroll --workspace . --include 'not-a-node-key' --json
 ```
 
@@ -969,7 +969,7 @@ ee mesh auto-enroll --workspace . --include 'not-a-node-key' --json
 
 ```bash
 ee init --workspace .
-ee mesh enable --workspace . --json
+printf '[mesh]\nenabled = true\n' >> .ee/config.toml
 ee mesh peer add <node-key> --workspace .   # or any equivalent manual peer configuration step
 ee mesh auto-enroll --workspace . --json   # without --replace-manual-with-auto
 ```
@@ -1002,7 +1002,7 @@ ee mesh auto-enroll --workspace . --json
 
 ```bash
 ee init --workspace .
-ee mesh enable --workspace . --json
+printf '[mesh]\nenabled = true\n' >> .ee/config.toml
 ee mesh peer add <node-key> --workspace .   # manual configuration that includes peers not visible to autodiscovery, or omits peers autodiscovery would find
 ee mesh auto-enroll --workspace . --replace-manual-with-auto --json
 ```
@@ -1035,7 +1035,7 @@ ee mesh auto-enroll --workspace . --replace-manual-with-auto --json
 
 ```bash
 ee init --workspace .
-ee mesh enable --workspace . --json
+printf '[mesh]\nenabled = true\n' >> .ee/config.toml
 ee mesh auto-enroll --workspace . --json   # against a tailnet with no other ee-mesh-tagged peers
 ```
 
@@ -1067,7 +1067,7 @@ ee mesh auto-enroll --workspace . --json
 
 ```bash
 ee init --workspace .
-ee mesh enable --workspace . --json
+printf '[mesh]\nenabled = true\n' >> .ee/config.toml
 ee mesh auto-enroll --workspace . --json   # captures node keys
 # rotate the Tailscale node key on one materialized peer
 ee mesh auto-enroll --workspace . --json   # this run trips the guard
@@ -1101,7 +1101,7 @@ ee mesh auto-enroll --workspace . --json
 
 ```bash
 ee init --workspace .
-ee mesh enable --workspace . --json
+printf '[mesh]\nenabled = true\n' >> .ee/config.toml
 ee mesh auto-enroll --workspace . --json   # without first running the SRR6.46.1 probe end-to-end
 ```
 
@@ -1133,7 +1133,7 @@ ee mesh auto-enroll --workspace . --json
 
 ```bash
 ee init --workspace .
-ee mesh enable --workspace . --json
+printf '[mesh]\nenabled = true\n' >> .ee/config.toml
 ee mesh auto-enroll --workspace . --sync-once --json   # materialize plus initial sync; sync step fails
 ```
 
@@ -1165,7 +1165,7 @@ ee mesh auto-enroll --workspace . --sync-once --json
 
 ```bash
 ee init --workspace .
-ee mesh enable --workspace . --json
+printf '[mesh]\nenabled = true\n' >> .ee/config.toml
 ee mesh auto-enroll --workspace . --json   # populates peer group against tailnet-alpha
 tailscale up --login-server <other-coordinator>   # or migrate to tailnet-beta
 ee mesh auto-enroll --workspace . --json   # this run trips the guard
@@ -2341,7 +2341,7 @@ ee daemon start --foreground
 **Invocation.**
 
 ```bash
-ee daemon request ee.daemon.context --json
+# send an ee.daemon.context request over the daemon socket (no ee subcommand sends one)
 ```
 
 **Expected emission.** Message contains: `CASS prefetch ... budget`
@@ -5545,7 +5545,7 @@ ee diag dependencies --workspace . --json
 
 ```bash
 ee init --workspace .
-ee mesh enable --workspace . --json   # populates the SRR6.46.13 discovery cache against tailnet-alpha
+printf '[mesh]\nenabled = true\n' >> .ee/config.toml   # nothing stores a discovery cache yet, so no command populates one
 tailscale up --login-server <other-coordinator>   # or tailscale logout && tailscale up against tailnet-beta
 ```
 
@@ -5577,8 +5577,8 @@ ee mesh status --workspace . --json
 
 ```bash
 ee init --workspace .
-ee mesh enable --workspace . --json   # populates the SRR6.46.13 discovery cache against wsp_alpha
-ee workspace reregister --workspace . --new-id wsp_beta   # or restore .ee/ from a different workspace's backup
+printf '[mesh]\nenabled = true\n' >> .ee/config.toml   # nothing stores a discovery cache yet, so no command populates one
+# restore .ee/ from a different workspace's backup, so a cached workspace id would no longer match
 ```
 
 **Invocation.**
@@ -6769,7 +6769,7 @@ ee remember 'Disconnected cluster beta.' --workspace . --json
 **Invocation.**
 
 ```bash
-ee curate dry-run --workspace . --json
+ee curate disposition --workspace . --json
 ```
 
 **Expected emission.** Message contains: `disconnected graph ... connected component`
@@ -10814,7 +10814,7 @@ ee status --json
 
 ```bash
 ee init --workspace .
-ee cache hotset --workspace . --json
+ee cache hotset-manifest --workspace . --json
 ```
 
 **Invocation.**
@@ -10845,7 +10845,7 @@ Build a tier-aware prewarm report with tier_generation lower than the current pr
 
 ```bash
 ee init --workspace .
-ee mesh enable --workspace .
+printf '[mesh]\nenabled = true\n' >> .ee/config.toml
 ```
 
 **Invocation.**
@@ -11094,7 +11094,7 @@ accept an inbound mesh session
 ```bash
 ee init --workspace . --json
 ee mesh import --workspace . --file peer-body-cached-mismatch.json --json
-ee mesh cache verify --workspace . --body-cache-key body-cache-alpha --json
+# corrupt the cached body for body-cache-alpha so its hash no longer matches (no ee subcommand verifies the body cache)
 ```
 
 **Invocation.**
@@ -19724,5 +19724,5 @@ the gap is one of:
 For new degraded codes, follow the J6 fixture-authoring workflow in
 `tests/fixtures/failure_modes/` (see any existing fixture as a
 template), then regenerate.
-<!-- degraded-codes-fingerprint inputs=sha256:534d2d09b48fe1a16e7e076030dae2bcd3b94a7d49210cf6565f643356e5ef3f -->
-<!-- degraded-codes-fingerprint body=sha256:6b4ac45f4841aaeb27f7365ecdfb71aa4d81ae251ed0ab545796c8d6a85fc7b8 -->
+<!-- degraded-codes-fingerprint inputs=sha256:4f0c2dd83a05cafabce7488c0a91ad96fa1d0f8c80b8232bb4e9353dfc7deee7 -->
+<!-- degraded-codes-fingerprint body=sha256:8ef90d3f9463daac49c97fb606ebbfe01298debf9bd50a64ecebd41e27ddf3e9 -->

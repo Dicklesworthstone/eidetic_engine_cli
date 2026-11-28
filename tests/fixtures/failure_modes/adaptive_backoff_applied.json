@@ -14,7 +14,7 @@
       "ee daemon start --foreground",
       "# drive one agent above the configured p99 threshold while other agents continue context requests"
     ],
-    "invocation": "ee daemon request ee.daemon.context --json"
+    "invocation": "# from the agent above the threshold, send an ee.daemon.context request over the daemon socket (no ee subcommand sends one)"
   },
   "expected_emission": {
     "code": "adaptive_backoff_applied",

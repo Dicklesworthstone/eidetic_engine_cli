@@ -13,7 +13,7 @@
     "setup_commands": [
       "ee init --workspace . --json",
       "ee mesh import --workspace . --file peer-body-cached-mismatch.json --json",
-      "ee mesh cache verify --workspace . --body-cache-key body-cache-alpha --json"
+      "# corrupt the cached body for body-cache-alpha so its hash no longer matches (no ee subcommand verifies the body cache)"
     ],
     "invocation": "ee context 'peer body evidence' --workspace . --memory-scope swarm --json"
   },

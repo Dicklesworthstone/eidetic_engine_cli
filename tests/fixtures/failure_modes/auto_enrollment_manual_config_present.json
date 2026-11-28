@@ -12,7 +12,7 @@
     "description": "The workspace has an existing manual peer configuration (a peer group was previously created by hand or by another tool) and the operator invoked `ee mesh auto-enroll` without --replace-manual-with-auto. SRR6.46.3 refuses to silently switch the workspace from the manual-managed to the auto-managed lifecycle; this code surfaces so the operator makes the migration explicit.",
     "setup_commands": [
       "ee init --workspace .",
-      "ee mesh enable --workspace . --json",
+      "printf '[mesh]\\nenabled = true\\n' >> .ee/config.toml",
       "ee mesh peer add <node-key> --workspace .   # or any equivalent manual peer configuration step",
       "ee mesh auto-enroll --workspace . --json   # without --replace-manual-with-auto"
     ],
